@@ -1,0 +1,44 @@
+{
+ "rap-cape-surface": {
+  "source": "https://noaa-rap-pds.s3.amazonaws.com/rap.20261115/rap.t06z.awp130pgrbf01.grib2 (CAPE:surface .idx byte range, retrieved 2026-11-15)",
+  "sha256": "c82f79b4d6100877333e7b36ca65e23eed94f22f21c56033fa9a9d234f39c8ac",
+  "bytes": 24911,
+  "nx": 451,
+  "ny": 337,
+  "gridType": "lambert",
+  "packingType": "grid_jpeg",
+  "scanningMode": 64,
+  "dataDate": 20261115,
+  "dataTime": 600,
+  "shortName": "cape",
+  "min": 0.0,
+  "max": 4450.0,
+  "mean": 142.13176126905591,
+  "samples": {
+   "0": 340.0,
+   "1": 350.0,
+   "451": 300.0,
+   "1000": 40.0,
+   "50000": 120.0,
+   "76000": 0.0,
+   "100000": 10.0,
+   "151000": 0.0,
+   "151986": 0.0
+  },
+  "lonLat": {
+   "0": [
+    233.86199999999997,
+    16.281000000000002
+   ],
+   "45300": [
+    258.45474968383644,
+    31.733944058444813
+   ],
+   "151986": [
+    302.61892995428195,
+    55.48131134031465
+   ]
+  },
+  "reference": "ecCodes 2.50.0"
+ }
+}

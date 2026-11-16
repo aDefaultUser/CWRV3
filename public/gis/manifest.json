@@ -1,0 +1,65 @@
+{
+ "built": "2026-11-15T13:07:14.325Z",
+ "sources": [
+  {
+   "id": "ne_10m_coastline.zip",
+   "url": "https://naciscdn.org/naturalearth/10m/physical/ne_10m_coastline.zip",
+   "sha256": "bfa04cdbcbef07ef90dfca1dabb48062eca29900a113df0f389303e255484017",
+   "bytes": 3069451
+  },
+  {
+   "id": "ne_10m_lakes.zip",
+   "url": "https://naciscdn.org/naturalearth/10m/physical/ne_10m_lakes.zip",
+   "sha256": "0803a06f9c3cb4671d89b68c48b142aad9366ba40f665245e12a913fbc61722a",
+   "bytes": 2349685
+  },
+  {
+   "id": "ne_10m_rivers_lake_centerlines.zip",
+   "url": "https://naciscdn.org/naturalearth/10m/physical/ne_10m_rivers_lake_centerlines.zip",
+   "sha256": "ded71b01870855ccfe19b51f2ec14c9bb48fae23c0e9f3c11974d426433b5c38",
+   "bytes": 2079507
+  },
+  {
+   "id": "ne_10m_admin_0_boundary_lines_land.zip",
+   "url": "https://naciscdn.org/naturalearth/10m/cultural/ne_10m_admin_0_boundary_lines_land.zip",
+   "sha256": "16ead035f539c8b6c23650c5845d86ad3556553e7456bdf9b4730210f26aacbe",
+   "bytes": 1036202
+  },
+  {
+   "id": "ne_10m_admin_1_states_provinces_lines.zip",
+   "url": "https://naciscdn.org/naturalearth/10m/cultural/ne_10m_admin_1_states_provinces_lines.zip",
+   "sha256": "86acd56ce6c0e47f5fa79725591533b5766f26d6ed1437b086f2b8d4028fe456",
+   "bytes": 5993148
+  },
+  {
+   "id": "cb_2023_us_county_500k.zip",
+   "url": "https://www2.census.gov/geo/tiger/GENZ2023/shp/cb_2023_us_county_500k.zip",
+   "sha256": "99d6597b1fc7767deef62e01d28d8b5dcbd578e151855f7dc0d173cbf5bf0868",
+   "bytes": 11630077
+  },
+  {
+   "id": "cb_2023_us_state_500k.zip",
+   "url": "https://www2.census.gov/geo/tiger/GENZ2023/shp/cb_2023_us_state_500k.zip",
+   "sha256": "4a9b4f5cf993cd23738ac49b58fbb556f1f097fcf5e404a9dc10348dd41f7432",
+   "bytes": 3249332
+  },
+  {
+   "id": "tl_2021_us_primaryroads.zip",
+   "url": "https://www2.census.gov/geo/tiger/TIGER2021/PRIMARYROADS/tl_2021_us_primaryroads.zip",
+   "sha256": "8bd6be45640767a20d80cc11e8034a24fdeb87ee37f56358d5fe74f48e672062",
+   "bytes": 38097437
+  },
+  {
+   "id": "ne_10m_populated_places.zip",
+   "url": "https://naciscdn.org/naturalearth/10m/cultural/ne_10m_populated_places.zip",
+   "sha256": "cd149186f03d2603e0410da399b980a4357d0ac32d3a2305a49ed3dffcc41d7b",
+   "bytes": 2811199
+  },
+  {
+   "id": "nexrad-stations.txt",
+   "url": "https://www.ncei.noaa.gov/access/homr/file/nexrad-stations.txt",
+   "sha256": "bbbc8d95ab49bdc97641f4e55b27fa6988fe85c1680685f982b52bb1070b3e16",
+   "bytes": 40916
+  }
+ ]
+}

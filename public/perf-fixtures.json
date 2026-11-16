@@ -1,0 +1,18 @@
+{
+  "note": "Fixed public archive volumes for reproducible benchmarks (NOAA NEXRAD Level 2 on AWS, Unidata mirror). The benchmark loads these exact objects; tools/perf/run-bench.mjs verifies the SHA-256 of local copies in a local directory passed with --fixtures.",
+  "l2": {
+    "site": "KTLX",
+    "event": "2024-05-06 Oklahoma severe weather, 22:03-22:30 UTC",
+    "base": "https://unidata-nexrad-level2.s3.amazonaws.com/2024/05/06/KTLX/",
+    "files": [
+      { "name": "KTLX20240506_220320_V06", "sha256": "8b6e2b492daa09646e57bb543e1a670e0d0bb87aa748b9a448822027de414bfa" },
+      { "name": "KTLX20240506_220708_V06", "sha256": "f419a6e3c22c894a542c1f6c51b97b229d2928d4fa18d718d4307fd34bee0c93" },
+      { "name": "KTLX20240506_221056_V06", "sha256": "365a87ffc2b7f54be61144135bd5b4a2e998e457842c14636bc5f0a7d3258e83" },
+      { "name": "KTLX20240506_221444_V06", "sha256": "7ee8e106d9a163a1738f69d3404bf0b539489a4fc0eed3c21d37337cdb0662b8" },
+      { "name": "KTLX20240506_221833_V06", "sha256": "688ae45c8823ccb5be75df2ae57e502c581e0526b9509c14faeca6e67f201555" },
+      { "name": "KTLX20240506_222221_V06", "sha256": "1726b4b4e6f92a23e804b52bc36c81f55d2d40ab668860e8d23f2269794db582" },
+      { "name": "KTLX20240506_222610_V06", "sha256": "eb4387783a34f3399a26b3eb91c6cd5656a8cdfc2425339397ed7f271cdf90bb" },
+      { "name": "KTLX20240506_222959_V06", "sha256": "c0af11a3a2003ce443de3dee2c51519f4e0bd808838cc2eda9d1dd422e921294" }
+    ]
+  }
+}

@@ -1,0 +1,15 @@
+/* Noto Sans variable (wdth 62.5-100, wght 100-900), Latin subset, from @fontsource-variable/noto-sans@5.3.0.
+   OFL-1.1, see LICENSE-OFL-1.1-NotoSans.txt. The face is pinned to font-stretch 75% (wdth 75), which is
+   Noto Sans Condensed, so Americana's shield font string `condensed 500 <px> "Noto Sans Condensed", …` resolves
+   to the bundled file. font-feature-settings asks for Americana's proportional figures where the browser honours
+   the descriptor; see README. */
+@font-face {
+  font-family: "Noto Sans Condensed";
+  font-style: normal;
+  font-weight: 100 900;
+  font-stretch: 75%;
+  font-display: block;
+  font-feature-settings: "pnum" 1;
+  src: url("./noto-sans-latin-wdth-normal.woff2") format("woff2-variations"), url("./noto-sans-latin-wdth-normal.woff2") format("woff2");
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
