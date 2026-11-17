@@ -44,8 +44,9 @@ Probe reads the displayed value under the pointer.
   shrink only the General timeline. The end delay holds the newest frame. Timing changes apply to the frame in
   progress; the Play button's tooltip shows the loop, frame count and applied frame time. Skip to end pauses on the
   newest available frame and follows newer frames as they arrive.
-* Level 2 download volumes is how many of the newest volumes are fetched; max memory volumes is how many are kept as
-  new scans arrive (lowering it drops the oldest at once).
+* Level 2 max memory volumes is the loop length in volumes: the newest volume loads first, the older ones fill in
+  behind it, and each new scan drops the oldest (lowering it drops the oldest at once). Level 2 download volumes is
+  how many download at once, capped at 4 for TGFTP and custom servers, which go through the hosted proxy.
 * Extended GOES-R Data → Product "Level 2 Product": cloud-top height (`ABI-L2-ACHA`, CONUS / Full Disk /
   Mesoscale), cloud-top temperature (`ABI-L2-ACHT`, Full Disk / Mesoscale; not produced for CONUS) and fire/hot spot
   with fire radiative power (`ABI-L2-FDC`, CONUS / Full Disk / Mesoscale) from GOES-19 or GOES-18. Cloud-top values
