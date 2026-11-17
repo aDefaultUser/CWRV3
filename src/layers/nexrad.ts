@@ -21,6 +21,7 @@ import { hailThresholds } from '../settings/postload';
 import { perfMark } from '../perf/meter';
 import { ChunkFeed } from '../radar/chunks';
 import { loadPref, savePref, prefObject } from '../app/persist';
+import { eachLimit } from './frames';
 
 export interface TiltTab { key: string; label: string; angle: number; sweepIndices: number[] }
 
@@ -34,6 +35,8 @@ interface L3Frame { t: number; url: string; id: string; tex?: SweepTex; raster?:
 
 /** An automatic storm motion vector is current for this long after its product's volume time. */
 export const AUTO_MOTION_MAX_AGE = 20 * 60e3;
+/** Volume/file loads in flight per refresh, newest first. */
+const FRAME_LOADS = 4;
 const kmToLonLat = (lon0: number, lat0: number, x: number, y: number): [number, number] => [lon0 + x / (111.2 * Math.cos((lat0 * Math.PI) / 180)), lat0 + y / 111.2];
 
 export class NexradLayer extends MapLayer {
@@ -262,7 +265,7 @@ export class NexradLayer extends MapLayer {
     for (const f of this.l2) if (!next.includes(f)) f.sweep?.tex.destroy();
     this.l2 = next;
     if (this.liveScan) { const lf = this.l2.find((f) => f.file.live); if (lf) { lf.key = undefined; lf.file = { ...newest, live: true }; } }
-    await Promise.all([...this.l2].reverse().map((f) => this.loadL2(f)));
+    await eachLimit([...this.l2].reverse(), FRAME_LOADS, (f) => this.loadL2(f));
     if (gen === this.gen) this.updateL2Status();
   }
 
@@ -428,7 +431,7 @@ export class NexradLayer extends MapLayer {
     const next: L3Frame[] = wanted.map((w) => keep.get(`${w.url}@${w.t}`) ?? { t: w.t, url: w.url, id: key });
     for (const f of this.l3) if (!next.includes(f)) { f.tex?.tex.destroy(); f.raster?.tex.destroy(); }
     this.l3 = next;
-    await Promise.all([...this.l3].reverse().map((f) => this.loadL3(f, p)));
+    await eachLimit([...this.l3].reverse(), FRAME_LOADS, (f) => this.loadL3(f, p));
     if (!current()) return;
     const ready = this.shownL3();
     this.statusText = ready.length ? `${p.awips}: ${ready.length}/${this.l3.length} frames` : wanted.length ? 'Awaiting new volume...' : `No ${p.awips} files at ${site}`;

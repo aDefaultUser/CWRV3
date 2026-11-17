@@ -24,7 +24,8 @@ export const ALLOWED_HOSTS = new Set([
   'droughtmonitor.unl.edu',             // drought monitor shapefile
 ]);
 export const MAX_BYTES = 160 * 1024 * 1024;
-const TIMEOUT_MS = 45_000;
+/** Aborts when upstream sends nothing for this long (before headers or mid-body); large files may take longer. */
+const STALL_MS = 20_000;
 export const MAX_REDIRECTS = 4;
 const USER_AGENT = 'cwrv3-local-proxy (local research client)';
 
@@ -74,7 +75,9 @@ export async function handleProxy(req, res) {
   const first = checkTarget(`https://${host}${slash < 0 ? '/': rest.slice(slash)}`);
   if (first.error) return deny(403, first.error);
   const ctl = new AbortController();
-  const timer = setTimeout(() => ctl.abort(), TIMEOUT_MS);
+  let timer;
+  const arm = () => { clearTimeout(timer); timer = setTimeout(() => ctl.abort(), STALL_MS); };
+  arm();
   req.on('close', () => { if (!res.writableEnded) ctl.abort(); });
   try {
     // Directory indexes change every few minutes; ask intermediaries for a fresh copy.
@@ -100,6 +103,7 @@ export async function handleProxy(req, res) {
     let total = 0;
     const body = Readable.fromWeb(up.body);
     body.on('data', (chunk) => {
+      arm();
       total += chunk.length;
       if (total > MAX_BYTES) { body.destroy(); res.destroy(); }
     });
