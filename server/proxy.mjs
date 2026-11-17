@@ -1,66 +1,17 @@
-// Loopback-only CORS proxy for public sources that send no Access-Control-Allow-Origin header (,
-//). Bounded: fixed host allowlist, GET/HEAD only, response size cap, timeouts, loopback clients
-// only, and every redirect hop is validated *before* it is requested. Not a generic proxy.
+// Loopback-only CORS proxy for local development and `npm run serve`. The allowlist, redirect validation and size
+// cap live in proxy-rules.mjs, shared with the hosted proxy (functions/proxy/[[path]].ts); this file adds the Node
+// side: loopback clients only, a stall timeout and streaming the body to the response.
 import { Readable } from 'node:stream';
+import { MAX_BYTES, PASS_HEADERS, PROXY_PREFIX, fetchValidated, proxyTarget } from './proxy-rules.mjs';
 
-export const PROXY_PREFIX = '/proxy/';
-export const ALLOWED_HOSTS = new Set([
-  'tgftp.nws.noaa.gov',                 // NEXRAD L2/L3, NDFD, SPC/WPC/NHC text, HDOB, METAR bulletins
-  'mesonet-nexrad.agron.iastate.edu',   // NEXRAD L2 custom server default (source 4)
-  'mrms.ncep.noaa.gov',                 // MRMS real-time directory (alternative to the AWS bucket)
-  'nomads.ncep.noaa.gov',               // RAP/model GRIB2 when settings.modelDataSource = NOMADS
-  'www2.census.gov',                    // TIGER/Line roads downloaded from the Roads dialog
-  'naciscdn.org',                       // Natural Earth (GIS complement)
-  'www.weather.gov',                    // NWS county shapefile directory
-  'aviationweather.gov',                // METAR JSON (public alternative to the bulletin feed)
-  'www.ndbc.noaa.gov',                  // buoy/ship observations, station list, buoy explorer files
-  'madis-data.ncep.noaa.gov',           // METAR station table
-  'ftp.wpc.ncep.noaa.gov',              // WPC QPF/ERO/winter/PWPF (302 → ftp-wpc)
-  'ftp-wpc.ncep.noaa.gov',
-  'ftp.cpc.ncep.noaa.gov',              // CPC outlooks
-  'ftp.nhc.noaa.gov',                   // ATCF tcvitals, b-decks, a-decks, advisory/discussion text
-  'www.nhc.noaa.gov',                   // NHC GIS (cone, watches/warnings, formation outlook)
-  'firms.modaps.eosdis.nasa.gov',       // fire detections
-  'droughtmonitor.unl.edu',             // drought monitor shapefile
-]);
-export const MAX_BYTES = 160 * 1024 * 1024;
+export { ALLOWED_HOSTS, MAX_BYTES, MAX_REDIRECTS, PROXY_PREFIX, checkTarget, fetchValidated } from './proxy-rules.mjs';
+
 /** Aborts when upstream sends nothing for this long (before headers or mid-body); large files may take longer. */
 const STALL_MS = 20_000;
-export const MAX_REDIRECTS = 4;
 const USER_AGENT = 'cwrv3-local-proxy (local research client)';
 
 function isLoopback(addr) {
   return addr === '127.0.0.1' || addr === '::1' || addr === '::ffff:127.0.0.1';
-}
-
-/** Validates one hop target. Returns the URL object or a refusal reason. */
-export function checkTarget(raw, base) {
-  let u;
-  try { u = new URL(raw, base); } catch { return { error: 'bad redirect target' }; }
-  if (u.protocol !== 'https:') return { error: `protocol not allowed: ${u.protocol}` };
-  if (u.username || u.password) return { error: 'credentials in URL not allowed' };
-  if (u.port && u.port !== '443') return { error: `port not allowed: ${u.port}` };
-  if (!ALLOWED_HOSTS.has(u.hostname)) return { error: `host not allowed: ${u.hostname}` };
-  return { url: u };
-}
-
-/**
- * Fetches with manual redirect handling: each Location is validated against the allowlist (https, default
- * port, no credentials) before the next request is made, up to MAX_REDIRECTS hops.
- */
-export async function fetchValidated(target, init, fetchImpl = fetch) {
-  let current = target;
-  for (let hop = 0; ; hop++) {
-    const up = await fetchImpl(current.href, {...init, redirect: 'manual' });
-    if (up.status < 300 || up.status > 399 || up.status === 304) return { up, url: current };
-    const loc = up.headers.get('location');
-    try { await up.body?.cancel(); } catch { /* already consumed */ }
-    if (!loc) return { error: 'redirect without location', status: 502 };
-    if (hop >= MAX_REDIRECTS) return { error: 'too many redirects', status: 502 };
-    const next = checkTarget(loc, current);
-    if (next.error) return { error: `redirect refused: ${next.error}`, status: 502 };
-    current = next.url;
-  }
 }
 
 /** Connect/Node middleware. Returns true when the request was handled. */
@@ -69,10 +20,7 @@ export async function handleProxy(req, res) {
   const deny = (code, msg) => { res.statusCode = code; res.setHeader('content-type', 'text/plain'); res.setHeader('access-control-allow-origin', '*'); res.end(msg); return true; };
   if (!isLoopback(req.socket.remoteAddress)) return deny(403, 'loopback clients only');
   if (req.method !== 'GET' && req.method !== 'HEAD') return deny(405, 'GET/HEAD only');
-  const rest = req.url.slice(PROXY_PREFIX.length);
-  const slash = rest.indexOf('/');
-  const host = slash < 0 ? rest: rest.slice(0, slash);
-  const first = checkTarget(`https://${host}${slash < 0 ? '/': rest.slice(slash)}`);
+  const first = proxyTarget(req.url);
   if (first.error) return deny(403, first.error);
   const ctl = new AbortController();
   let timer;
@@ -91,7 +39,7 @@ export async function handleProxy(req, res) {
     res.statusCode = up.status;
     // fetch() transparently decodes gzip/br, so the upstream content-length only applies to identity bodies.
     const encoded = !!up.headers.get('content-encoding');
-    for (const h of ['content-type', 'content-length', 'last-modified', 'etag', 'content-range', 'accept-ranges']) {
+    for (const h of PASS_HEADERS) {
       if (h === 'content-length' && encoded) continue;
       const v = up.headers.get(h);
       if (v) res.setHeader(h, v);
