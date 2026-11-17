@@ -7,7 +7,7 @@ class Mem { m = new Map<string, string>(); getItem(k: string) { return this.m.ge
 describe('settings defaults and ranges', () => {
   it('pins defaults that differ from naive choices', () => {
     const s = new SettingsStore();
-    expect(s.get('settings.nexradL2DataSource')).toBe(2);
+    expect(s.get('settings.nexradL2DataSource')).toBe(3); // AWS: browsers fetch it directly, no proxy hop
     expect(s.get('config.radarSites.SitesColor')).toEqual([100, 255, 255]);
     expect(s.get('config.terrainOceanColor')).toEqual([0, 10, 38]);
     expect(s.get('config.terrainGlossiness')).toBe(1.75);

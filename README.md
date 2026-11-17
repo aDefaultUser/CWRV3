@@ -25,7 +25,11 @@ npm run build && npm run serve    # production build, http://127.0.0.1:4173/
 GIS data is included. Run `npm run gis` only to rebuild it from the public sources.
 
 Both servers listen on loopback only and include a small proxy (`server/proxy.mjs`) for public hosts that send no
-CORS headers: GET/HEAD from 127.0.0.1 to a fixed HTTPS allowlist, with redirect, size and time limits.
+CORS headers: GET/HEAD from 127.0.0.1 to a fixed HTTPS allowlist, with redirect, size and stall limits.
+
+For shared PHP hosting, `dist/` is the whole site: `public/.htaccess` routes `/proxy/*` to `public/proxy.php`, a
+port of the same proxy (same-origin clients instead of loopback). Shared hosting bandwidth is limited, so Level 2
+defaults to the AWS bucket, which browsers fetch directly.
 
 ## Using CWRV3
 
@@ -131,7 +135,7 @@ Exact parity with the original program is not claimed. Known differences:
 * NAM-family and HiresW model feeds were unavailable from the public servers when last checked (HTTP 404 on
   2026-11-15) and are reported as unavailable instead of being substituted.
 * The live sweep depends on the public real-time chunk bucket being current for the site; otherwise it falls back to
-  the TGFTP volume and says so.
+  the newest full volume (with the TGFTP source, the volume still being written) and says so.
 
 ## Performance
 

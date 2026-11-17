@@ -1,4 +1,15 @@
 // Time-indexed frame cache with newest-first progressive loading and bounded concurrency.
+
+/**
+ * Runs `fn` over `items` in order with at most `limit` calls in flight. Frame loads go through it so a refresh
+ * never opens one request per frame at once (the hosted proxy serves at most ~20 concurrent requests).
+ */
+export async function eachLimit<T>(items: readonly T[], limit: number, fn: (item: T) => Promise<unknown>): Promise<void> {
+  let next = 0;
+  const worker = async () => { while (next < items.length) await fn(items[next++]); };
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+}
+
 export interface FrameEntry<T> { t: number; key: string; state: 'pending' | 'loading' | 'ready' | 'error'; data?: T; error?: string }
 
 export class FrameStore<T> {
