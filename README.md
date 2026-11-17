@@ -27,10 +27,9 @@ GIS data is included. Run `npm run gis` only to rebuild it from the public sourc
 Both servers listen on loopback only and include a small proxy (`server/proxy.mjs`) for public hosts that send no
 CORS headers: GET/HEAD from 127.0.0.1 to a fixed HTTPS allowlist, with redirect, size and stall limits.
 
-For shared PHP hosting, `dist/` is the whole site: `public/.htaccess` routes `/proxy/*` to `public/proxy.php`, a
-port of the same proxy (same-origin clients instead of loopback), and serves the gzip copies of the GIS files that
-the build writes next to them. Shared hosting bandwidth is limited, so Level 2 defaults to the AWS bucket, which
-browsers fetch directly.
+The hosted site runs on Cloudflare Pages (`npm run deploy`): `dist/` is served from the CDN and
+`functions/proxy/[[path]].ts` is the same proxy as a Pages Function (same-origin clients instead of loopback), with
+the rules shared through `server/proxy-rules.mjs`. Level 2 defaults to the AWS bucket, which browsers fetch directly.
 
 ## Using CWRV3
 
