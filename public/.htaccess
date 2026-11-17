@@ -8,11 +8,28 @@ RewriteRule ^ https://%{HTTP_HOST}%{REQUEST_URI} [R=301,L]
 # CORS proxy for public NOAA/NWS hosts (PHP port of server/proxy.mjs).
 RewriteRule ^proxy/ proxy.php [L,END]
 
+# GIS data (~16 MB) must arrive before the map can draw, and this host does not compress .bin/.json itself: serve
+# the gzip copies the build writes next to each file (vite.config.ts) to clients that accept gzip.
+RewriteCond %{HTTP:Accept-Encoding} gzip
+RewriteCond %{REQUEST_FILENAME}.gz -f
+RewriteRule ^gis/(.+\.(bin|json))$ gis/$1.gz [L,E=gis_gz:1]
+
 AddType application/wasm .wasm
 AddType text/javascript .js .mjs
 AddType application/octet-stream .bin
 
+<FilesMatch "\.bin\.gz$">
+  ForceType application/octet-stream
+</FilesMatch>
+<FilesMatch "\.json\.gz$">
+  ForceType application/json
+</FilesMatch>
+
 <IfModule mod_headers.c>
+  <FilesMatch "\.(bin|json)\.gz$">
+    Header set Content-Encoding gzip
+    Header append Vary Accept-Encoding
+  </FilesMatch>
   # Hashed build assets never change; index.html must always be revalidated.
   <FilesMatch "\.(js|css|wasm|svg)$">
     Header set Cache-Control "public, max-age=31536000, immutable"
