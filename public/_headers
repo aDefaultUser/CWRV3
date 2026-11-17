@@ -1,0 +1,5 @@
+# Cloudflare Pages response headers. Files directly in /assets/ are Vite's content-hashed build output, so a changed
+# file always gets a new name and browsers can keep them for a year. Subfolders (icons, roads, branding) and /gis are
+# not hashed and keep the default revalidation.
+/assets/:file
+  Cache-Control: public, max-age=31536000, immutable
