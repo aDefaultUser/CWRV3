@@ -28,8 +28,9 @@ Both servers listen on loopback only and include a small proxy (`server/proxy.mj
 CORS headers: GET/HEAD from 127.0.0.1 to a fixed HTTPS allowlist, with redirect, size and stall limits.
 
 For shared PHP hosting, `dist/` is the whole site: `public/.htaccess` routes `/proxy/*` to `public/proxy.php`, a
-port of the same proxy (same-origin clients instead of loopback). Shared hosting bandwidth is limited, so Level 2
-defaults to the AWS bucket, which browsers fetch directly.
+port of the same proxy (same-origin clients instead of loopback), and serves the gzip copies of the GIS files that
+the build writes next to them. Shared hosting bandwidth is limited, so Level 2 defaults to the AWS bucket, which
+browsers fetch directly.
 
 ## Using CWRV3
 
