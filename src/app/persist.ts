@@ -1,11 +1,8 @@
 // Browser persistence for every user preference outside the settings catalog (styles, presets, recipes, tool
 // options, lists). Values are small JSON documents in localStorage under the "cwrv3." prefix; large user files live
-// in Cache Storage instead. Keys written by earlier builds ("wsv3web.") are migrated once, before any module reads
-// its preferences. A failed write is reported (onSaveFailure) and returned as false, never treated as saved.
+// in Cache Storage instead. A failed write is reported (onSaveFailure) and returned as false, never treated as saved.
 
 export const PREFIX = 'cwrv3.';
-export const LEGACY_PREFIX = 'wsv3web.';
-const MIGRATED = PREFIX + 'migratedFromWsv3web';
 
 export type KV = Pick<Storage, 'getItem' | 'setItem' | 'removeItem' | 'key'> & { readonly length: number };
 
@@ -78,51 +75,6 @@ export const isArray = (v: unknown) => Array.isArray(v);
 export const isRecord = (v: unknown) => !!v && typeof v === 'object' && !Array.isArray(v);
 export const isBool = (v: unknown) => typeof v === 'boolean';
 
-/** Storage key of a settings document; legacy settings documents carried the original INI names. */
-const LEGACY_KEYS: Record<string, string> = { WSV3Settings: 'CWRV3Settings', WSV3ConfigurationSettings: 'CWRV3ConfigurationSettings' };
-
-/**
- * One-time migration of "wsv3web." keys. A key already present under the new prefix wins. Legacy keys are removed
- * only after every copy succeeded, so an interrupted or failed migration is retried on the next start. Earlier
- * builds wrote the whole configuration document on first run, so the old FPS defaults (60 active, 50 loop) are
- * indistinguishable from untouched values and move to the new default (unlimited, follow the target).
- */
-export function migrateLegacyStorage(s: KV): string[] {
-  try { if (s.getItem(MIGRATED)) return []; } catch (err) { console.error('CWRV3: browser storage is not readable; earlier preferences were not migrated', err); return []; }
-  const legacy: string[] = [];
-  for (let i = 0; i < s.length; i++) { const k = s.key(i); if (k?.startsWith(LEGACY_PREFIX)) legacy.push(k); }
-  const moved: string[] = [];
-  try {
-    for (const k of legacy) {
-      const name = k.slice(LEGACY_PREFIX.length);
-      const target = PREFIX + (LEGACY_KEYS[name] ?? name);
-      let value = s.getItem(k);
-      if (value === null || s.getItem(target) !== null) continue;
-      if (name === 'WSV3ConfigurationSettings') value = migrateFpsDefaults(value);
-      s.setItem(target, value);
-      moved.push(target);
-    }
-    s.setItem(MIGRATED, new Date().toISOString());
-  } catch (err) {
-    reportSaveFailure('preferences from the earlier version', err);
-    return moved;
-  }
-  for (const k of legacy) s.removeItem(k);
-  return moved;
-}
-
-function migrateFpsDefaults(raw: string): string {
-  try {
-    const doc = JSON.parse(raw) as { values?: Record<string, unknown> };
-    const v = doc.values ?? {};
-    if (v['config.generalActiveFPS'] === 60) v['config.generalActiveFPS'] = 0;
-    if (v['config.generalRestingFPSLoop'] === 50) v['config.generalRestingFPSLoop'] = 0;
-    return JSON.stringify(doc);
-  } catch { return raw; } // unparsable documents are copied as-is; the settings loader reports them
-}
-
-if (kv) migrateLegacyStorage(kv);
-
 /** Cache Storage names: user files (shapefiles, custom backgrounds) and downloaded public data. */
 export const USER_FILES_CACHE = 'cwrv3-user-files';
 export const DATA_CACHE = 'cwrv3-data-v1';
@@ -130,7 +82,6 @@ export const DATA_CACHE = 'cwrv3-data-v1';
 /** Stores a user file in Cache Storage under `key`; false (and a reported failure) when the browser rejects it. */
 export async function storeUserFile(key: string, file: Blob, what: string): Promise<boolean> {
   try {
-    await cachesReady;
     await (await caches.open(USER_FILES_CACHE)).put(key, new Response(file, { headers: { 'content-type': file.type || 'application/octet-stream' } }));
     return true;
   } catch (err) { reportSaveFailure(`${what} (kept for this session only)`, err); return false; }
@@ -138,32 +89,7 @@ export async function storeUserFile(key: string, file: Blob, what: string): Prom
 /** Object URL of a stored user file, or null when none is stored. */
 export async function userFileUrl(key: string): Promise<string | null> {
   try {
-    await cachesReady;
     const hit = await (await caches.open(USER_FILES_CACHE)).match(key);
     return hit ? URL.createObjectURL(await hit.blob()) : null;
   } catch (err) { console.warn(`CWRV3: stored file ${key} could not be read`, err); return null; }
 }
-
-/**
- * Moves user files from the earlier cache name once (copy, then delete the old cache only when every copy
- * succeeded). The old downloaded-data cache is dropped: its contents are re-downloadable public data.
- * Every Cache Storage user awaits this before opening a cache.
- */
-export const cachesReady: Promise<void> = (async () => {
-  // Window context only: workers share Cache Storage and must not race the migration.
-  if (typeof caches === 'undefined' || typeof window === 'undefined') return;
-  try {
-    if (await caches.has('wsv3-user-files')) {
-      const from = await caches.open('wsv3-user-files'), to = await caches.open(USER_FILES_CACHE);
-      for (const req of await from.keys()) {
-        if (await to.match(req)) continue;
-        const res = await from.match(req);
-        if (res) await to.put(req, res);
-      }
-      await caches.delete('wsv3-user-files');
-    }
-    await caches.delete('wsv3-data-v1');
-  } catch (err) {
-    reportSaveFailure('user files from the earlier version (they stay in the old cache and are retried next start)', err);
-  }
-})();

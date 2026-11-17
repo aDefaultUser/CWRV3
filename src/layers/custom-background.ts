@@ -5,7 +5,7 @@ import type { DrawContext, Renderer } from '../render/renderer';
 import { MapLayer } from './base';
 import { settings } from '../settings/store';
 import { RasterDraw, latLonProj } from '../render/raster';
-import { USER_FILES_CACHE, cachesReady, reportSaveFailure } from '../app/persist';
+import { USER_FILES_CACHE, reportSaveFailure } from '../app/persist';
 
 const CACHE = USER_FILES_CACHE;
 const KEY = { image: '/custom-bg/image', world: '/custom-bg/world' } as const;
@@ -34,7 +34,6 @@ export class CustomBackgroundLayer extends MapLayer {
 
   /** Stores a picked file and reloads. */
   async store(kind: keyof typeof KEY, file: File, edit: (write: () => void) => void = (write) => write()) {
-    await cachesReady;
     const c = await caches.open(CACHE);
     try { await c.put(KEY[kind], new Response(file, { headers: { 'content-type': file.type || 'application/octet-stream' } })); } catch (err) { reportSaveFailure(`custom background ${file.name}`, err); throw err; }
     edit(() => settings.set(kind === 'image' ? 'ext.config.bgCustomImage' : 'ext.config.bgCustomWorldFile', file.name));
@@ -44,7 +43,6 @@ export class CustomBackgroundLayer extends MapLayer {
   async load() {
     this.error = '';
     try {
-      await cachesReady;
       const c = await caches.open(CACHE);
       const [img, wld] = await Promise.all([c.match(KEY.image), c.match(KEY.world)]);
       if (!img || !wld) return;

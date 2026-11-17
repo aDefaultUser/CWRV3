@@ -16,7 +16,7 @@ export function docOf(def: SettingDef): DocName | null {
   if (def.postLoad === 'derivedSiteIdx') return null; // derived at load, never stored
   if (def.legacy) return null; // read-only migration input, never written
   if (def.owner === 'LayerState') return 'ProductStatus';
-  if (def.owner === 'TWSV3Settings' || def.owner === null) return 'CWRV3Settings';
+  if (def.owner === 'CWRV3Settings' || def.owner === null) return 'CWRV3Settings';
   return 'CWRV3ConfigurationSettings';
 }
 
@@ -99,9 +99,8 @@ export interface SettingsDocument { schema: string; savedAt: string; doc?: DocNa
 export type KV = Pick<Storage, 'getItem' | 'setItem'>;
 
 const isPlainObject = (v: unknown): v is Record<string, unknown> => !!v && typeof v === 'object' && !Array.isArray(v);
-/** Export schemas this build reads: its own and the earlier "wsv3-web" builds (same IDs, older document names). */
-const KNOWN_SCHEMA = /^(cwrv3|wsv3-web)\/settings@[1-3]$/;
-const LEGACY_DOC_NAMES: Record<string, DocName> = { WSV3Settings: 'CWRV3Settings', WSV3ConfigurationSettings: 'CWRV3ConfigurationSettings' };
+/** Export schemas this build reads. */
+const KNOWN_SCHEMA = /^cwrv3\/settings@[1-3]$/;
 const UNAVAILABLE = 'browser storage is unavailable';
 
 /**
@@ -113,7 +112,7 @@ export function validateSettingsDocument(doc: unknown): { values: Record<string,
   const schema = doc.schema;
   if (schema !== undefined && (typeof schema !== 'string' || !KNOWN_SCHEMA.test(schema))) throw new Error(`unsupported settings schema ${JSON.stringify(schema)}`);
   const name = doc.doc ?? 'all';
-  const target = typeof name === 'string' ? (name === 'all' || DOCS.includes(name as DocName) ? name as DocName | 'all' : LEGACY_DOC_NAMES[name]) : undefined;
+  const target = name === 'all' || DOCS.includes(name as DocName) ? name as DocName | 'all' : undefined;
   if (!target) throw new Error(`unknown settings document ${JSON.stringify(name)}`);
   return { values: doc.values, target, complete: schema !== undefined };
 }

@@ -1,6 +1,6 @@
 // Network access: loopback proxy routing for non-CORS public hosts, Cache API persistence for immutable
 // archive objects, in-flight de-duplication and download progress accounting. Usable in workers.
-import { DATA_CACHE, cachesReady } from '../app/persist';
+import { DATA_CACHE } from '../app/persist';
 
 /** Hosts reached through the app-owned loopback proxy (server/proxy.mjs) because they send no CORS headers. */
 export const PROXY_HOSTS = new Set([
@@ -9,13 +9,13 @@ export const PROXY_HOSTS = new Set([
   'ftp.cpc.ncep.noaa.gov', 'ftp.nhc.noaa.gov', 'www.nhc.noaa.gov', 'firms.modaps.eosdis.nasa.gov', 'droughtmonitor.unl.edu',
 ]);
 /** Vendor and licensing hosts that must never be contacted. */
-const FORBIDDEN = /(^|\.)wsv3\.com$|wsv3[\w-]*\.s3\.amazonaws\.com$|^52\.201\.19\.154$|execute-api\.us-east-1\.amazonaws\.com$|wyday\.com$|limelm\.com$|xrad3d\.net$/i;
+const FORBIDDEN = /^52\.201\.19\.154$|execute-api\.us-east-1\.amazonaws\.com$|wyday\.com$|limelm\.com$|xrad3d\.net$/i;
 
 const CACHE_NAME = DATA_CACHE;
 
 export function routeUrl(url: string): string {
   const u = new URL(url);
-  if (FORBIDDEN.test(u.hostname) || (u.hostname === 's3.amazonaws.com' && /^\/wsv3/i.test(u.pathname))) throw new Error(`blocked vendor host: ${u.hostname}`);
+  if (FORBIDDEN.test(u.hostname)) throw new Error(`blocked vendor host: ${u.hostname}`);
   if (PROXY_HOSTS.has(u.hostname)) {
     const origin = typeof location !== 'undefined' ? location.origin : 'http://127.0.0.1:5173';
     return `${origin}/proxy/${u.hostname}${u.pathname}${u.search}`;
@@ -46,7 +46,7 @@ const inflight = new Map<string, Shared>();
 export function abortAll(): number { const n = inflight.size; for (const s of inflight.values()) s.ctl.abort(); inflight.clear(); return n; }
 
 async function openCache(): Promise<Cache | null> {
-  try { await cachesReady; return typeof caches !== 'undefined' ? await caches.open(CACHE_NAME) : null; } catch { return null; } // no cache: fetch from the network
+  try { return typeof caches !== 'undefined' ? await caches.open(CACHE_NAME) : null; } catch { return null; } // no cache: fetch from the network
 }
 
 const abortError = () => new DOMException('The operation was aborted.', 'AbortError');

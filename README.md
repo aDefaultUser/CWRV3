@@ -95,7 +95,6 @@ Large user files (shapefiles, custom background, logo, overlay image) are kept i
   with JSON export/import (imports use the same type, range and post-load rules as loading; a file that is not a
   settings export, or has no valid value for its document, is rejected without changing anything, and a
   one-document export resets only that document).
-* Preferences of earlier builds (`wsv3web.*` keys, `wsv3-user-files` cache) are migrated once, automatically.
 
 ## Frame rate
 
@@ -184,7 +183,7 @@ Mesonet, NASA GIBS imagery and AWS Terrain Tiles. Bundled GIS layers come from N
 
 | Part | Lines |
 | --- | ---: |
-| TypeScript / JavaScript | 17,367 |
+| TypeScript / JavaScript | 17,307 |
 | WGSL shaders | 689 |
-| **Total functional** | **18,056** |
+| **Total functional** | **17,996** |
 | CSS (separate) | 174 |

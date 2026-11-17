@@ -9,7 +9,7 @@ export type PostLoadRule =
 export interface SettingDef {
   id: string;
   scope: string;
-  /** Owner record: TWSV3Settings (main document), TWSV3ConfigurationSettings (+ sub-records) or LayerState. */
+  /** Owner record: CWRV3Settings (main document), CWRV3ConfigurationSettings (+ sub-records) or LayerState. */
   owner: string | null;
   type: SettingType;
   storage: string | null;

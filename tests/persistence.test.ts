@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { SettingsStore, SETTING_DEFS, PALETTE_SETTINGS } from '../src/settings/store';
-import { migrateLegacyStorage, onSaveFailure, prefObject, loadPref, savePref, useStorage, PREFIX } from '../src/app/persist';
+import { SettingsStore, SETTING_DEFS, PALETTE_SETTINGS, docOf } from '../src/settings/store';
+import { onSaveFailure, prefObject, loadPref, savePref, useStorage, PREFIX } from '../src/app/persist';
 
 /** In-memory Web Storage with an optional write failure (quota). */
 class Mem {
@@ -360,7 +360,7 @@ describe('settings import validation', () => {
 
   it('reads earlier exports and partial documents without resetting what they leave out', () => {
     const s = changed();
-    const legacy = { schema: 'wsv3-web/settings@2', doc: 'WSV3Settings', values: { 'settings.nrSmoothing': false, 'layerState.NWSConvectiveOutlooksTypeIdx': 5 } };
+    const legacy = { schema: 'cwrv3/settings@2', doc: 'CWRV3Settings', values: { 'settings.nrSmoothing': false, 'layerState.NWSConvectiveOutlooksTypeIdx': 5 } };
     const copy = structuredClone(legacy);
     expect(s.importDocument(legacy).applied).toBe(1);
     expect(legacy).toEqual(copy); // the caller's object is not changed by migration
@@ -370,57 +370,49 @@ describe('settings import validation', () => {
     expect(all.importDocument({ values: { 'settings.nrSmoothing': false } }).applied).toBe(1); // no schema: partial
     untouched(all);
     const migrated = new SettingsStore();
-    const outlook = { schema: 'wsv3-web/settings@2', values: { 'layerState.NWSConvectiveOutlooksTypeIdx': 5 } };
+    const outlook = { schema: 'cwrv3/settings@2', values: { 'layerState.NWSConvectiveOutlooksTypeIdx': 5 } };
     migrated.importDocument(outlook);
     expect(migrated.get('layerState.NWSConvectiveOutlooksFamilyIdx')).toBe(2);
     expect(outlook.values).toEqual({ 'layerState.NWSConvectiveOutlooksTypeIdx': 5 });
   });
 });
 
-describe('legacy wsv3web.* migration', () => {
-  const legacy = () => {
-    const mem = new Mem();
-    mem.setItem('wsv3web.WSV3Settings', JSON.stringify({ values: { 'settings.nrAlpha': 99 } }));
-    mem.setItem('wsv3web.WSV3ConfigurationSettings', JSON.stringify({ values: { 'config.generalActiveFPS': 60, 'config.generalRestingFPSLoop': 50, 'config.generalRestingFPS': 20 } }));
-    mem.setItem('wsv3web.ProductStatus', JSON.stringify({ values: { 'layerState.LightningOn': true } }));
-    mem.setItem('wsv3web.viewpoints', JSON.stringify([{ name: 'OKC', view: { lon: -97.5, lat: 35.4, z: 10, tilt: 0, swivel: 0 } }]));
-    mem.setItem('wsv3web.objectStyles', JSON.stringify({ COCatSLGT: { mode: 1 } }));
-    mem.setItem('wsv3web.rgbRecipes', JSON.stringify([{ name: 'mine' }]));
-    mem.setItem('unrelated', 'x');
-    return mem;
-  };
-
-  it('moves every preference once, renaming the settings documents, then removes the old keys', () => {
-    const mem = legacy();
-    const moved = migrateLegacyStorage(mem);
-    expect(moved.sort()).toEqual(['cwrv3.CWRV3ConfigurationSettings', 'cwrv3.CWRV3Settings', 'cwrv3.ProductStatus', 'cwrv3.objectStyles', 'cwrv3.rgbRecipes', 'cwrv3.viewpoints']);
-    expect([...mem.m.keys()].filter((k) => k.startsWith('wsv3web.'))).toEqual([]);
-    expect(mem.getItem('unrelated')).toBe('x');
-    const s = new SettingsStore(mem);
-    expect(s.get('settings.nrAlpha')).toBe(99);
-    expect(s.get('layerState.LightningOn')).toBe(true);
-    expect(s.get('config.generalRestingFPS')).toBe(20);
-    // The old FPS defaults were written on first run and move to the new defaults.
-    expect(s.get('config.generalActiveFPS')).toBe(0);
-    expect(s.get('config.generalRestingFPSLoop')).toBe(0);
-    useStorage(mem);
-    expect(loadPref('viewpoints', [], Array.isArray)).toHaveLength(1);
-    // A second start does nothing, even if an old key reappears.
-    mem.setItem('wsv3web.viewpoints', '[]');
-    expect(migrateLegacyStorage(mem)).toEqual([]);
-    expect(loadPref('viewpoints', [], Array.isArray)).toHaveLength(1);
+describe('settings documents', () => {
+  it('assigns every stored setting to the document of its owner record', () => {
+    const doc: Record<string, string> = { CWRV3Settings: 'CWRV3Settings', CWRV3ConfigurationSettings: 'CWRV3ConfigurationSettings', CWRV3ConfigurationRadarSites: 'CWRV3ConfigurationSettings', CWRV3ConfigurationGraphicsSwapchain: 'CWRV3ConfigurationSettings', LayerState: 'ProductStatus' };
+    for (const d of SETTING_DEFS.values()) {
+      if (d.type === 'aggregate' || d.legacy || d.postLoad === 'derivedSiteIdx') continue;
+      expect(doc[d.owner ?? 'CWRV3Settings'], `${d.id} (${d.owner})`).toBeDefined();
+      expect(docOf(d), d.id).toBe(doc[d.owner ?? 'CWRV3Settings']);
+    }
   });
 
-  it('keeps a newer cwrv3 value and the legacy keys when a copy fails (retried next start)', () => {
-    const mem = legacy();
-    mem.setItem('cwrv3.viewpoints', '[]');
-    mem.failWrites = true;
-    expect(migrateLegacyStorage(mem)).toEqual([]);
-    expect(mem.getItem('wsv3web.viewpoints')).not.toBeNull();
-    mem.failWrites = false;
-    migrateLegacyStorage(mem);
-    expect(mem.getItem('cwrv3.viewpoints')).toBe('[]');
-    expect(mem.getItem('wsv3web.viewpoints')).toBeNull();
+  it('loads records over the whole-document fallback of every document and keeps both through a reload', () => {
+    const mem = new Mem();
+    mem.setItem(PREFIX + 'CWRV3Settings', JSON.stringify({ values: { 'settings.nrAlpha': 99, 'settings.nrSmoothing': false } }));
+    mem.setItem(PREFIX + 'CWRV3ConfigurationSettings', JSON.stringify({ values: { 'config.generalRestingFPS': 20 } }));
+    mem.setItem(PREFIX + 'ProductStatus', JSON.stringify({ values: { 'layerState.LightningOn': true } }));
+    mem.setItem('cwrv3.setting/settings.nrAlpha', '42');
+    const s = new SettingsStore(mem);
+    expect(s.firstRun).toBe(false);
+    expect([s.get('settings.nrAlpha'), s.get('settings.nrSmoothing'), s.get('config.generalRestingFPS'), s.get('layerState.LightningOn')]).toEqual([42, false, 20, true]);
+    s.set('config.generalRestingFPS', 25);
+    expect(s.flush()).toBe(true);
+    const again = new SettingsStore(mem);
+    expect([again.get('settings.nrAlpha'), again.get('settings.nrSmoothing'), again.get('config.generalRestingFPS'), again.get('layerState.LightningOn')]).toEqual([42, false, 25, true]);
+    expect(mem.getItem(PREFIX + 'CWRV3ConfigurationSettings')).toBe(JSON.stringify({ values: { 'config.generalRestingFPS': 20 } })); // never rewritten
+  });
+
+  it('round-trips each document through export and import', () => {
+    const src = new SettingsStore();
+    src.set('settings.nrAlpha', 10); src.set('config.generalActiveFPS', 120); src.set('layerState.LightningOn', true); src.set('config.radarSites.Scale', 1.5);
+    for (const doc of ['CWRV3Settings', 'CWRV3ConfigurationSettings', 'ProductStatus'] as const) {
+      const d = src.exportDocument(undefined, doc);
+      expect(d.schema).toBe('cwrv3/settings@3');
+      const s = new SettingsStore();
+      s.importDocument(JSON.parse(JSON.stringify(d)));
+      for (const id of Object.keys(d.values)) expect(s.get(id), id).toEqual(src.get(id));
+    }
   });
 });
 

@@ -10,7 +10,7 @@ import type { VectorLayer as Decoded } from '../workers/shape-tasks';
 import { pool } from '../workers/pool';
 import { STYLE_DEFAULTS } from '../app/styles';
 import { loadPref, savePref, isArray, reportSaveFailure } from '../app/persist';
-import { USER_FILES_CACHE, cachesReady } from '../app/persist';
+import { USER_FILES_CACHE } from '../app/persist';
 
 export interface UserShape { id: number; name: string; visible: boolean; resolution: number; layers: Decoded[] }
 const LIST_KEY = 'userShapes';
@@ -29,7 +29,6 @@ export class UserShapesLayer extends VectorLayer {
     const list = loadPref<{ id: number; name: string; visible: boolean; resolution: number }[]>(LIST_KEY, [], isArray);
     if (!list.length) return;
     try {
-      await cachesReady;
       const cache = await caches.open(CACHE);
       for (const e of list) {
         const hit = await cache.match(`/user-shapes/${e.id}`);

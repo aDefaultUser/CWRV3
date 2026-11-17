@@ -44,7 +44,7 @@ describe('storm track geometry', () => {
 
 import { formatDateTime } from '../src/util/datefmt';
 describe('date-time format', () => {
-  it('distinguishes months from minutes and formats the default WSV3 pattern', () => {
+  it('distinguishes months from minutes and formats the default pattern', () => {
     const t = Date.UTC(2026, 10, 15, 18, 5, 9);
     expect(formatDateTime(t, 'mmm d yyyy hh:mm AMPM', true)).toBe('Nov 15 2026 06:05 PM');
     expect(formatDateTime(t, 'yyyy-mm-dd hh:nn:ss', true)).toBe('2026-11-15 18:05:09');

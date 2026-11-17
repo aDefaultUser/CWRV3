@@ -41,10 +41,9 @@ export function mainMenuActions(app: App): Record<string, MenuAction> {
       A6: { disabled: vendor }, D2: { disabled: vendor }, R4: { disabled: vendor }, CheckCurrentStatus1: { disabled: vendor }, P1: { disabled: vendor },
       S1: { run: () => app.toggleTelestration(), checked: () => app.tool === 'telestrate' }, C5: { run: () => app.clearTelestration() }, S2: { run: () => app.dialog('TFrmSettings') },
       T4: { run: () => app.dialog('TFrmTextAnnotation') }, F1: { run: () => app.dialog('TFrmPlacefiles') }, V40NWSAlayernonoperational1: { run: () => app.dialog('TFrmNWSA'), caption: 'NWS all-advisories layer…' },
-      Deactivatelicense1: { disabled: vendor }, L2: { disabled: vendor }, Checkforupdates1: { disabled: vendor }, W5: { disabled: vendor }, W4: { disabled: vendor },
-      U1: { disabled: vendor }, V1: { disabled: vendor }, w1: { disabled: vendor }, O1: { run: () => app.showText('CWRV3 help', HELP) },
+      Deactivatelicense1: { disabled: vendor }, L2: { disabled: vendor }, O1: { run: () => app.showText('CWRV3 help', HELP) },
       A1: { run: () => app.showText('About CWRV3', `CWRV3 — local WebGPU weather workstation using public NOAA/NWS data.\nmade by Cloud Nuke Software Collective · Original idea made by Paul Marv Software\nGPU: ${app.renderer.gpu.info.vendor} ${app.renderer.gpu.info.architecture} ${app.renderer.gpu.info.description}`) },
-      A2: { disabled: 'Close the browser tab to exit' }, W3: { disabled: vendor }, N21: { disabled: vendor },
+      A2: { disabled: 'Close the browser tab to exit' },
     };
 }
 
