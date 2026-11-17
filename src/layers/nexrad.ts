@@ -14,7 +14,7 @@ import { evalPalette } from '../render/palette';
 import { PolySet, type PolyFill, type FillStyle } from '../render/polys';
 import { LineSet, PointSet, TextSet, GlyphAtlas, SHAPE, type Polyline, type PointSpec, type Label } from '../render/prims';
 import { RADAR_SITES } from '../generated/radar-sites';
-import { listL2, listL3, l3Last, effectiveSource, L2, L3, l3Range, l3PaletteKey, L2_PALETTE_KEYS, l2Moment, type L2File, type L3Entry } from '../radar/sources';
+import { listL2, listL3, l2Retention, l3Last, effectiveSource, L2, L3, l3Range, l3PaletteKey, L2_PALETTE_KEYS, l2Moment, type L2File, type L3Entry } from '../radar/sources';
 import type { L2Meta, L2SweepMeta } from '../workers/decode.worker';
 import { algorithmKey, type L2BuildParams } from '../radar/l2products';
 import { hailThresholds } from '../settings/postload';
@@ -195,6 +195,7 @@ export class NexradLayer extends MapLayer {
     const site = settings.str('settings.nexradSiteICAO').toUpperCase();
     if (site !== this.site) { this.freeAll(); this.site = site; }
     this.expireAutoMotion(); // also while storm-relative velocity (and so the vector's refresh) is off
+    if (!this.enabled()) this.publishTimeline();
     if (!this.enabled() && !this.overlaysEnabled()) { this.statusText = `Awaiting activation (${this.isL2() ? 'L2' : 'L3'})...`; this.setStatus('off', ''); return; }
     try {
       if (this.enabled() && this.isL2()) await this.refreshL2(site);
@@ -218,7 +219,7 @@ export class NexradLayer extends MapLayer {
   private async l2Index(site: string, src: 2 | 3 | 4): Promise<L2File[]> {
     const key = `${site}|${src}|${settings.str('settings.nexradL2CustomDataSource')}`;
     if (this.index && this.index.key === key && Date.now() - this.index.at < (this.liveScan ? 60e3 : 10e3)) return this.index.files;
-    const files = await listL2(site, src, settings.str('settings.nexradL2CustomDataSource'), timeline.start);
+    const files = await listL2(site, src, settings.str('settings.nexradL2CustomDataSource'), timeline.loopStart);
     this.index = { key, at: Date.now(), files };
     return files;
   }
@@ -252,12 +253,10 @@ export class NexradLayer extends MapLayer {
     if (!files.length) { this.statusText = 'Server returned empty file index for active site. No action taken.'; this.setStatus('error', this.statusText); return; }
     const newest = files[files.length - 1];
     if (!this.fixture && Date.now() - newest.t > 30 * 60e3) this.statusText = `Site down. Last volume ${new Date(newest.t).toUTCString().slice(17, 22)}Z`;
-    // Keep the newest N downloads (plus the live partial file when live sweep is on), within the memory limit.
-    const n = settings.num('settings.nexradLevel2MaxVolumeDownloadCount');
+    const download = settings.num('settings.nexradLevel2MaxVolumeDownloadCount');
     const memory = settings.num('settings.nexradLevel2VolumeCountMemory');
-    let wanted = files.filter((f) => !f.live).slice(-n);
-    if (this.liveScan && newest.live) wanted = [...wanted.slice(-(n - 1)), newest];
-    wanted = wanted.slice(-memory);
+    const held = new Set(this.l2.filter((f) => !f.file.live).map((f) => f.file.url));
+    const wanted = l2Retention(files, held, download, memory, this.liveScan && newest.live ? newest : null);
     const keep = new Map(this.l2.map((f) => [f.file.url, f]));
     const next: L2Frame[] = wanted.map((f) => keep.get(f.url) ?? { t: f.t, file: f });
     for (const f of this.l2) if (!next.includes(f)) f.sweep?.tex.destroy();
@@ -300,7 +299,7 @@ export class NexradLayer extends MapLayer {
     try {
       if (!f.meta || f.file.live) {
         const token = f.metaReq = (f.metaReq ?? 0) + 1;
-        const meta = await pool.run<L2Meta>('l2.meta', { url: f.file.url, live: f.file.live, chunks: f.file.chunks }, f.file.url);
+        const meta = await pool.for(this.id).run<L2Meta>('l2.meta', { url: f.file.url, live: f.file.live, chunks: f.file.chunks }, f.file.url);
         if (token !== f.metaReq || !current()) return; // a newer read of this volume, or another site
         f.meta = meta;
       }
@@ -316,15 +315,15 @@ export class NexradLayer extends MapLayer {
       if (sweepIdx === null) { f.error = 'product not in this volume'; this.dropSweep(f); f.key = key; f.req = undefined; this.updateL2Status(); return; }
       f.req = key;
       const res = composite
-        ? await pool.run('l2.composite', { url: f.file.url, live: f.file.live, chunks: f.file.chunks, base: settings.num('settings.nexradLevel2LiveCompositeCAPPIBase'), top: settings.num('settings.nexradLevel2LiveCompositeCAPPITop'), selectiveMax: settings.bool('settings.nexradLevel2LiveCompositeSelectiveMaximum') }, f.file.url)
-        : await pool.run('l2.product', { url: f.file.url, live: f.file.live, chunks: f.file.chunks, sweep: sweepIdx, product, params }, f.file.url);
+        ? await pool.for(this.id).run('l2.composite', { url: f.file.url, live: f.file.live, chunks: f.file.chunks, base: settings.num('settings.nexradLevel2LiveCompositeCAPPIBase'), top: settings.num('settings.nexradLevel2LiveCompositeCAPPITop'), selectiveMax: settings.bool('settings.nexradLevel2LiveCompositeSelectiveMaximum') }, f.file.url)
+        : await pool.for(this.id).run('l2.product', { url: f.file.url, live: f.file.live, chunks: f.file.chunks, sweep: sweepIdx, product, params }, f.file.url);
       if (f.req !== key) return; // a newer request for this volume replaced this one
       f.req = undefined;
       if (!current() || this.l2Identity() !== id) return;
       if (!res.sweep) { f.error = 'product unavailable'; this.dropSweep(f); f.key = key; this.updateL2Status(); return; }
       const s = res.sweep;
       const old = f.sweep;
-      const tex = uploadSweep(this.r, s);
+      const tex = uploadSweep(this.r, s, this.id);
       const expected = s.half ? 720 : 360;
       f.sweep = { ...tex, elevation: s.elevation, startMs: s.startMs, endMs: s.endMs, complete: s.complete, progress: Math.min(1, s.radials / expected), id };
       if (old?.id === id && f.file.live) { this.wipeStart = performance.now(); this.wipeFromKey = f.key ?? ''; }
@@ -399,9 +398,19 @@ export class NexradLayer extends MapLayer {
       const how = this.liveSource.kind === 'chunks' ? `chunk feed: ${this.liveSource.note}` : `full-volume fallback${this.liveSource.note ? ` (${this.liveSource.note})` : ''}`;
       this.statusText = `${newest?.file.live ? 'Live sweep active' : 'Awaiting next scan'} · ${how}`;
     }
-    else this.statusText = ready.length ? `${ready.length}/${this.l2.length} volumes` : this.l2.some((f) => f.error) ? (this.l2.find((f) => f.error)!.error ?? 'error') : 'Awaiting new volume...';
+    else this.statusText = ready.length ? `${ready.length}/${this.l2.length} volumes (keeps ≤${settings.num('settings.nexradLevel2VolumeCountMemory')})` : this.l2.some((f) => f.error) ? (this.l2.find((f) => f.error)!.error ?? 'error') : 'Awaiting new volume...';
     this.setStatus(ready.length ? 'ready' : 'loading', this.withPtype(this.statusText), { frames: ready.length, newestMs: newest?.t });
-    timeline.setFrames(ready.map((f) => f.t), 'nexrad-l2');
+    this.publishTimeline();
+  }
+
+  /**
+   * Offers the shown loop to the main timeline while NEXRAD is on and "Wrap timeline to NEXRAD radar loop" is set;
+   * otherwise withdraws it (the general timeline then steps and times playback).
+   */
+  publishTimeline() {
+    const wrap = this.enabled() && settings.bool('settings.nexradTimelineConstrain');
+    timeline.offer('nexrad-l2', wrap && this.isL2() ? this.shownL2().map((f) => f.t) : null);
+    timeline.offer('nexrad-l3', wrap && !this.isL2() ? this.shownL3().map((f) => f.t) : null);
   }
 
   // ------------------------------------------------------------------------------------------- Level 3
@@ -413,7 +422,7 @@ export class NexradLayer extends MapLayer {
     const files = await listL3(site, p.ds);
     if (!current()) return; // site or product changed while listing
     const max = settings.num('settings.nexradLevel3MaxFrameCount');
-    const wanted = files.filter((f) => f.t >= timeline.start - 10 * 60e3).slice(-max);
+    const wanted = files.filter((f) => f.t >= timeline.loopStart - 10 * 60e3).slice(-max);
     if (this.mode !== key) { for (const f of this.l3) { f.tex?.tex.destroy(); f.raster?.tex.destroy(); } this.l3 = []; this.mode = key; }
     const keep = new Map(this.l3.map((f) => [`${f.url}@${f.t}`, f]));
     const next: L3Frame[] = wanted.map((w) => keep.get(`${w.url}@${w.t}`) ?? { t: w.t, url: w.url, id: key });
@@ -427,14 +436,14 @@ export class NexradLayer extends MapLayer {
     this.vcpText = `VCP: ${nv?.vcp ?? '--'}`;
     this.nrtText = nv ? `NRT: ${Math.round((Date.now() - (nv.volumeTimeMs ?? nv.t)) / 60e3)} min` : 'NRT: ---';
     this.setStatus(ready.length ? 'ready' : 'loading', this.withPtype(this.statusText), { frames: ready.length });
-    timeline.setFrames(ready.map((f) => f.t), 'nexrad-l3');
+    this.publishTimeline();
   }
 
   private async loadL3(f: L3Frame, p: L3Entry) {
     if (f.tex || f.raster || f.loading) return;
     f.loading = true;
     try {
-      const res = await pool.run('l3', { url: f.url, live: true });
+      const res = await pool.for(this.id).run('l3', { url: f.url, live: true });
       if (!this.l3.includes(f) || f.tex || f.raster) return; // replaced (site or product change) or already rebuilt
       f.vcp = res.vcp; f.volumeTimeMs = res.volumeTimeMs;
       if (res.volumeTimeMs) f.t = res.volumeTimeMs;
@@ -453,14 +462,14 @@ export class NexradLayer extends MapLayer {
         const codes = new Uint8Array(rad.codes.length);
         for (let i = 0; i < codes.length; i++) codes[i] = encode(rad.codes[i]);
         const az = Float32Array.from(rad.startAz, (a: number, i: number) => a + rad.widthAz[i] / 2);
-        f.tex = uploadSweep(this.r, { radials: rad.radials, gates: rad.bins, firstKm: rad.firstBin * rad.gateKm + rad.gateKm / 2, gateKm: rad.gateKm, azimuths: az, half: rad.radials > 400, complete: rad.radials >= 359, codes, wordSize: 8 });
+        f.tex = uploadSweep(this.r, { radials: rad.radials, gates: rad.bins, firstKm: rad.firstBin * rad.gateKm + rad.gateKm / 2, gateKm: rad.gateKm, azimuths: az, half: rad.radials > 400, complete: rad.radials >= 359, codes, wordSize: 8 }, this.id);
         f.elevation = (res.p?.[2] ?? 5) / 10;
       } else if (res.raster) {
         const ras = res.raster, codes = new Uint8Array(ras.codes.length);
         for (let i = 0; i < codes.length; i++) codes[i] = encode(ras.codes[i]);
         const halfKm = (ras.cols * ras.cellKm) / 2, halfKmY = (ras.rows * ras.cellKm) / 2;
         const [w, s] = kmToLonLat(res.lon, res.lat, -halfKm, -halfKmY), [e, n] = kmToLonLat(res.lon, res.lat, halfKm, halfKmY);
-        f.raster = { tex: this.r.gpu.texture2D(ras.cols, ras.rows, 'r8unorm', codes, 1), bounds: [s, w, n, e], nx: ras.cols, ny: ras.rows };
+        f.raster = { tex: this.r.gpu.texture2D(ras.cols, ras.rows, 'r8unorm', codes, 1, this.id), bounds: [s, w, n, e], nx: ras.cols, ny: ras.rows };
       } else f.error = 'no radial/raster data';
     } catch (e) { f.error = (e as Error).message; } finally { f.loading = false; }
   }
@@ -469,7 +478,7 @@ export class NexradLayer extends MapLayer {
   private async refreshOverlays(site: string) {
     const info = this.siteInfo(), gen = this.gen;
     if (!info) return;
-    const get = async (ds: string) => { try { return await pool.run('l3', { url: l3Last(site, ds), live: true }); } catch { return null; } };
+    const get = async (ds: string) => { try { return await pool.for(this.id).run('l3', { url: l3Last(site, ds), live: true }); } catch { return null; } };
     const on = (k: string) => settings.bool('layerState.' + k);
     const mlDs = ['166m0', '166ma', '166m1', '166mb', '166m2', '166m3'][settings.num('layerState.NEXRADMeltingLayerElevation')] ?? '166ma';
     const wantMotion = settings.num('layerState.NEXRADLevel2Product') === 7 && !settings.bool('settings.nexradStormMotionCustom');

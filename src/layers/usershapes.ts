@@ -92,8 +92,8 @@ export class UserShapesLayer extends VectorLayer {
 export async function decode(name: string, bytes: Uint8Array): Promise<Decoded[]> {
   const url = URL.createObjectURL(new Blob([bytes as BlobPart]));
   try {
-    if (/\.(geo)?json$/i.test(name)) return [{ name, projected: false, features: await pool.run('geojson', { url, tol: 0.0005 }) }];
-    return await pool.run<Decoded[]>('shapes', { url, kind: /\.(tgz|tar\.gz)$/i.test(name) ? 'tgz' : /\.tar$/i.test(name) ? 'tar' : 'zip', tol: 0.0002, cache: 'none' });
+    if (/\.(geo)?json$/i.test(name)) return [{ name, projected: false, features: await pool.for('userShapes').run('geojson', { url, tol: 0.0005 }) }];
+    return await pool.for('userShapes').run<Decoded[]>('shapes', { url, kind: /\.(tgz|tar\.gz)$/i.test(name) ? 'tgz' : /\.tar$/i.test(name) ? 'tar' : 'zip', tol: 0.0002, cache: 'none' });
   } finally { URL.revokeObjectURL(url); }
 }
 

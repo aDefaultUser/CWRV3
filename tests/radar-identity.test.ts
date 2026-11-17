@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 type Run = { task: string; args: any; resolve: (v: unknown) => void; reject: (e: Error) => void };
 const h = vi.hoisted(() => ({ runs: [] as Run[], textures: [] as { destroyed: boolean; destroy(): void; format: string }[], radarDraws: [] as any[], holdLists: false, lists: [] as { url: string; resolve: (t: string) => void }[] }));
 
-vi.mock('../src/workers/pool', () => ({ pool: { run: vi.fn((task: string, args: unknown) => new Promise((resolve, reject) => h.runs.push({ task, args, resolve, reject }))) } }));
+vi.mock('../src/workers/pool', () => { const run = vi.fn((task: string, args: unknown) => new Promise((resolve, reject) => h.runs.push({ task, args, resolve, reject }))); return { pool: { run, for: () => ({ run }) } }; });
 const LISTING = '<a href="KTST20261116_060000_V06">v</a>';
 // Directory listings resolve at once, or wait for the test while `holdLists` is set.
 vi.mock('../src/data/net', async (orig) => ({ ...(await orig<object>()), fetchText: vi.fn((url: string) => (h.holdLists ? new Promise((resolve) => h.lists.push({ url, resolve })) : Promise.resolve(LISTING))) }));

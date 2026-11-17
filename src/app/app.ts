@@ -9,6 +9,7 @@ import { layerOrder, viewpoints, scenePresets, sceneMask, layerPresets, DEFAULT_
 import { GisLayer, RoadsLayer, CityLayer, SiteLabelLayer } from '../layers/gis';
 import { NationalRadarLayer } from '../layers/national';
 import { SatelliteLayer, basicSatelliteConfig, extendedSatelliteConfig, SAT_BANDS } from '../layers/satellite';
+import { GoesL2Layer } from '../layers/goes-l2';
 import { LightningLayer } from '../layers/lightning';
 import { WarningsLayer, type Alert } from '../layers/warnings';
 import { SurfaceLayer, SurfaceFillLayer } from '../layers/surface';
@@ -17,7 +18,7 @@ import { AnnotationLayer, gcDistanceKm, bearingDeg } from '../layers/annotations
 import { cityImpacts, frontLine, impactText, type CityPt } from './tracks';
 import { formatDateTime, zoneClock } from '../util/datefmt';
 import type { MapLayer, LegendSpec } from '../layers/base';
-import { renderForm, formMenus, formDef, type BindingMap, type MenuNode } from '../ui/form';
+import { renderForm, formMenus, formDef, keyboardClick, type BindingMap, type MenuNode } from '../ui/form';
 import { openDialog, closeDialog, isOpen, showMenu, toast as toastFn, promptBox, drag, refreshDialogs, type MenuAction } from '../ui/dialogs';
 import { openObjectStyle, openTextStyle, styleFormBindings } from '../ui/style-forms';
 import { stringDisplayBindings } from '../ui/bindings';
@@ -28,11 +29,12 @@ import { CustomRadarLayer } from '../layers/custom-radar';
 import { CustomBackgroundLayer } from '../layers/custom-background';
 import { UserShapesLayer } from '../layers/usershapes';
 import { PlacefileLayer } from '../layers/placefiles';
-import { watermarkTile, cornerPos, loadLogo, CREDIT_LINE, BRAND_LINE } from '../ui/branding';
+import { watermarkTile, cornerPos, loadLogo, CREDIT_LINE, BRAND_LINE, REPO_URL } from '../ui/branding';
 import { videoFormat, drawCursor } from './capture';
 import { fetchText } from '../data/net';
 import { onStyleChange, hasTextStyle, textStyle, textCss } from './styles';
-import { buildBindings, titleCase } from '../ui/bindings';
+import { buildBindings, titleCase, timingText } from '../ui/bindings';
+import { PerfPanel, type PerfSnapshot } from '../perf/panel';
 import { drawLegends } from '../ui/legend';
 import { RADAR_SITES } from '../generated/radar-sites';
 import { PRODUCTS } from '../generated/products-catalog';
@@ -134,6 +136,7 @@ export class App {
     const nr = new NationalRadarLayer(r);
     const sat = new SatelliteLayer(r, basicSatelliteConfig());
     const satx = new SatelliteLayer(r, extendedSatelliteConfig());
+    const satL2 = new GoesL2Layer(r);
     this.lightning = new LightningLayer(r);
     this.warnings = new WarningsLayer(r, this.atlas);
     // Push live-notification text (Warnings → Misc): new warnings/watches since the previous poll.
@@ -157,7 +160,7 @@ export class App {
     this.goesManual = new GoesManualLayer(r);
     this.customRadar = new CustomRadarLayer(r, this.atlas, this.nexrad);
     this.customBg = new CustomBackgroundLayer(r);
-    for (const l of [this.customBg, gis, this.roads, cities, this.sites, nr, sat, satx, this.goesManual, this.customRadar, this.lightning, this.warnings, surface, fill, this.nexrad, this.annotations, this.userShapes, this.placefiles, ...this.sections.flatMap((s) => s.layers)]) {
+    for (const l of [this.customBg, gis, this.roads, cities, this.sites, nr, sat, satx, satL2, this.goesManual, this.customRadar, this.lightning, this.warnings, surface, fill, this.nexrad, this.annotations, this.userShapes, this.placefiles, ...this.sections.flatMap((s) => s.layers)]) {
       this.layers.set(l.id, l);
       l.onStatus = () => this.updateStatusBar();
     }
@@ -213,9 +216,8 @@ export class App {
 
   // ------------------------------------------------------------------------------------------- data
   refreshAll() {
-    timeline.refreshWindow(Date.now(), this.nexrad.enabled() && this.nexrad.isL2() && this.nexrad.l2.length ? this.nexrad.l2[0].t : null);
+    timeline.refreshWindow();
     for (const l of this.layers.values()) if ('refresh' in l) (l as MapLayer).refresh().catch((e) => console.warn(l.id, e));
-    if (!this.nexrad.enabled()) timeline.setFrames(timeline.generalFrames(), 'general');
   }
   refreshLayer(id: string) { const l = this.layers.get(id) as MapLayer | undefined; l?.refresh().catch((e) => console.warn(id, e)); this.poke(); }
   /** Zone alert list (TFrmAdvisories) for the NWS forecast zone containing a point. */
@@ -245,8 +247,10 @@ export class App {
     const on = (prefix: string, fn: () => void) => settings.on(prefix, () => { fn(); this.poke(); });
     on('layerState.NationalRadar', () => this.refreshLayer('nationalRadar'));
     on('layerState.Satellite', () => this.refreshLayer('satellite'));
-    on('layerState.ExtendedSatellite', () => this.refreshLayer('satelliteExtended'));
-    on('ext.layerState.ExtendedSatellite', () => this.refreshLayer('satelliteExtended'));
+    on('layerState.ExtendedSatellite', () => { this.refreshLayer('satelliteExtended'); this.refreshLayer('satelliteL2'); });
+    on('ext.layerState.ExtendedSatellite', () => { this.refreshLayer('satelliteExtended'); this.refreshLayer('satelliteL2'); });
+    // GOES Extended dialog: frame count and CONUS 15-min / mesoscale 3-min thinning select the files to load.
+    for (const k of ['goesExtendedForce60fps', 'goesMesoThird', 'goesCONUSThird']) on('settings.' + k, () => { for (const id of ['satellite', 'satelliteExtended', 'satelliteL2']) this.refreshLayer(id); });
     on('layerState.Lightning', () => this.refreshLayer('lightning'));
     for (const k of ['TORWarningsOn', 'SVRWarningsOn', 'SQWarningsOn', 'SMWarningsOn', 'FFWWarningsOn', 'SWSWarningsOn', 'EWWarningsOn', 'SevereWatchesOn']) on('layerState.' + k, () => this.refreshLayer('warnings'));
     for (const k of ['MSLPOn', '10mWindVectorsOn', 'FrontsOn', 'CentersOn', 'saFillOn', 'saFillIdx']) on('layerState.' + k, () => this.refreshLayer('surface'));
@@ -262,7 +266,8 @@ export class App {
     on('settings.customRadarMax', () => this.customRadar.sync());
     on('layerState.CustomRadarProduct', () => this.customRadar.reloadProducts());
     on('settings.customRadarStormMotion', () => this.customRadar.reloadProducts());
-    on('layerState.NEXRAD', () => { this.nexrad.reloadProducts(); this.refreshLayer('nexrad'); this.renderTilts(); });
+    on('layerState.NEXRAD', () => { this.nexrad.reloadProducts(); this.nexrad.publishTimeline(); this.refreshLayer('nexrad'); this.renderTilts(); });
+    on('settings.nexradTimelineConstrain', () => this.nexrad.publishTimeline());
     // The custom radar engine builds its products with the NEXRAD algorithm settings.
     on('settings.nexradAlgorithm', () => { this.nexrad.reloadProducts(); this.customRadar.reloadProducts(); });
     on('settings.nexradQualityDealiasing', () => { this.nexrad.reloadProducts(); this.customRadar.reloadProducts(); });
@@ -356,6 +361,7 @@ export class App {
     const dp = this.el('div', '', main); dp.id = 'drawpanel';
     dp.appendChild(this.canvas);
     const ov = this.el('div', '', dp); ov.id = 'overlay';
+    this.perf = new PerfPanel(dp, () => this.perfSnapshot());
     const legend = this.el('canvas', '', ov); legend.id = 'legendcv'; legend.style.width = '100%';
     const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
     svg.setAttribute('style', 'position:absolute;inset:0;width:100%;height:100%;pointer-events:none');
@@ -392,16 +398,37 @@ export class App {
     if (!settings.bool('config.sidebarOnLaunch')) main.classList.add('nosidebar');
   }
 
+  /** Debug / performance panel (F8). */
+  perf!: PerfPanel;
+  private perfSnapshot(): PerfSnapshot {
+    const g = this.renderer.gpu;
+    const mem = (performance as unknown as { memory?: { usedJSHeapSize: number; jsHeapSizeLimit: number } }).memory;
+    return {
+      frames: this.meter.summary(2000), totalFrames: this.meter.total,
+      gpuMs: g.timestamps ? this.renderer.gpuMs : null,
+      heap: mem ? { used: mem.usedJSHeapSize, limit: mem.jsHeapSizeLimit } : null,
+      textureBytes: g.trackedTextureBytes, textures: [...g.textureBytes].sort((a, b) => b[1] - a[1]),
+      uploads: [...g.uploads].sort((a, b) => b[1].bytes - a[1].bytes),
+      jobs: [...pool.owners].sort((a, b) => b[1].execMs - a[1].execMs),
+      layers: [...this.layers.values()].filter((l): l is MapLayer => 'status' in l && (l as MapLayer).enabled()).map((l) => ({ id: l.id, state: l.status.state, frames: l.status.frames, text: l.status.text })),
+      timeline: timingText(timeline), workers: pool.size,
+    };
+  }
+
   renderTitleBar() {
     const tb = document.getElementById('titlebar')!;
+    // Rebuilt on every tab or base change: keyboard focus returns to the same control.
+    const focusable = () => [...tb.querySelectorAll<HTMLElement>('[tabindex]')];
+    const focused = focusable().indexOf(document.activeElement as HTMLElement);
     tb.textContent = '';
     const menu = this.el('div', 'menubtn', tb, 'CWRV3 ▾');
     menu.onclick = (e) => this.mainMenu(e.currentTarget as HTMLElement);
+    keyboardClick(menu); menu.setAttribute('aria-haspopup', 'menu');
     const tabs = this.el('div', 'tabs', tb);
     for (const t of XSECTIONS.tabs) {
       const built = t.frame === 'TBasicLayersFrame' || t.frame === 'TRadarUIFrame' || this.sections.some((s) => s.frame === t.frame);
       const e = this.el('div', 'tab' + (built ? '' : ' disabled') + (this.activeTab === t.caption ? ' on' : ''), tabs, t.caption);
-      if (built) e.onclick = () => { this.activeTab = t.caption; this.renderTitleBar(); this.renderFrame(); };
+      if (built) { e.onclick = () => { this.activeTab = t.caption; this.renderTitleBar(); this.renderFrame(); }; keyboardClick(e, 'tab'); e.setAttribute('aria-selected', String(this.activeTab === t.caption)); }
       else e.title = `${t.caption}: not available`;
     }
     this.el('div', 'spacer', tb);
@@ -409,8 +436,10 @@ export class App {
     ['Background', 'GIS', 'Both', 'None'].forEach((t, i) => {
       const e = this.el('div', 'tab' + (settings.num('ext.layerState.MapBase') === i ? ' on' : ''), group, t);
       e.onclick = () => settings.set('ext.layerState.MapBase', i);
+      keyboardClick(e, 'radio'); e.setAttribute('aria-checked', String(settings.num('ext.layerState.MapBase') === i));
     });
-    const fs = this.el('div', 'tab', group, '⛶'); fs.title = 'Fullscreen (Ctrl+F)'; fs.onclick = () => this.fullscreen();
+    const fs = this.el('div', 'tab', group, '⛶'); fs.title = 'Fullscreen (Ctrl+F)'; fs.onclick = () => this.fullscreen(); keyboardClick(fs); fs.setAttribute('aria-label', 'Fullscreen');
+    if (focused >= 0) focusable()[focused]?.focus();
   }
   activeTab = 'Basic';
   private staticForms: ReturnType<typeof renderForm>[] = [];
@@ -478,13 +507,19 @@ export class App {
     t.innerHTML = '<b>About</b>';
     const l1 = document.createElement('div'); l1.textContent = CREDIT_LINE;
     const l2 = document.createElement('div'); l2.textContent = `CWRV3 — ${BRAND_LINE}`;
+    const repo = document.createElement('a');
+    repo.className = 'credits-repo'; repo.href = REPO_URL; repo.target = '_blank'; repo.rel = 'noopener noreferrer';
+    repo.title = 'CWRV3 source on GitHub (opens in a new tab)';
+    const gh = document.createElement('span'); gh.className = 'credits-gh'; gh.setAttribute('aria-hidden', 'true');
+    repo.append(gh, 'aDefaultUser/CWRV3');
+    repo.setAttribute('aria-label', 'GitHub: aDefaultUser/CWRV3 (opens in a new tab)');
     const l3 = document.createElement('label'); const cb = document.createElement('input'); cb.type = 'checkbox'; cb.checked = settings.bool('ext.config.brandWatermark');
     cb.onchange = () => edit(() => settings.set('ext.config.brandWatermark', cb.checked)); l3.append(cb, ' Show the Cloud Nuke watermark on the map and in captures');
     const sel = document.createElement('select');
     ['Top left', 'Top right', 'Bottom left', 'Bottom right'].forEach((n, i) => { const o = document.createElement('option'); o.value = String(i); o.textContent = n; sel.appendChild(o); });
     sel.value = String(settings.num('ext.config.brandWatermarkCorner')); sel.onchange = () => edit(() => settings.set('ext.config.brandWatermarkCorner', Number(sel.value)));
     const l4 = document.createElement('label'); l4.append('Watermark corner: ', sel);
-    t.append(l1, l2, l3, l4);
+    t.append(l1, l2, repo, l3, l4);
     box.append(logo, t);
     body.appendChild(box);
     // Corrected (non-parity) modes: fixes for recovered original behaviour, all off by default.
@@ -891,7 +926,7 @@ export class App {
   private roadDownloads = loadPref<{ key: string; label: string; url: string }[]>('roadDownloads', [], isArray);
   private saveRoadDownloads() { return savePref('roadDownloads', this.roadDownloads, 'downloaded road list'); }
   private async fetchRoads(d: { key: string; label: string; url: string }) {
-    const res = await pool.run('zipLines', { url: d.url, tol: d.key.startsWith('county:') ? 0.00008 : 0.0005, classField: 'RTTYP', nameField: 'FULLNAME' });
+    const res = await pool.for('roads').run('zipLines', { url: d.url, tol: d.key.startsWith('county:') ? 0.00008 : 0.0005, classField: 'RTTYP', nameField: 'FULLNAME' });
     this.roads.groups.set(d.key, { label: d.label, lines: res.parts.map((p: number[], i: number) => ({ coords: p, style: res.cls[i] })), names: res.names });
     this.roads.rebuild(); this.poke();
   }
@@ -1219,6 +1254,7 @@ export class App {
       else if (!e.ctrlKey && !e.altKey && k === 'r') settings.set('settings.nexradSitesOn', !settings.bool('settings.nexradSitesOn'));
       else if (k === ' ' && !e.ctrlKey) { e.preventDefault(); this.clearTelestration(); }
       else if (k === 'escape') { this.tool = null; this.canvas.style.cursor = ''; }
+      else if (e.key === 'F8') { e.preventDefault(); this.perf.toggle(); }
       this.poke();
     });
   }
@@ -1247,7 +1283,9 @@ export class App {
     this.lastFrame = now;
     const t0 = performance.now();
     this.cameraMoving = cam.update(now, Math.min(dt, 100));
-    timeline.tick(now, Math.min(dt, 200), settings.bool('layerState.RasterDataTemporalInterpolation'));
+    // Real elapsed time: a loop FPS limit down to 1 fps renders up to 1 s apart, and tick() never advances more than
+    // one loop frame per call, so a stall cannot skip frames.
+    timeline.tick(now, dt, settings.bool('layerState.RasterDataTemporalInterpolation'));
     // Palette flash: alternate rows every flash interval unless disabled.
     if (!settings.bool('settings.generalDisableAnimatedPalettes')) { if (now - this.flashT > 700) { this.flashT = now; this.renderer.flashRow ^= 1; } } else this.renderer.flashRow = 0;
     this.applyTileSettings();

@@ -444,7 +444,7 @@ function modelSection(c: SectionCtx): Section {
           if (!f) return;
           ml.custom.grib = URL.createObjectURL(f); ml.custom.name = f.name;
           // The browser fetches the .idx next to the GRIB: generate it from the file ("Generate/View WGRIB Inventory").
-          ml.custom.inventory = await pool.run('grib.inventory', { url: ml.custom.grib });
+          ml.custom.inventory = await pool.for('modelFill').run('grib.inventory', { url: ml.custom.grib });
           app.toast(`${f.name}: ${ml.custom.inventory.split('\n').length - 1} messages`);
         }),
         [M + 'sButton3']: act(async () => { const v = await app.prompt('Integration index (Parameters)', 'fill,vector,contour,unit,caption[,palette],gribMatch — one per line; use "\\n" between lines:', ml.custom.params.replace(/\n/g, '\\n')); if (v !== null) ml.custom.params = v.replace(/\\n/g, '\n'); }),

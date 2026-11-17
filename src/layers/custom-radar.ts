@@ -251,7 +251,7 @@ export class CustomRadarLayer extends MapLayer {
     let key = '';
     try {
       if (!v.meta) {
-        const meta = await pool.run<L2Meta>('l2.meta', { url: v.url, live: false }, v.url);
+        const meta = await pool.for(this.id).run<L2Meta>('l2.meta', { url: v.url, live: false }, v.url);
         if (stale()) return;
         if (!v.meta) { v.meta = meta; v.pct = 100; if (meta.volumeTimeMs) v.t = meta.volumeTimeMs; }
       }
@@ -266,13 +266,13 @@ export class CustomRadarLayer extends MapLayer {
       if (v.req === key) return;
       if (sweepIdx < 0) { v.error = 'product not in this volume'; this.dropSweep(v); v.key = key; v.req = undefined; return; }
       v.req = key;
-      const res = await pool.run('l2.product', { url: v.url, live: false, sweep: sweepIdx, product, params }, v.url);
+      const res = await pool.for(this.id).run('l2.product', { url: v.url, live: false, sweep: sweepIdx, product, params }, v.url);
       if (v.req !== key) return; // a newer request for this volume replaced this one
       v.req = undefined;
       if (stale() || this.identity() !== id) return;
       if (!res.sweep) { v.error = 'product unavailable'; this.dropSweep(v); v.key = key; return; }
       const old = v.sweep;
-      v.sweep = { ...uploadSweep(this.r, res.sweep), elevation: res.sweep.elevation, id };
+      v.sweep = { ...uploadSweep(this.r, res.sweep, this.id), elevation: res.sweep.elevation, id };
       if (!old && settings.num('settings.customRadarUpdateEffect') === 1 && v === this.volumes[this.volumes.length - 1]) this.wipeStart = performance.now();
       old?.tex.destroy();
       v.key = key; v.error = undefined;

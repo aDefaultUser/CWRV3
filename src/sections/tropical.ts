@@ -126,7 +126,7 @@ export class TropicalLayer extends VectorLayer {
       }
       const need = this.on('BestTrack') || this.on('OfficialForecast') || this.on('ForecastModels') || this.on('WindRadii') || this.on('ForecastRadii') || this.on('NHCForecastCone') || this.on('WatchesWarnings');
       if (need) await Promise.all(this.visibleSystems().filter((s) => /^(al|ep|cp)/.test(s.atcf) && !s.invest).map((s) => this.loadDeck(s)));
-      if (this.on('FormationProbabilities') && !this.gtwo.length) this.gtwo = await pool.run<Decoded[]>('shapes', { url: 'https://www.nhc.noaa.gov/xgtwo/gtwo_shapefiles.zip', kind: 'zip' });
+      if (this.on('FormationProbabilities') && !this.gtwo.length) this.gtwo = await pool.for(this.id).run<Decoded[]>('shapes', { url: 'https://www.nhc.noaa.gov/xgtwo/gtwo_shapefiles.zip', kind: 'zip' });
       if (this.on('ReconData')) this.recon = parseHdob(await fetchText('https://tgftp.nws.noaa.gov/data/raw/ur/urnt15.knhc..txt'), Date.now());
       this.apply();
       this.setStatus('ready', `${this.systems.length} active systems`);
@@ -139,7 +139,7 @@ export class TropicalLayer extends VectorLayer {
     const [b, a, gis] = await Promise.all([
       fetchText(`${NHC}btk/b${s.atcf}.dat`).then(parseAtcf, () => []),
       fetchBytes(`${NHC}aid_public/a${s.atcf}.dat.gz`).then(async (x) => parseAtcf(new TextDecoder().decode(await gunzip(x))), () => []),
-      pool.run<Decoded[]>('shapes', { url: `https://www.nhc.noaa.gov/gis/forecast/archive/${s.atcf}_5day_latest.zip`, kind: 'zip' }).catch(() => null),
+      pool.for(this.id).run<Decoded[]>('shapes', { url: `https://www.nhc.noaa.gov/gis/forecast/archive/${s.atcf}_5day_latest.zip`, kind: 'zip' }).catch(() => null),
     ]);
     this.decks.set(s.atcf, { b, a, gis, at: Date.now() });
   }

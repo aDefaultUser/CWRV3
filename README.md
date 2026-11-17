@@ -33,8 +33,27 @@ Choose a section tab, enable its layers, then pan or zoom the map. In NEXRADPro,
 Level 3, a product and a tilt. The timeline controls playback. Explore moves the map; Interact opens objects;
 Probe reads the displayed value under the pointer.
 
+* Timeline: with "Wrap timeline to NEXRAD radar loop" (Radar Control) or "Wrap timeline to MRMS loop" on, that loop
+  owns stepping and playback (NEXRAD first, then MRMS); the Model timeline owns it while selected. Settings → Loop
+  Speed: the Level 2, Level 3 and MRMS frame times apply as set; the minimum/maximum loop-time overrides stretch or
+  shrink only the General timeline. The end delay holds the newest frame. Timing changes apply to the frame in
+  progress; the Play button's tooltip shows the loop, frame count and applied frame time. Skip to end pauses on the
+  newest available frame and follows newer frames as they arrive.
+* Level 2 download volumes is how many of the newest volumes are fetched; max memory volumes is how many are kept as
+  new scans arrive (lowering it drops the oldest at once).
+* Extended GOES-R Data → Product "Level 2 Product": cloud-top height (`ABI-L2-ACHA`, CONUS / Full Disk /
+  Mesoscale), cloud-top temperature (`ABI-L2-ACHT`, Full Disk / Mesoscale; not produced for CONUS) and fire/hot spot
+  with fire radiative power (`ABI-L2-FDC`, CONUS / Full Disk / Mesoscale) from GOES-19 or GOES-18. Cloud-top values
+  are drawn for good-quality pixels only (product DQF 0); fires are points coloured by power, probe them for
+  category, power, temperature and area.
+* F8 (or CWRV3 → Advanced → Performance panel) shows the global frame rate and times, GPU pass time where the adapter
+  supports timestamp queries, total tracked texture memory and the JS heap (N/A where the browser does not report
+  it), and one row per layer or owner with its decode jobs, texture uploads, live texture memory and status. Each layer's decode time excludes network, queueing and transfer, shown beside
+  the worker's fetch + decode wall time. It samples only while open and sends nothing anywhere.
+
 Open Settings from the CWRV3 menu to change rendering, radar, lightning and display preferences. Changes save in
-this browser automatically. Use settings export/import to move them to another browser.
+this browser automatically. Use settings export/import to move them to another browser. The About area of Settings links to the source
+repository, [aDefaultUser/CWRV3](https://github.com/aDefaultUser/CWRV3).
 
 * Drag to pan; use the wheel to zoom. Ctrl+drag tilts and swivels.
 * R toggles radar site labels; Alt+D measures distance; Alt+L adds road labels.
@@ -134,7 +153,8 @@ measurements.
 
 ## Data sources
 
-NOAA Open Data on AWS (MRMS, HRRR, RAP, GFS, NBM, GOES ABI/GLM, NEXRAD Level 2 archive and real-time chunks), NWS
+NOAA Open Data on AWS (MRMS, HRRR, RAP, GFS, NBM, GOES ABI/GLM including the ABI L2+ cloud-top height, cloud-top
+temperature and fire/hot spot products, NEXRAD Level 2 archive and real-time chunks), NWS
 TGFTP (Level 2/3, NDFD, text products), api.weather.gov, Aviation Weather Center, SPC, WPC, CPC, NHC, NDBC, USGS
 earthquakes, NASA FIRMS, NOAA water data, the US Drought Monitor (University of Nebraska–Lincoln), Iowa Environmental
 Mesonet, NASA GIBS imagery and AWS Terrain Tiles. Bundled GIS layers come from Natural Earth and US Census TIGER.
@@ -164,7 +184,7 @@ Mesonet, NASA GIBS imagery and AWS Terrain Tiles. Bundled GIS layers come from N
 
 | Part | Lines |
 | --- | ---: |
-| TypeScript / JavaScript | 16,757 |
+| TypeScript / JavaScript | 17,367 |
 | WGSL shaders | 689 |
-| **Total functional** | **17,446** |
-| CSS (separate) | 157 |
+| **Total functional** | **18,056** |
+| CSS (separate) | 174 |

@@ -66,7 +66,7 @@ export class LightningLayer extends MapLayer {
   async refresh() {
     if (!this.enabled()) { this.setStatus('off', ''); return; }
     const minutes = settings.num('settings.lightningRenderingMinutes');
-    const from = timeline.start - minutes * 60e3, to = timeline.end;
+    const from = timeline.loopStart - minutes * 60e3, to = timeline.loopEnd;
     const hours: number[] = [];
     for (let t = Math.floor(from / 3600e3) * 3600e3; t <= to; t += 3600e3) hours.push(t);
     const files: { key: string; t: number }[] = [];
@@ -89,7 +89,7 @@ export class LightningLayer extends MapLayer {
     for (let i = 0; i < wanted.length; i += 15) {
       const group = wanted.slice(i, i + 15);
       group.forEach((g) => this.loading.add(g.key));
-      pool.run('glm', { urls: group.map((g) => g.key) }).then((res) => {
+      pool.for(this.id).run('glm', { urls: group.map((g) => g.key) }).then((res) => {
         const key = group.map((g) => g.key).join('|');
         this.batches.set(key, { key, lat: res.lat, lon: res.lon, energy: res.energy, timeMs: res.timeMs });
         for (const g of group) { this.loading.delete(g.key); this.batches.set(g.key, { key: g.key, lat: new Float32Array(0), lon: new Float32Array(0), energy: new Float32Array(0), timeMs: new Float64Array(0) }); }

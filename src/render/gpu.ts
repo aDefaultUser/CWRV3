@@ -51,7 +51,7 @@ export class Gpu {
       lut: d.createSampler({ magFilter: 'linear', minFilter: 'linear', addressModeU: 'clamp-to-edge', addressModeV: 'clamp-to-edge' }),
       repeat: d.createSampler({ magFilter: 'linear', minFilter: 'linear', addressModeU: 'repeat', addressModeV: 'repeat' }),
     };
-    this.dummy2D = this.texture2D(1, 1, 'rgba8unorm', new Uint8Array([0, 0, 0, 0]));
+    this.dummy2D = this.texture2D(1, 1, 'rgba8unorm', new Uint8Array([0, 0, 0, 0]), 4, 'renderer');
     this.dummyArray = d.createTexture({ size: [1, 1, 1], format: 'rgba8unorm', usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST, dimension: '2d' });
   }
 
@@ -72,15 +72,44 @@ export class Gpu {
 
   setSampleCount(n: 1 | 4) { if (n !== this.sampleCount) { this.sampleCount = n; this.msaa?.destroy(); this.msaa = null; this.resize(); } }
 
-  texture2D(w: number, h: number, format: GPUTextureFormat, data: ArrayBufferView | null, bytesPerTexel = 4): GPUTexture {
+  /**
+   * Texture data uploads per owner (the layer that passed its ID). `cpuMs` is the time to submit the copy on the CPU
+   * (queue.writeTexture / copyExternalImageToTexture return before the GPU executes it), not GPU execution time.
+   */
+  readonly uploads = new Map<string, { count: number; bytes: number; cpuMs: number }>();
+  /**
+   * Bytes of live textures per owner: those created by texture2D plus registered atlases (trackTexture), added on
+   * creation and subtracted once when destroyed. An owner stays listed (at 0) after its last texture is released.
+   */
+  readonly textureBytes = new Map<string, number>();
+  get trackedTextureBytes() { let n = 0; for (const b of this.textureBytes.values()) n += b; return n; }
+
+  recordUpload(owner: string, bytes: number, cpuMs: number) {
+    let u = this.uploads.get(owner);
+    if (!u) { u = { count: 0, bytes: 0, cpuMs: 0 }; this.uploads.set(owner, u); }
+    u.count++; u.bytes += bytes; u.cpuMs += cpuMs;
+  }
+  /** Counts a texture's memory under `owner` until it is destroyed. */
+  trackTexture(t: GPUTexture, bytes: number, owner: string) {
+    const add = (d: number) => this.textureBytes.set(owner, (this.textureBytes.get(owner) ?? 0) + d);
+    add(bytes);
+    const destroy = t.destroy.bind(t);
+    let live = true;
+    t.destroy = () => { if (live) { live = false; add(-bytes); } destroy(); };
+  }
+
+  texture2D(w: number, h: number, format: GPUTextureFormat, data: ArrayBufferView | null, bytesPerTexel = 4, owner = 'unattributed'): GPUTexture {
     perfMark(`tex ${w}x${h}`);
     const t = this.device.createTexture({ size: [w, h], format, usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
-    if (data) this.write(t, w, h, data, bytesPerTexel);
+    this.trackTexture(t, w * h * bytesPerTexel, owner);
+    if (data) this.write(t, w, h, data, bytesPerTexel, [0, 0, 0], owner);
     return t;
   }
 
-  write(t: GPUTexture, w: number, h: number, data: ArrayBufferView, bytesPerTexel: number, origin: [number, number, number] = [0, 0, 0]) {
+  write(t: GPUTexture, w: number, h: number, data: ArrayBufferView, bytesPerTexel: number, origin: [number, number, number] = [0, 0, 0], owner = 'unattributed') {
+    const t0 = performance.now();
     this.device.queue.writeTexture({ texture: t, origin }, data as BufferSource, { bytesPerRow: w * bytesPerTexel, rowsPerImage: h }, [w, h, 1]);
+    this.recordUpload(owner, w * h * bytesPerTexel, performance.now() - t0);
   }
 
   buffer(data: ArrayBufferView | number, usage: number): GPUBuffer {

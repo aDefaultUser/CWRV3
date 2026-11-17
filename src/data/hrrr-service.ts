@@ -37,7 +37,7 @@ export function ptypeCandidates(validMs: number): { cycleMs: number; fh: number 
  * Loads the first available HRRR p-type forecast valid at `validMs` (null when none is published). Decoding and
  * packing run in a worker, which returns only the packed RGBA8 texels and the grid definition.
  */
-export async function loadPtypeGrid(validMs: number, run: typeof pool.run = pool.run.bind(pool)): Promise<PtypeGrid | null> {
+export async function loadPtypeGrid(validMs: number, run: (task: string, args: unknown) => Promise<any> = (task, args) => pool.for('ptype').run(task, args)): Promise<PtypeGrid | null> {
   for (const c of ptypeCandidates(validMs)) {
     let r: { grid: LambertGrid; packed: Uint8Array } | null = null;
     try { r = await run('hrrr.ptype', { url: hrrrUrl(new Date(c.cycleMs), c.fh) }); } catch (err) { console.info(`HRRR p-type f${String(c.fh).padStart(2, '0')} unavailable`, (err as Error).message); continue; }

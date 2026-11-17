@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const h = vi.hoisted(() => ({ runs: [] as { task: string; args: any; resolve: (v: unknown) => void; reject: (e: Error) => void }[], uploads: [] as { destroyed: boolean; destroy(): void }[], lineSets: [] as any[], rasterDraws: [] as any[] }));
 
-vi.mock('../src/workers/pool', () => ({ pool: { run: vi.fn((task: string, args: unknown) => new Promise((resolve, reject) => h.runs.push({ task, args, resolve, reject }))) } }));
+vi.mock('../src/workers/pool', () => { const run = vi.fn((task: string, args: unknown) => new Promise((resolve, reject) => h.runs.push({ task, args, resolve, reject }))); return { pool: { run, for: () => ({ run }) } }; });
 vi.mock('../src/layers/grid', () => ({ uploadGrid: vi.fn(() => { const t = { destroyed: false, destroy() { t.destroyed = true; } }; h.uploads.push(t); return t; }) }));
 vi.mock('../src/render/raster', async (orig) => ({
   ...(await orig<object>()),

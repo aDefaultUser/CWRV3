@@ -138,7 +138,7 @@ export class ModelLayer extends MapLayer {
   clear() {
     this.gen++; this.busy = false;
     this.dropFrames(); this.loadedKey = ''; this.say('Model data cleared');
-    timeline.setFrames(timeline.generalFrames(), 'general');
+    timeline.offer('model', null);
   }
 
   /**
@@ -171,12 +171,12 @@ export class ModelLayer extends MapLayer {
           const [lo, hi] = p.palette ? paletteRange(getPalette(p.palette)) : [0, 1];
           const interval = /MSL/.test(p.match.join()) ? settings.num('settings.generalMSLPContourInterval') : Math.max(1, settings.num('settings.generalHeightContourInterval') / 10);
           try {
-            const res = await pool.run('grid.model', { url, invExt: c.invExt, matches: p.match, kind: kind === 'fill2' ? 'fill' : kind, unit: p.unit, lo, hi, interval, vectorStep: this.vectorStep(c), local: custom });
+            const res = await pool.for(this.id).run('grid.model', { url, invExt: c.invExt, matches: p.match, kind: kind === 'fill2' ? 'fill' : kind, unit: p.unit, lo, hi, interval, vectorStep: this.vectorStep(c), local: custom });
             if (!current()) return;
             if (this.productId(kind) !== id) continue; // selection changed while downloading
             fr.t = res.validMs ?? fr.t;
             fr.slots[kind]?.fill?.tex.destroy();
-            fr.slots[kind] = { id, fill: res.data ? { tex: uploadGrid(this.r, res.nx, res.ny, res.data), proj: res.proj, bounds: res.bounds } : undefined, vectors: res.vectors, contours: res.contours };
+            fr.slots[kind] = { id, fill: res.data ? { tex: uploadGrid(this.r, res.nx, res.ny, res.data, this.id), proj: res.proj, bounds: res.bounds } : undefined, vectors: res.vectors, contours: res.contours };
           } catch (e) {
             if (!current()) return;
             failed = true;
@@ -203,11 +203,8 @@ export class ModelLayer extends MapLayer {
     const gridKm = nx > 1500 ? 3 : nx > 1000 ? 5 : nx > 600 ? 12 : nx > 400 ? 13 : 100;
     return Math.max(1, Math.round(km / 4 / gridKm));
   }
-  publishTimeline() {
-    if (settings.num('ext.layerState.TimelineSelect') !== 1) return;
-    const ts = [...this.frames.values()].map((f) => f.t).sort((a, b) => a - b);
-    if (ts.length) timeline.setFrames(ts, 'model');
-  }
+  /** Offers the loaded valid times; they own the main timeline while the Model timeline is selected. */
+  publishTimeline() { timeline.offer('model', [...this.frames.values()].map((f) => f.t)); }
 
   private frameAt(t: number) {
     const fs = [...this.frames.values()].sort((a, b) => a.t - b.t);

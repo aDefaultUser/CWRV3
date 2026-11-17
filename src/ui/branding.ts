@@ -4,6 +4,8 @@
 // and video recordings, together with the legend, timestamp and product time labels.
 export const BRAND_LINE = 'made by Cloud Nuke Software Collective';
 export const CREDIT_LINE = 'Original idea made by Paul Marv Software';
+/** Public source repository (opened in a new tab; never navigates the app). */
+export const REPO_URL = 'https://github.com/aDefaultUser/CWRV3';
 export const LOGO_URL = '/assets/branding/cloud-nuke.png';
 
 let logo: HTMLImageElement | null = null;

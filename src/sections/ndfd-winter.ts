@@ -75,13 +75,13 @@ export class NdfdLayer extends GridLayer {
     try {
       let res: { frames: { nx: number; ny: number; data: Uint16Array; proj: any; bounds: [number, number, number, number]; refTimeMs: number; validMs: number; unit: string; strings: string[] }[] };
       const byCode = /ds\.(wx|wwa|conhazo|critfireo|dryfireo)\.bin/.test(e.file);
-      try { res = await pool.run('grid.all', { url: ndfdUrl(region, e.file), lo: d.low, hi: d.high, byCode }); }
-      catch (err) { if (region !== 18) throw err; res = await pool.run('grid.all', { url: ndfdUrl(region, e.file, false), lo: d.low, hi: d.high, byCode }); }
+      try { res = await pool.for(this.id).run('grid.all', { url: ndfdUrl(region, e.file), lo: d.low, hi: d.high, byCode }); }
+      catch (err) { if (region !== 18) throw err; res = await pool.for(this.id).run('grid.all', { url: ndfdUrl(region, e.file, false), lo: d.low, hi: d.high, byCode }); }
       for (const s of this.slots) s.frame?.tex.destroy();
       const frames = res.frames.sort((a, b) => a.validMs - b.validMs);
       this.unit = frames[0]?.unit ?? '';
       const codes = e.hours;
-      const mk = (f: (typeof frames)[number]): Slot => ({ frame: { t: f.validMs, key: `${key}|${f.validMs}`, tex: uploadGrid(this.r, f.nx, f.ny, f.data), proj: f.proj, bounds: f.bounds }, validMs: f.validMs, strings: f.strings });
+      const mk = (f: (typeof frames)[number]): Slot => ({ frame: { t: f.validMs, key: `${key}|${f.validMs}`, tex: uploadGrid(this.r, f.nx, f.ny, f.data, this.id), proj: f.proj, bounds: f.bounds }, validMs: f.validMs, strings: f.strings });
       if (!codes) this.slots = frames.map(mk);
       else if (codes[0] < 0) this.slots = codes.map((_, k) => (frames[k] ? mk(frames[k]) : { frame: null, validMs: null, strings: [] }));
       else {
@@ -154,9 +154,9 @@ export class WinterLayer extends GridLayer {
     if (url + d.palette === this.key && Date.now() - this.at < 10 * 60e3) return;
     this.setStatus('loading', 'WPC winter accumulation');
     try {
-      const res = await pool.run('grid.all', { url, lo: d.low, hi: d.high, maxFrames: 1 });
+      const res = await pool.for(this.id).run('grid.all', { url, lo: d.low, hi: d.high, maxFrames: 1 });
       const f = res.frames[0];
-      this.setFrames([{ t: f.validMs, key: url, tex: uploadGrid(this.r, f.nx, f.ny, f.data), proj: f.proj, bounds: f.bounds }]);
+      this.setFrames([{ t: f.validMs, key: url, tex: uploadGrid(this.r, f.nx, f.ny, f.data, this.id), proj: f.proj, bounds: f.bounds }]);
       this.validRange = [f.validMs - settings.num('layerState.WinterIntervalLengthHours') * 3600e3, f.validMs];
       this.key = url + d.palette; this.at = Date.now();
       this.setStatus('ready', `WPC PWPF ${url.split('/').pop()}`);

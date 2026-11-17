@@ -13,9 +13,9 @@ export interface GridFrame { t: number; tex: GPUTexture; proj: ProjParams; bound
 export interface GridDisplay { low: number; high: number; unit: string; palette: string; label: string; alpha: number; smoothing: boolean; legend: boolean; blend: boolean }
 
 /** Uploads worker output: Uint16Array = half floats (r16float), Float32Array = exact texels (r32float). */
-export function uploadGrid(r: Renderer, nx: number, ny: number, data: Uint16Array | Float32Array): GPUTexture {
-  if (data instanceof Float32Array) return r.gpu.float32Filterable ? r.gpu.texture2D(nx, ny, "r32float", data, 4) : r.gpu.texture2D(nx, ny, "r16float", toHalf(data), 2);
-  return r.gpu.texture2D(nx, ny, 'r16float', data, 2);
+export function uploadGrid(r: Renderer, nx: number, ny: number, data: Uint16Array | Float32Array, owner?: string): GPUTexture {
+  if (data instanceof Float32Array) return r.gpu.float32Filterable ? r.gpu.texture2D(nx, ny, "r32float", data, 4, owner) : r.gpu.texture2D(nx, ny, "r16float", toHalf(data), 2, owner);
+  return r.gpu.texture2D(nx, ny, 'r16float', data, 2, owner);
 }
 export abstract class GridLayer extends MapLayer {
   frames: GridFrame[] = [];

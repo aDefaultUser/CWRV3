@@ -6,6 +6,7 @@ import { readShp, readDbf, simplify } from '../decode/shapefile';
 import { unzip, gunzip } from '../decode/zip';
 import { untar } from '../decode/tar';
 import { fetchBytes } from '../data/net';
+import type { JobClock } from './job-clock';
 
 export interface VectorFeature {
   /** 'point' | 'line' | 'polygon' */ kind: string;
@@ -117,9 +118,9 @@ export async function readShapeArchive(bytes: Uint8Array, kind: 'zip' | 'tar' | 
   return out;
 }
 
-export async function fetchShapes(a: { url: string; kind: 'zip' | 'tar' | 'tgz'; match?: string; tol?: number; fields?: string[]; cache?: 'none' | 'immutable' }) {
+export async function fetchShapes(a: { url: string; kind: 'zip' | 'tar' | 'tgz'; match?: string; tol?: number; fields?: string[]; cache?: 'none' | 'immutable' }, job: JobClock) {
   const bytes = await fetchBytes(a.url, { cache: a.cache ?? 'none', maxBytes: 200 * 1024 * 1024 });
-  return readShapeArchive(bytes, a.kind, a);
+  return job.time(() => readShapeArchive(bytes, a.kind, a));
 }
 
 /** GeoJSON → features (Polygon / MultiPolygon triangulated; GeoJSON rings are counter-clockwise outers). */

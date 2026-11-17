@@ -77,7 +77,7 @@ const caches = new WeakMap<Renderer, PtypeCache<PtypeTex>>();
 export function ptypeAt(r: Renderer, t: number, onChange: () => void): PtypeState<PtypeTex> {
   let c = caches.get(r);
   if (!c) {
-    c = new PtypeCache<PtypeTex>(loadPtypeGrid, (g) => ({ tex: r.gpu.texture2D(g.nx, g.ny, 'rgba8unorm', g.packed), proj: lambertProj(g.grid) }), (v) => setTimeout(() => v.tex.destroy(), 2000));
+    c = new PtypeCache<PtypeTex>(loadPtypeGrid, (g) => ({ tex: r.gpu.texture2D(g.nx, g.ny, 'rgba8unorm', g.packed, 4, 'ptype'), proj: lambertProj(g.grid) }), (v) => setTimeout(() => v.tex.destroy(), 2000));
     caches.set(r, c);
   }
   return c.get(t, onChange);

@@ -33,6 +33,7 @@ export function mainMenuActions(app: App): Record<string, MenuAction> {
       G5: { run: () => app.toast('Not needed: CWRV3 derives model grid geolocation from each GRIB2 grid definition.') },
       F2: { run: () => app.setOutputSize() }, R2: { run: () => app.loadPaletteFiles(), caption: 'Load color palette files…' }, T1: { disabled: 'DEGRIB helper is not used (GRIB2 is decoded in workers)' },
       F3: { run: () => settings.set('config.generalShowPerfMetrics', !settings.bool('config.generalShowPerfMetrics')), checked: () => settings.bool('config.generalShowPerfMetrics') },
+      PerfPanel: { run: () => app.perf.toggle(), checked: () => app.perf.visible },
       R5: { run: () => { app.renderer.buildPipelines(); for (const l of app.layers.values()) (l as { invalidate?: () => void }).invalidate?.(); app.toast('Shaders recompiled'); } },
       G1: { run: () => settings.set('settings.generalShowExceptions', !settings.bool('settings.generalShowExceptions')), checked: () => settings.bool('settings.generalShowExceptions') },
       R1: { run: () => location.reload(), caption: 'Reset imagery tiles (reload)' },

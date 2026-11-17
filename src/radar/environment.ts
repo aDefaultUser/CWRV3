@@ -43,7 +43,7 @@ export function isothermsAt(p: RadarPoint, t: number): Isotherms | null {
     if (c > Date.now() - 50 * 60e3 || tab.tried.has(c)) continue; // not published yet, or already requested
     tab.tried.add(c);
     const url = hrrrUrl(new Date(c)).replace('wrfsfcf', 'wrfprsf');
-    pool.run('grib.point', { url, fields: [['HGT', '0C isotherm'], ['HGT', '253 K level']], lon: p.lon, lat: p.lat }).then((r: { values: (number | null)[] }) => {
+    pool.for('environment').run('grib.point', { url, fields: [['HGT', '0C isotherm'], ['HGT', '253 K level']], lon: p.lon, lat: p.lat }).then((r: { values: (number | null)[] }) => {
       const [h0, hm20] = r.values;
       if (tables.get(key) !== tab || h0 === null || hm20 === null) return; // evicted meanwhile, or no data
       tab.entries.push({ t: c, h0, hm20 });

@@ -404,6 +404,13 @@
       "label": "Fog",
       "icon": "cloud-fog",
       "file": "tabler/cloud-fog.svg"
+    },
+    {
+      "group": "ui",
+      "role": "repository",
+      "label": "Source repository",
+      "icon": "brand-github",
+      "file": "tabler/brand-github.svg"
     }
   ],
   "files": {
@@ -430,6 +437,12 @@
       "style": "outline",
       "bytes": 378,
       "sha256": "01406965f01ce9076cda12228f13fd6a52bbc0dd36485303122da38e7b120bf6"
+    },
+    "brand-github.svg": {
+      "upstream": "icons/outline/brand-github.svg",
+      "style": "outline",
+      "bytes": 643,
+      "sha256": "b8c97e58fab5762713c8cbaa3b704bf072d326bee5be3d1de30a095179a80b38"
     },
     "building-broadcast-tower.svg": {
       "upstream": "icons/outline/building-broadcast-tower.svg",

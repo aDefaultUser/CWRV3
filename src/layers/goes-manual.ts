@@ -43,7 +43,7 @@ export class GoesManualLayer extends MapLayer {
   async load(files: File[]) {
     for (const f of files) {
       const bytes = new Uint8Array(await f.arrayBuffer());
-      const sum = await pool.run('goes.examine', { bytes: bytes.slice() });
+      const sum = await pool.for(this.id).run('goes.examine', { bytes: bytes.slice() });
       if (sum.variable !== 'CMI') throw new Error(`${f.name}: only ABI L2 Cloud and Moisture Imagery (CMI) files can be displayed (found ${sum.variable})`);
       if (sum.projection !== 'GOES Imager') throw new Error(`${f.name}: ${sum.projection} projection files cannot be displayed (fixed-grid files only)`);
       const first = this.frames[0];
@@ -52,11 +52,11 @@ export class GoesManualLayer extends MapLayer {
       }
       const [min, max] = bandRange(sum.band);
       const k = Math.max(1, Math.round(Math.max(sum.width, sum.height) / 5000));
-      const res = await pool.run('goes', { bytes, factor: k, min, max });
+      const res = await pool.for(this.id).run('goes', { bytes, factor: k, min, max });
       // Frames blend in one projection, so the fixed grid itself (not only band and size) must match.
       const diff = first ? fixedGridMismatch(first.grid, res.proj) : [];
       if (diff.length) throw new Error(`${f.name}: fixed grid differs from the files already loaded (${diff.join(', ')}); clear the loaded files to switch satellite or sector`);
-      const tex = this.r.gpu.texture2D(res.width, res.height, 'r8unorm', res.codes, 1);
+      const tex = this.r.gpu.texture2D(res.width, res.height, 'r8unorm', res.codes, 1, this.id);
       this.frames.push({ name: f.name, t: res.startMs, tex, proj: geosProj(res.proj, res.width, res.height), grid: res.proj, band: res.band, lon0: res.proj.lon0, width: sum.width, height: sum.height, platform: res.platform });
     }
     this.frames.sort((a, b) => a.t - b.t);
@@ -69,9 +69,9 @@ export class GoesManualLayer extends MapLayer {
     if (!on) { this.embed = false; return null; }
     const newest = this.frames[this.frames.length - 1];
     if (!newest) return 'Load GOES-R files first.';
-    if (newest.t < timeline.start || newest.t > timeline.end) {
+    if (newest.t < timeline.loopStart || newest.t > timeline.loopEnd) {
       const f = (t: number) => new Date(t).toLocaleString();
-      return `The newest loaded file (${f(newest.t)}) is outside the main timeline (${f(timeline.start)} – ${f(timeline.end)}). Load files from within the loop period, or lengthen the loop, then try again.`;
+      return `The newest loaded file (${f(newest.t)}) is outside the main timeline (${f(timeline.loopStart)} – ${f(timeline.loopEnd)}). Load files from within the loop period, or lengthen the loop, then try again.`;
     }
     this.embed = true;
     return null;

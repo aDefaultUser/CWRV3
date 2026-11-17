@@ -12,49 +12,86 @@ export const IMAGERY_URL = (z: number, x: number, y: number) =>
   `https://gibs.earthdata.nasa.gov/wmts/epsg3857/best/BlueMarble_ShadedRelief_Bathymetry/default/GoogleMapsCompatible_Level8/${z}/${y}/${x}.jpeg`;
 export const TERRAIN_URL = (z: number, x: number, y: number) => `https://s3.amazonaws.com/elevation-tiles-prod/terrarium/${z}/${x}/${y}.png`;
 const IMG_MAX = 8, TER_MAX = 11, SLOTS = 256, MAX_TILES = 600;
+/** Levels 0–2 (21 tiles) cover the globe and are never evicted: the last fallback of every tile. */
+const KEEP_Z = 2;
+const FAIL_RETRY_MS = 30_000;
+/** A tile loaded when every slot had become pinned is dropped and not requested again for this long. */
+const FULL_RETRY_MS = 2_000;
 
-class TileCache {
+export class TileCache {
   tex: GPUTexture;
   /** Land elevation range per loaded slot (terrain cache only, for dynamic hypsometric tinting). */
   ranges = new Map<number, [number, number]>();
-  private slots = new Map<string, { slot: number; used: number }>();
+  private slots = new Map<string, { slot: number; used: number; z: number }>();
   private free: number[] = [];
   private loading = new Set<string>();
-  private failed = new Set<string>();
+  /** Failed or dropped loads (time they may be requested again): never retried in a tight loop. */
+  private retryAt = new Map<string, number>();
   private queue: { key: string; z: number; x: number; y: number; pri: number }[] = [];
   private active = 0;
+  /** Newest frame number seen (eviction never takes a slot drawn in the last frames). */
+  private frame = 0;
+  private coarseRequested = false;
   loaded = 0;
+  /** Tiles fetched and decoded but dropped because no slot could be freed (should stay near zero). */
+  dropped = 0;
   /**
    * `elevation`: Terrarium height tiles, a single level (encoded heights are never averaged); otherwise colour imagery
    * with GPU-generated mip levels for minified and oblique views.
    */
   constructor(private r: Renderer, private url: (z: number, x: number, y: number) => string, readonly maxZ: number, private onLoad: () => void, private elevation = false) {
+    const levels = elevation ? 1 : mipLevels(256);
     this.tex = r.gpu.device.createTexture({
-      size: [256, 256, SLOTS], format: 'rgba8unorm', mipLevelCount: elevation ? 1 : mipLevels(256),
+      size: [256, 256, SLOTS], format: 'rgba8unorm', mipLevelCount: levels,
       usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.RENDER_ATTACHMENT | (elevation ? 0 : GPUTextureUsage.STORAGE_BINDING),
     });
     for (let i = SLOTS - 1; i >= 0; i--) this.free.push(i);
+    let bytes = 0;
+    for (let l = 0; l < levels; l++) bytes += (256 >> l) ** 2 * 4 * SLOTS;
+    r.gpu.trackTexture(this.tex, bytes, 'basemap');
   }
-  /** Returns [slot, z, x, y] of the best available ancestor (requests the tile itself). */
+  /**
+   * Returns [slot, z, x, y] of the best available tile for (z, x, y): the tile itself or its nearest loaded ancestor.
+   * Only that drawn tile is marked as used (pinned while drawn): pinning every ancestor of a wide view would pin the
+   * whole atlas and leave no slot for the tiles it waits for. A missing tile is requested together with its
+   * fallback: the next coarser level below the best one loaded (or the always-kept coarse level), which loads
+   * first, so a tile in view is never left without imagery.
+   */
   lookup(z: number, x: number, y: number, frame: number, pri: number): [number, number, number, number] | null {
+    this.frame = Math.max(this.frame, frame);
     const zz = Math.min(z, this.maxZ);
     const sx = x >> (z - zz), sy = y >> (z - zz);
+    let best: [number, number, number, number] | null = null;
     for (let k = zz; k >= 0; k--) {
-      const key = `${k}/${sx >> (zz - k)}/${sy >> (zz - k)}`;
-      const e = this.slots.get(key);
-      if (k === zz && !e) this.request(key, k, sx >> (zz - k), sy >> (zz - k), pri);
-      if (e) { e.used = frame; return [e.slot, k, sx >> (zz - k), sy >> (zz - k)]; }
+      const ax = sx >> (zz - k), ay = sy >> (zz - k);
+      const e = this.slots.get(`${k}/${ax}/${ay}`);
+      if (e) { e.used = frame; best = [e.slot, k, ax, ay]; break; }
     }
-    return null;
+    if (!best || best[1] < zz) {
+      this.request(zz, sx, sy, pri);
+      const fallback = best ? best[1] + 1 : Math.min(zz, KEEP_Z);
+      if (fallback < zz) this.request(fallback, sx >> (zz - fallback), sy >> (zz - fallback), fallback * 10 - 5);
+    }
+    return best;
   }
-  private request(key: string, z: number, x: number, y: number, pri: number) {
-    if (this.loading.has(key) || this.failed.has(key)) return;
-    if (this.queue.some((q) => q.key === key)) return;
+  private request(z: number, x: number, y: number, pri: number) {
+    const key = `${z}/${x}/${y}`;
+    if (this.loading.has(key) || this.slots.has(key)) return;
+    if (Date.now() < (this.retryAt.get(key) ?? 0)) return;
+    const q = this.queue.find((e) => e.key === key);
+    if (q) { q.pri = Math.min(q.pri, pri); return; }
     this.queue.push({ key, z, x, y, pri });
   }
   pump(frame: number) {
+    this.frame = Math.max(this.frame, frame);
+    // The kept coarse levels are loaded first, once, so every tile has a fallback wherever the view goes.
+    if (!this.coarseRequested) { this.coarseRequested = true; for (let k = 0; k <= Math.min(KEEP_Z, this.maxZ); k++) for (let i = 0; i < 4 ** k; i++) this.request(k, i % 2 ** k, Math.floor(i / 2 ** k), k * 10 - 9); }
     this.queue.sort((a, b) => a.pri - b.pri);
-    while (this.active < 8 && this.queue.length) {
+    // Fetch only what a slot is available for (free, or evictable now), less the loads already in flight: tiles
+    // that would be dropped on arrival are not fetched and decoded again every frame.
+    let room = this.free.length - this.active;
+    for (const v of this.slots.values()) if (this.evictable(v)) room++;
+    while (this.active < 8 && this.queue.length && room-- > 0) {
       const q = this.queue.shift()!;
       this.loading.add(q.key);
       this.active++;
@@ -63,23 +100,30 @@ class TileCache {
         const bmp = await createImageBitmap(await res.blob(), { colorSpaceConversion: 'none', premultiplyAlpha: 'none' });
         let slot = this.free.pop();
         if (slot === undefined) {
+          // Least recently drawn tile that is not part of the kept coarse coverage and not drawn in the last frames.
           let oldest: string | null = null, ou = Infinity;
-          for (const [k, v] of this.slots) if (v.used < ou && v.used < frame - 2) { ou = v.used; oldest = k; }
-          if (!oldest) { bmp.close(); return; }
+          for (const [k, v] of this.slots) if (this.evictable(v) && v.used < ou) { ou = v.used; oldest = k; }
+          // The view pinned every slot while this tile loaded: drop it and back off instead of refetching each frame.
+          if (!oldest) { bmp.close(); this.dropped++; this.retryAt.set(q.key, Date.now() + FULL_RETRY_MS); return; }
           slot = this.slots.get(oldest)!.slot;
           this.slots.delete(oldest);
         }
+        const t0 = performance.now();
         this.r.gpu.device.queue.copyExternalImageToTexture({ source: bmp }, { texture: this.tex, origin: [0, 0, slot] }, [256, 256]);
+        this.r.gpu.recordUpload('basemap', 256 * 256 * 4, performance.now() - t0);
         if (this.elevation) this.ranges.set(slot, terrariumRange(bmp));
         else generateLayerMips(this.r.gpu.device, this.tex, slot); // a reused slot gets the new tile's levels
         bmp.close();
-        this.slots.set(q.key, { slot, used: frame });
+        this.slots.set(q.key, { slot, used: this.frame, z: q.z });
+        this.retryAt.delete(q.key);
         this.loaded++;
         this.onLoad();
-      }).catch(() => this.failed.add(q.key)).finally(() => { this.loading.delete(q.key); this.active--; });
+      }).catch(() => this.retryAt.set(q.key, Date.now() + FAIL_RETRY_MS)).finally(() => { this.loading.delete(q.key); this.active--; });
     }
     if (this.queue.length > 200) this.queue.length = 200;
   }
+  /** Not part of the kept coarse coverage and not drawn in the last frames. */
+  private evictable(v: { used: number; z: number }) { return v.z > KEEP_Z && v.used < this.frame - 2; }
 }
 
 /** Min/max land elevation (m, ≥ 0) of a Terrarium tile, sampled every 4th pixel. */
@@ -144,7 +188,7 @@ export class TileLayer implements Drawable {
     const p = getPalette(this.s.tintPalette);
     const lut = bakeLut(p, { low: -6000, high: 5000 });
     this.hypso?.destroy();
-    this.hypso = this.r.gpu.texture2D(1024, p.frames.length, 'rgba8unorm', lut);
+    this.hypso = this.r.gpu.texture2D(1024, p.frames.length, 'rgba8unorm', lut, 4, 'basemap');
     this.hypsoName = this.s.tintPalette;
     this.bg = null;
   }

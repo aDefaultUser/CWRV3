@@ -5,12 +5,14 @@ import { formDef, type Binding, type BindingMap } from './form';
 import { settings } from '../settings/store';
 import { settingExclusion } from '../settings/exclusions';
 import type { App } from '../app/app';
+import type { Timeline } from '../app/timeline';
 import { L3 } from '../radar/sources';
 import { PRODUCTS } from '../generated/products-catalog';
 import { RADAR_SITES } from '../generated/radar-sites';
 import { viewpoints, layerPresets, scenePresets, sceneMask, setSceneMask, mapStyles, layerOrder } from '../app/stores';
 import { paletteNames } from '../palettes/library';
 import { SAT_NAMES } from '../layers/sat-bands';
+import { GOES_L2, type GoesL2Layer } from '../layers/goes-l2';
 import { decode as decodeUser, writeShapefileZip } from '../layers/usershapes';
 import { rgbRecipes } from '../app/stores';
 import { parseRecipeText } from '../render/recipes';
@@ -28,6 +30,13 @@ const custom = (get: () => unknown, set: (v: any) => void, items?: () => string[
 const status = (fn: () => string): Binding => ({ kind: 'status', text: fn });
 const na = (reason: string): Binding => ({ kind: 'na', reason });
 const pointItem = (id: string, i: number): Binding => custom(() => settings.arr<number>(id)[i], (v) => { const p = [...settings.arr<number>(id)]; p[i] = Number(v); settings.set(id, p); });
+const OWNER_NAMES: Record<Timeline['controller'], string> = { general: 'General timeline', 'nexrad-l2': 'NEXRAD Level 2 loop', 'nexrad-l3': 'NEXRAD Level 3 loop', mrms: 'MRMS loop', model: 'Model timeline' };
+/** Owner, frame count and frame time of the playing loop; names a loop-time override when it changes the time. */
+export function timingText(tl: Timeline): string {
+  const f = tl.frameTiming(), ms = (v: number) => `${Math.round(v)} ms`;
+  const over = f.override ? ` (set ${ms(f.requested)}; ${f.override === 'min' ? 'minimum' : 'maximum'} loop time override)` : '';
+  return `${OWNER_NAMES[tl.controller]}: ${tl.frames.length} frames, ${ms(f.applied)}/frame${over}, end delay ${ms(tl.endDelayMs())}`;
+}
 const VENDOR = na('Vendor service, subscription or activation flow: not part of CWRV3');
 
 const WARN_CODES = ['TOR', 'SVR', 'SQW', 'SMW', 'FFW', 'SWS', 'EWW'];
@@ -268,15 +277,25 @@ export function buildBindings(app: App): Record<string, BindingMap> {
     'TFrmGLMControl.sPanel1': VENDOR, 'TFrmGLMControl.sSpeedButton4': VENDOR, 'TFrmGLMControl.sLabel7': VENDOR,
   };
 
+  const useL2 = () => settings.bool('ext.layerState.ExtendedSatelliteUseL2');
+  const l2Layer = () => app.layers.get('satelliteL2') as GoesL2Layer;
   const goesExt: BindingMap = {
     'TFrmGOESExtended.sf1': { kind: 'list', items: () => ['GOES-19 (East)', 'GOES-18 (West)', 'Off'].map((label) => ({ label })), selected: () => (settings.bool('layerState.ExtendedSatelliteOn') ? settings.num('ext.layerState.ExtendedSatellitePlatform') : 2), select: (i) => { settings.set('ext.layerState.ExtendedSatellitePlatform', i); settings.set('layerState.ExtendedSatelliteOn', i !== 2); } },
     'TFrmGOESExtended.sf2': { kind: 'list', items: () => ['CONUS', 'Full Disk', 'Mesoscale 1', 'Mesoscale 2'].map((label) => ({ label })), selected: () => settings.num('ext.layerState.ExtendedSatelliteDomain'), select: (i) => settings.set('ext.layerState.ExtendedSatelliteDomain', i) },
-    'TFrmGOESExtended.sf3': { kind: 'list', items: () => ['Single Band', 'Derived RGB'].map((label) => ({ label })), selected: () => (settings.bool('layerState.ExtendedSatelliteUseMulti') ? 1 : 0), select: (i) => settings.set('layerState.ExtendedSatelliteUseMulti', i === 1) },
-    'TFrmGOESExtended.sRadioGroup1': custom(() => settings.num('layerState.ExtendedSatelliteProductIndex'), (i) => { settings.set('layerState.ExtendedSatelliteProductIndex', i); settings.set('layerState.ExtendedSatelliteUseMulti', false); }),
-    'TFrmGOESExtended.sComboBox1': custom(() => settings.num('layerState.ExtendedSatelliteMultiIndex'), (i) => { settings.set('layerState.ExtendedSatelliteMultiIndex', i); settings.set('layerState.ExtendedSatelliteUseMulti', true); }, () => ['True Color (bands 1/2/3)', 'IR/VIS Sandwich (bands 2/14)']),
+    'TFrmGOESExtended.sf3': { kind: 'list', items: () => ['Single Band', 'Derived RGB', 'Level 2 Product'].map((label) => ({ label })),
+      selected: () => (useL2() ? 2 : settings.bool('layerState.ExtendedSatelliteUseMulti') ? 1 : 0),
+      select: (i) => { settings.set('ext.layerState.ExtendedSatelliteUseL2', i === 2); if (i < 2) settings.set('layerState.ExtendedSatelliteUseMulti', i === 1); } },
+    'TFrmGOESExtended.sRadioGroup1': custom(() => settings.num('layerState.ExtendedSatelliteProductIndex'), (i) => { settings.set('layerState.ExtendedSatelliteProductIndex', i); settings.set('layerState.ExtendedSatelliteUseMulti', false); settings.set('ext.layerState.ExtendedSatelliteUseL2', false); }),
+    'TFrmGOESExtended.sComboBox1': custom(() => settings.num('layerState.ExtendedSatelliteMultiIndex'), (i) => { settings.set('layerState.ExtendedSatelliteMultiIndex', i); settings.set('layerState.ExtendedSatelliteUseMulti', true); settings.set('ext.layerState.ExtendedSatelliteUseL2', false); }, () => ['True Color (bands 1/2/3)', 'IR/VIS Sandwich (bands 2/14)']),
+    'TFrmGOESExtended.l2Product': custom(() => settings.num('ext.layerState.ExtendedSatelliteL2Product'), (i) => { settings.set('ext.layerState.ExtendedSatelliteL2Product', i); settings.set('ext.layerState.ExtendedSatelliteUseL2', true); },
+      () => GOES_L2.map((p) => `${p.name}${p.sectors.length < 4 ? ' (no CONUS)' : ''}`)),
+    'TFrmGOESExtended.l2Status': status(() => { const l = l2Layer(); return !useL2() ? 'Select "Level 2 Product" above to show it.' : l.unavailable() ?? (l.status.text || 'Waiting for data…'); }),
     'TFrmGOESExtended.sSpeedButton3': act(() => app.dialog('TFrmGOESMultispectralRGB')),
     'TFrmGOESExtended.sSpeedButton7': act(() => settings.set('ext.layerState.LoopLength', Math.min(2, settings.num('ext.layerState.LoopLength')))),
-    'TFrmGOESExtended.sSpeedButton31': act(() => { const b = settings.num('layerState.ExtendedSatelliteProductIndex'); app.arrayPaletteSelector('settings.goesExtendedBandPals', b, `Band ${b + 1}`); }),
+    'TFrmGOESExtended.sSpeedButton31': act(() => {
+      if (useL2()) { const i = settings.num('ext.layerState.ExtendedSatelliteL2Product'); app.arrayPaletteSelector('ext.settings.goesL2Palettes', i, GOES_L2[i].name); return; }
+      const b = settings.num('layerState.ExtendedSatelliteProductIndex'); app.arrayPaletteSelector('settings.goesExtendedBandPals', b, `Band ${b + 1}`);
+    }, undefined, () => (useL2() ? 'Product Palette' : 'Band Palette')),
     'TFrmGOESExtended.sSpeedButton32': alpha('settings.goesExtendedAlpha'),
     'TFrmGOESExtended.sCheckBox1': bool('settings.goesExtendedForce60fps'),
     'TFrmGOESExtended.sCheckBox2': bool('settings.goesMesoThird'),
@@ -378,14 +397,11 @@ export function buildBindings(app: App): Record<string, BindingMap> {
   };
 
   const timelineBlock: BindingMap = {
-    'TFrmMap.TimelineSelect': custom(() => settings.num('ext.layerState.TimelineSelect'), (v: number) => {
-      settings.set('ext.layerState.TimelineSelect', v);
-      const model = (app as unknown as { model?: { publishTimeline(): void } }).model;
-      if (v === 1) model?.publishTimeline(); else { app.timeline.controller = 'general'; app.refreshAll(); }
-    }, () => ['Main Timeline', 'Model Timeline']),
+    // The timeline resolves its owner from this setting (src/app/timeline.ts); no controller is forced here.
+    'TFrmMap.TimelineSelect': custom(() => settings.num('ext.layerState.TimelineSelect'), (v: number) => settings.set('ext.layerState.TimelineSelect', v), () => ['Main Timeline', 'Model Timeline']),
     'TFrmMap.ToolButton2': act(() => app.timeline.first(), undefined, () => ''),
     'TFrmMap.ToolButton3': act(() => app.timeline.step(-1), undefined, () => ''),
-    'TFrmMap.ToolButton5': { kind: 'action', run: () => app.timeline.play(), down: () => app.timeline.playing, caption: () => '', icon: () => (app.timeline.playing ? 'pause' : 'play') } as Binding,
+    'TFrmMap.ToolButton5': { kind: 'action', run: () => app.timeline.play(), down: () => app.timeline.playing, caption: () => '', icon: () => (app.timeline.playing ? 'pause' : 'play'), title: () => `${app.timeline.playing ? 'Pause' : 'Play'} · ${timingText(app.timeline)}` } as Binding,
     'TFrmMap.ToolButton9': act(() => app.timeline.step(1), undefined, () => ''),
     'TFrmMap.ToolButton10': act(() => app.timeline.last(), undefined, () => ''),
     'TFrmMap.sToolBar2': na('alternate (hidden) transport toolbar of the original; not shown'),

@@ -7,6 +7,8 @@ const pct = (a: number[], p: number) => (a.length ? a[Math.min(a.length - 1, Mat
 
 export class FrameMeter {
   samples: FrameSample[] = [];
+  /** Rendered frames since start. */
+  total = 0;
   private last = 0;
   recording: FrameSample[] | null = null;
   /** Raw RAF timestamps while recording (display cadence, independent of the render cap). */
@@ -20,6 +22,7 @@ export class FrameMeter {
     const dt = this.last ? now - this.last : 0;
     this.last = now;
     if (!dt) return;
+    this.total++;
     const s: FrameSample = { t: now, dt, cpu, gpu };
     if (this.pendingEv.length) { s.ev = this.pendingEv; this.pendingEv = []; }
     this.samples.push(s);

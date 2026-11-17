@@ -38,7 +38,7 @@ export class Lut {
   constructor(r: Renderer, p: Palette, o: BakeOptions) {
     const data = bakeLut(p, o);
     this.rows = p.frames.length;
-    this.tex = r.gpu.texture2D(1024, this.rows, 'rgba8unorm', data);
+    this.tex = r.gpu.texture2D(1024, this.rows, 'rgba8unorm', data, 4, 'palette LUTs');
     this.data = data;
   }
   data: Uint8Array;
@@ -116,13 +116,13 @@ export interface SweepTex { tex: GPUTexture; firstKm: number; gateKm: number; ga
 
 /** Uploads a sweep as rows = radials + 2 padding rows (wrap for complete sweeps, clamp otherwise). 16-bit sweeps use
  * r32float holding word/65535 (exact); `upload` is the pre-padded image built in the worker when available. */
-export function uploadSweep(r: Renderer, s: { radials: number; gates: number; firstKm: number; gateKm: number; azimuths: Float32Array; half: boolean; complete: boolean; codes: Uint8Array | Uint16Array; wordSize: 8 | 16; upload?: Uint8Array | Float32Array }): SweepTex {
+export function uploadSweep(r: Renderer, s: { radials: number; gates: number; firstKm: number; gateKm: number; azimuths: Float32Array; half: boolean; complete: boolean; codes: Uint8Array | Uint16Array; wordSize: 8 | 16; upload?: Uint8Array | Float32Array }, owner?: string): SweepTex {
   const rows = s.radials + 2, n = s.gates;
   const img = s.upload ?? padSweep(s.codes, s.radials, n, s.complete, s.wordSize);
   let tex: GPUTexture;
-  if (s.wordSize === 8) tex = r.gpu.texture2D(n, rows, 'r8unorm', img, 1);
-  else if (r.gpu.float32Filterable) tex = r.gpu.texture2D(n, rows, 'r32float', img, 4);
-  else tex = r.gpu.texture2D(n, rows, 'r16float', toHalf(img as Float32Array), 2); // fallback: ~11-bit precision
+  if (s.wordSize === 8) tex = r.gpu.texture2D(n, rows, 'r8unorm', img, 1, owner);
+  else if (r.gpu.float32Filterable) tex = r.gpu.texture2D(n, rows, 'r32float', img, 4, owner);
+  else tex = r.gpu.texture2D(n, rows, 'r16float', toHalf(img as Float32Array), 2, owner); // fallback: ~11-bit precision
   // Mean azimuth spacing over the sweep (robust to small irregularities).
   let span = s.azimuths[s.radials - 1] - s.azimuths[0];
   if (span < 0) span += 360;

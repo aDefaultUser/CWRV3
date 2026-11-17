@@ -62,8 +62,8 @@ export class MrmsLayer extends GridLayer {
       const p = this.product();
       const [lo, hi] = mrmsRange(p, settings.bool('ext.settings.mrmsCorrectedUnits'));
       const factor = settings.num('config.performanceMode') === 0 ? 3 : 2;
-      const res = await pool.run('grid.mrms', { url: `${MRMS_BUCKET}/${f.key}`, lo, hi, factor, conv: mrmsValueFactor(p) });
-      return { tex: uploadGrid(r, res.nx, res.ny, res.data), proj: res.proj, bounds: res.bounds, min: res.min, max: res.max };
+      const res = await pool.for(this.id).run('grid.mrms', { url: `${MRMS_BUCKET}/${f.key}`, lo, hi, factor, conv: mrmsValueFactor(p) });
+      return { tex: uploadGrid(r, res.nx, res.ny, res.data, this.id), proj: res.proj, bounds: res.bounds, min: res.min, max: res.max };
     }, (d) => d.tex.destroy(), 3, () => this.sync());
   }
 
@@ -90,11 +90,15 @@ export class MrmsLayer extends GridLayer {
     else if (newest) this.statusText = `Status: Loaded.\nNewest frame ${new Date(newest.t).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}`;
     const pt = this.typed() && this.ptypeShown ? ` · ${ptypeLabel(this.ptypeShown)}` : '';
     this.setStatus(c.ready ? 'ready' : c.error && !c.loading ? 'error' : 'loading', this.statusText.replace('\n', ' ') + pt, { frames: c.ready, newestMs: newest?.t });
-    if (settings.bool('settings.mrmsTimelineConstrain') && this.enabled() && this.frames.length) timeline.setFrames(this.frames.map((f) => f.t), 'mrms');
+    this.publishTimeline();
+  }
+  /** Offers the loop to the main timeline while MRMS is on and "Wrap timeline to MRMS loop" is set. */
+  private publishTimeline() {
+    timeline.offer('mrms', settings.bool('settings.mrmsTimelineConstrain') && this.enabled() ? this.frames.map((f) => f.t) : null);
   }
 
   async refresh() {
-    if (!this.enabled()) { this.statusText = 'Status: Awaiting activation...'; this.setStatus('off', ''); return; }
+    if (!this.enabled()) { this.statusText = 'Status: Awaiting activation...'; this.setStatus('off', ''); this.publishTimeline(); return; }
     const p = this.product();
     if (p.index !== this.loadedProduct) { this.store.clear(); this.frames = []; this.loadedProduct = p.index; this.index = null; }
     // Re-read the index when it is older than the product's refresh minutes.
@@ -105,13 +109,13 @@ export class MrmsLayer extends GridLayer {
       catch (e) { this.statusText = 'Status: Error loading chosen product.'; this.setStatus('error', `MRMS index: ${(e as Error).message}`); return; }
     }
     if (this.loadedProduct !== p.index) return; // product switched while listing (back-fill aborts)
-    this.store.setWanted(pickMrmsFrames(this.index.entries, mrmsFrameCount(), timeline.start));
+    this.store.setWanted(pickMrmsFrames(this.index.entries, mrmsFrameCount(), timeline.loopStart));
     this.sync();
   }
 
   private async listIndex(p: MrmsProduct) {
     const dir = mrmsDir(p);
-    const days = new Set([timeline.start, Date.now()].map((t) => new Date(t).toISOString().slice(0, 10).replace(/-/g, '')));
+    const days = new Set([timeline.loopStart, Date.now()].map((t) => new Date(t).toISOString().slice(0, 10).replace(/-/g, '')));
     const out: { t: number; key: string }[] = [];
     for (const day of days) {
       const { objects } = await listS3(MRMS_BUCKET, `CONUS/${dir}/${day}/`, { maxPages: 4 });

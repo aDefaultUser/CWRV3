@@ -109,10 +109,10 @@ describe('fpsLimit', () => {
     // the timeline's per-frame updates (absent during holds) counted as interaction. Drive the real Timeline
     // through several loops at 180 Hz with a 60 fps target and a lower 50 fps loop limit: the loop limit applies
     // for the whole playback, holds included.
-    const tl = new Timeline();
+    const tl = new Timeline(() => 0);
     tl.anchor = Date.UTC(2024, 4, 6, 23);
     tl.refreshWindow();
-    tl.setFrames(Array.from({ length: 8 }, (_, i) => tl.end - (7 - i) * 6 * 60e3), 'nexrad-l2');
+    tl.offer('nexrad-l2', Array.from({ length: 8 }, (_, i) => tl.end - (7 - i) * 6 * 60e3));
     tl.play(true);
     const pacer = new FramePacer();
     const limits = { target: 60, loop: 50, idle: 15 };

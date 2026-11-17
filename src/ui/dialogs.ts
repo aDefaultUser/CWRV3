@@ -23,9 +23,10 @@ export function openDialog(formName: string, bindings: BindingMap, opts: { title
   opts.extra?.(body);
   dlg.append(title, body);
   document.getElementById('app')!.appendChild(dlg);
-  const w = form.width + 14, h = form.height + 36;
-  dlg.style.left = `${opts.x ?? Math.max(10, (innerWidth - w) / 2)}px`;
-  dlg.style.top = `${opts.y ?? Math.max(30, (innerHeight - h) / 3)}px`;
+  // Placed by its rendered size (extra content included) so it opens inside the window; the body scrolls when taller.
+  const w = dlg.offsetWidth || form.width + 14, h = dlg.offsetHeight || form.height + 36;
+  dlg.style.left = `${opts.x ?? Math.max(4, Math.min((innerWidth - w) / 2, innerWidth - w - 4))}px`;
+  dlg.style.top = `${opts.y ?? Math.max(4, Math.min(Math.max(30, (innerHeight - h) / 3), innerHeight - h - 4))}px`;
   dlg.onmousedown = () => (dlg.style.zIndex = String(++z));
   drag(dlg, title);
   open.set(formName, { el: dlg, form });

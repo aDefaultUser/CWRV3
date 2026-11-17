@@ -156,7 +156,7 @@ export function toolFormBindings(app: App): Record<string, BindingMap> {
       const out: string[] = [];
       for (const f of files) {
         try {
-          const s = await pool.run('goes.examine', { bytes: new Uint8Array(await f.arrayBuffer()) });
+          const s = await pool.for('goesManual').run('goes.examine', { bytes: new Uint8Array(await f.arrayBuffer()) });
           const n = (v: number | null, d = 4) => (v === null || !Number.isFinite(v) ? 'n/a' : v.toFixed(d));
           out.push(`${f.name}\n  Band ID: ${s.band ?? 'n/a'}   Variable: ${s.variable}   ${s.width}×${s.height}   ${s.platform} ${new Date(s.startMs).toISOString()}\n  Projection: ${s.projection}   Scale: ${s.scale}   Offset: ${s.offset}\n  Standard parallel: ${n(s.standardParallel)}   Central meridian: ${n(s.centralMeridian)}   Origin latitude: ${n(s.originLat)}   Perspective height: ${n(s.perspectiveHeight, 1)} m\n  Min ${n(s.min)}   Max ${n(s.max)}   Avg ${n(s.avg)}`);
         } catch (e) { out.push(`${f.name}: ${(e as Error).message}`); }

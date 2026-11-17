@@ -48,8 +48,8 @@ export class NationalRadarLayer extends MapLayer {
     super(r);
     this.draw_ = new RasterDraw(r);
     this.store = new FrameStore<NrFrame>(async (f) => {
-      const res = await pool.run('mrms', { url: `${MRMS_BUCKET}/${f.key}`, factor: 2 });
-      const tex = r.gpu.texture2D(res.width, res.height, 'r8unorm', res.codes, 1);
+      const res = await pool.for(this.id).run('mrms', { url: `${MRMS_BUCKET}/${f.key}`, factor: 2 });
+      const tex = r.gpu.texture2D(res.width, res.height, 'r8unorm', res.codes, 1, this.id);
       // Half an input cell: the input grid has 2 × width cells between lo1 and lo2 (cell centres).
       const halfLon = (res.lo2 - res.lo1) / (2 * (res.width * 2 - 1)), halfLat = (res.la1 - res.la2) / (2 * (res.height * 2 - 1));
       const lonW = res.lo1 - halfLon, lonE = res.lo2 + halfLon, latN = res.la1 + halfLat, latS = res.la2 - halfLat;
@@ -79,7 +79,7 @@ export class NationalRadarLayer extends MapLayer {
     const idx = settings.num('layerState.NationalRadarIdx');
     if (idx !== this.productIdx) { this.store.clear(); this.productIdx = idx; }
     const prod = NR_PRODUCTS[idx];
-    const days = new Set([timeline.start, timeline.end].map((t) => new Date(t).toISOString().slice(0, 10).replace(/-/g, '')));
+    const days = new Set([timeline.loopStart, timeline.loopEnd].map((t) => new Date(t).toISOString().slice(0, 10).replace(/-/g, '')));
     const keys: { t: number; key: string }[] = [];
     for (const day of days) {
       try {
@@ -92,7 +92,7 @@ export class NationalRadarLayer extends MapLayer {
         }
       } catch (e) { this.setStatus('error', `MRMS listing failed: ${(e as Error).message}`); return; }
     }
-    this.store.setWanted(pickMosaicFrames(keys, timeline.end, timeline.start));
+    this.store.setWanted(pickMosaicFrames(keys, timeline.loopEnd, timeline.loopStart));
     this.updateStatus();
   }
 

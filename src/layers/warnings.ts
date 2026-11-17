@@ -86,7 +86,7 @@ export class WarningsLayer extends MapLayer {
 
   async refresh() {
     if (!this.enabled()) { this.setStatus('off', ''); return; }
-    const start = new Date(timeline.start - 3 * 3600e3).toISOString().replace(/\.\d+Z$/, 'Z');
+    const start = new Date(timeline.loopStart - 3 * 3600e3).toISOString().replace(/\.\d+Z$/, 'Z');
     const events = [...WARN_TYPES.map((w) => w.event), ...WATCH_EVENTS];
     try {
       const out: any[] = [];

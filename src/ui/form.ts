@@ -14,7 +14,7 @@ export type Binding =
   | { kind: 'color'; id: string }
   | { kind: 'arrayItem'; id: string; index: number }
   | { kind: 'custom'; get: () => unknown; set: (v: any) => void; items?: () => string[]; disabled?: () => boolean; hidden?: () => boolean; max?: () => number }
-  | { kind: 'action'; run: (el: HTMLElement) => void; down?: () => boolean; disabled?: () => boolean; caption?: () => string; icon?: () => string; label?: string; iconName?: string }
+  | { kind: 'action'; run: (el: HTMLElement) => void; down?: () => boolean; disabled?: () => boolean; caption?: () => string; icon?: () => string; label?: string; iconName?: string; title?: () => string }
   | { kind: 'status'; text: () => string }
   | { kind: 'busy'; on: () => boolean }
   | { kind: 'gauge'; value: () => number; max: number }
@@ -29,6 +29,11 @@ const ICONS: Record<string, [string, boolean?]> = {
   'ui.TFrmMap.mapMode0': ['map', true], 'ui.TFrmMap.mapMode1': ['pencil', true], 'ui.TFrmMap.mapMode2': ['crosshair', true],
   'ui.TFrmMap.sSpeedButton1': ['camera'], 'ui.TFrmMap.sSpeedButton2': ['record'], 'ui.TFrmMap.sBitBtn1': ['mapstyle', true],
   'ui.TFrmMap.ToolButton2': ['first'], 'ui.TFrmMap.ToolButton3': ['prev'], 'ui.TFrmMap.ToolButton9': ['next'], 'ui.TFrmMap.ToolButton10': ['last'],
+};
+/** Accessible names of icon-only controls. */
+const ICON_LABELS: Record<string, string> = {
+  'ui.TFrmMap.ToolButton2': 'First frame', 'ui.TFrmMap.ToolButton3': 'Previous frame', 'ui.TFrmMap.ToolButton5': 'Play or pause the loop',
+  'ui.TFrmMap.ToolButton9': 'Next frame', 'ui.TFrmMap.ToolButton10': 'Skip to the newest frame (pauses)',
 };
 
 export const formDef = (name: string): FormDef => {
@@ -136,7 +141,7 @@ export function renderForm(formName: string, bindings: BindingMap, opts: { root?
         const sig = items.join('|') + cur;
         if (sig === last) return;
         last = sig; row.textContent = '';
-        items.forEach((label, i) => { const t = document.createElement('div'); t.textContent = label; if (i === cur) t.className = 'on'; t.onclick = () => edit(() => dyn.set(i)); row.appendChild(t); });
+        items.forEach((label, i) => { const t = document.createElement('div'); t.textContent = label; if (i === cur) t.className = 'on'; t.onclick = () => edit(() => dyn.set(i)); keyboardClick(t, 'tab'); row.appendChild(t); });
       });
       return;
     }
@@ -146,6 +151,7 @@ export function renderForm(formName: string, bindings: BindingMap, opts: { root?
       const tab = document.createElement('div');
       tab.textContent = caption(s);
       tab.onclick = () => { active = i; show(); };
+      keyboardClick(tab, 'tab');
       row.appendChild(tab);
       const body = document.createElement('div');
       body.style.position = 'absolute'; body.style.inset = '0';
@@ -227,6 +233,28 @@ function writeSetting(b: Binding, v: any) {
   }
 }
 
+/** Makes a clickable element reachable and operable from the keyboard (Tab, then Enter or Space). */
+export function keyboardClick(el: HTMLElement, role = 'button') {
+  el.tabIndex = 0;
+  el.setAttribute('role', role);
+  el.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); e.stopPropagation(); el.click(); } });
+}
+
+/** Range and increment of a spin control: binding overrides, then the design values, then the setting's range. */
+export function spinRange(c: ControlDef, b: Binding | undefined): { min: number | null; max: number | null; step: number } {
+  const def = b && 'id' in b ? SETTING_DEFS.get(b.id) : undefined;
+  const scale = b?.kind === 'num' ? b.scale ?? 1 : 1, offset = b?.kind === 'num' ? b.offset ?? 0 : 0;
+  const designRange = c.min !== undefined && c.max !== undefined && c.max > c.min;
+  const fromDef = (v: number | null | undefined) => (v === null || v === undefined || Math.abs(v) >= 2 ** 31 - 1 ? null : (v - offset) * scale);
+  const min = b?.kind === 'num' && b.min !== undefined ? b.min : designRange ? c.min! : fromDef(def?.min);
+  const max = b?.kind === 'num' && b.max !== undefined ? b.max : c.max !== undefined && c.max > (c.min ?? -Infinity) ? c.max : fromDef(def?.max);
+  let step = b?.kind === 'num' && b.step ? b.step : c.cls === 'TsDecimalSpinEdit' ? c.inc ?? 0.1 : c.inc ?? 1;
+  // An integer setting shown unscaled moves by whole units (a fractional step would round back to the same value).
+  if (def?.type === 'integer' && scale === 1) step = Math.max(1, Math.round(step));
+  return { min, max, step };
+}
+export const clampSpin = (v: number, r: { min: number | null; max: number | null }) => Math.min(r.max ?? Infinity, Math.max(r.min ?? -Infinity, v));
+
 function renderControl(c: ControlDef, b: Binding | undefined, refreshers: (() => void)[], edit: FormEdit): HTMLElement {
   const writeBinding = (b: Binding, v: any) => edit(() => writeSetting(b, v));
   const n = document.createElement('div');
@@ -234,6 +262,7 @@ function renderControl(c: ControlDef, b: Binding | undefined, refreshers: (() =>
   n.dataset.id = c.id;
   const ic = ICONS[c.id];
   if (ic) { n.dataset.icon = ic[0]; if (ic[1]) n.dataset.iconCol = '1'; }
+  if (ICON_LABELS[c.id]) { n.setAttribute('aria-label', ICON_LABELS[c.id]); n.title = ICON_LABELS[c.id]; }
   if (/^More|^Warnings/.test(c.caption ?? '') && /Speed|Btn/.test(c.cls)) n.dataset.more = '1';
   const cap = caption(c);
   // A control bound to a setting that has no runtime effect in the browser is shown disabled with the reason.
@@ -267,7 +296,8 @@ function renderControl(c: ControlDef, b: Binding | undefined, refreshers: (() =>
         head.appendChild(box);
         head.style.cursor = 'pointer';
         head.onclick = () => writeBinding(b, !readBinding(b));
-        refreshers.push(() => box.classList.toggle('on', !!readBinding(b)));
+        keyboardClick(head, 'checkbox');
+        refreshers.push(() => { const on = !!readBinding(b); box.classList.toggle('on', on); head.setAttribute('aria-checked', String(on)); });
       }
       const text = document.createElement('span'); text.textContent = cap;
       if (b?.kind === 'status') refreshers.push(() => { text.textContent = b.text(); });
@@ -363,17 +393,23 @@ function renderControl(c: ControlDef, b: Binding | undefined, refreshers: (() =>
       n.classList.add('spin');
       const inp = document.createElement('input');
       inp.type = 'number';
-      const def = b && 'id' in b ? SETTING_DEFS.get(b.id) : undefined;
-      const lo = b?.kind === 'num' && b.min !== undefined ? b.min : c.min !== undefined && c.max !== undefined && c.max > c.min ? c.min : def?.min ?? undefined;
-      const hi = b?.kind === 'num' && b.max !== undefined ? b.max : c.max !== undefined && c.max > (c.min ?? -Infinity) ? c.max : def?.max ?? undefined;
-      if (lo !== undefined && lo !== null) inp.min = String(lo);
-      if (hi !== undefined && hi !== null) inp.max = String(hi);
-      inp.step = String(b?.kind === 'num' && b.step ? b.step : c.cls === 'TsDecimalSpinEdit' ? (c.inc ?? 0.1) : c.inc ?? 1);
-      inp.value = String(c.value ?? c.text ?? '');
+      const r = spinRange(c, b);
+      // The original spin edits add the increment to the current value and clamp it to the range. A native number
+      // input steps on a grid from its `min` attribute (35 + 5 became 36 with min 1), so the bounds are announced
+      // with ARIA and enforced on commit, and the step base is the value shown (its value attribute).
+      inp.step = String(r.step);
+      if (r.min !== null) inp.setAttribute('aria-valuemin', String(r.min));
+      if (r.max !== null) inp.setAttribute('aria-valuemax', String(r.max));
+      const shown = (v: string) => { inp.value = v; inp.defaultValue = v; };
+      shown(String(c.value ?? c.text ?? ''));
       n.appendChild(inp);
       if (b && !na && b.kind !== 'action') {
-        inp.onchange = () => { const v = Number(inp.value); if (Number.isFinite(v)) writeBinding(b, v); };
-        refreshers.push(() => { if (document.activeElement !== inp) { const v = Number(readBinding(b)); inp.value = Number.isFinite(v) ? String(Math.round(v * 1000) / 1000) : ''; } });
+        const show = () => { const v = Number(readBinding(b)); shown(Number.isFinite(v) ? String(Math.round(v * 1000) / 1000) : ''); };
+        // A typed value is the base for the next arrow step; it is committed (written) on change: spinner, arrow
+        // key, Enter or leaving the field.
+        inp.oninput = () => { if (Number.isFinite(inp.valueAsNumber)) inp.defaultValue = inp.value; };
+        inp.onchange = () => { const v = Number(inp.value); if (inp.value !== '' && Number.isFinite(v)) writeBinding(b, clampSpin(v, r)); show(); };
+        refreshers.push(() => { if (document.activeElement !== inp) show(); });
       } else inp.disabled = true;
       break;
     }
@@ -460,6 +496,13 @@ function renderControl(c: ControlDef, b: Binding | undefined, refreshers: (() =>
     default: n.textContent = cap;
   }
   if (b && 'disabled' in b && b.disabled && c.cls !== 'TsPanel') refreshers.push(() => n.classList.toggle('disabled', b.disabled!()));
+  if (n.onclick && !n.classList.contains('na')) {
+    const role = n.classList.contains('chk') ? 'checkbox' : n.classList.contains('radio') ? 'radio' : 'button';
+    keyboardClick(n, role);
+    if (role !== 'button') refreshers.push(() => n.setAttribute('aria-checked', String(n.classList.contains('on'))));
+    else if (b?.kind === 'action' && b.down) refreshers.push(() => n.setAttribute('aria-pressed', String(n.classList.contains('down'))));
+  }
+  if (b?.kind === 'action' && b.title) refreshers.push(() => { const t = b.title!(); if (n.title !== t) { n.title = t; n.setAttribute('aria-label', t); } });
   if (b && 'hidden' in b && b.hidden) refreshers.push(() => { n.style.display = b.hidden!() ? 'none' : ''; });
   return n;
 }

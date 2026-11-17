@@ -6,7 +6,7 @@ import { decodeLevel3, type L3Product } from '../decode/level3';
 import { decodeGrib2, scanGribMessages, type GribField } from '../decode/grib2';
 import { gunzip, inflateZlib, unzip } from '../decode/zip';
 import { readShp, readDbf, simplify } from '../decode/shapefile';
-import { readAbiCmi, readGlmLcfa, examineAbi, type H5Like } from '../decode/goes';
+import { readAbiCmi, readAbiL2, readGlmLcfa, examineAbi, type H5Like, type GoesProjection } from '../decode/goes';
 import { gridMap } from '../gis/gridproj';
 import { parseIdx, findIdx, HRRR_FIELDS, type HrrrField } from '../decode/hrrr';
 import { fetchBytes, fetchText, abortAll } from '../data/net';
@@ -21,6 +21,7 @@ import { mesoDecoderUnits, mesoCode, severeCell, severeCodes } from '../sections
 import { gridSize } from '../decode/grib2';
 import type { LambertGrid } from '../decode/grib2';
 import { packPtype } from '../decode/ptype-pack';
+import { JobClock, runJob, type JobHandler } from './job-clock';
 
 type Req = { id: number; task: string; args: any };
 const scope = self as unknown as DedicatedWorkerGlobalScope;
@@ -78,55 +79,53 @@ function describe(v: L2Volume, bytes: number): L2Meta {
 const streams = new Map<string, { d: Archive2Decoder; fed: string[]; bytes: number }>();
 const streamLock = new Map<string, Promise<unknown>>();
 /** Serialises chunk feeding per volume (meta and product requests can overlap). */
-function loadChunks(url: string, chunks: string[]): Promise<VolEntry> {
-  const run = (streamLock.get(url) ?? Promise.resolve()).catch(() => undefined).then(() => feedChunks(url, chunks));
+function loadChunks(url: string, chunks: string[], job: JobClock): Promise<VolEntry> {
+  const run = (streamLock.get(url) ?? Promise.resolve()).catch(() => undefined).then(() => feedChunks(url, chunks, job));
   streamLock.set(url, run);
   void run.finally(() => { if (streamLock.get(url) === run) streamLock.delete(url); }).catch(() => undefined);
   return run;
 }
-async function feedChunks(url: string, chunks: string[]): Promise<VolEntry> {
+async function feedChunks(url: string, chunks: string[], job: JobClock): Promise<VolEntry> {
   let st = streams.get(url);
   // A different chunk sequence (gap repaired, folder reused) restarts the decode.
   if (!st || st.fed.some((c, i) => chunks[i] !== c)) { st = { d: new Archive2Decoder(), fed: [], bytes: 0 }; streams.set(url, st); }
   const fresh = chunks.slice(st.fed.length);
   const parts = await Promise.all(fresh.map((c) => fetchBytes(c, { cache: 'immutable' })));
-  for (let i = 0; i < parts.length; i++) { st.d.feed(parts[i]); st.fed.push(fresh[i]); st.bytes += parts[i].length; }
+  const s = st;
+  job.time(() => { for (let i = 0; i < parts.length; i++) { s.d.feed(parts[i]); s.fed.push(fresh[i]); s.bytes += parts[i].length; } });
   while (streams.size > 3) streams.delete(streams.keys().next().value!);
   const hit = volumes.get(url);
   if (hit && !fresh.length) return hit;
-  const volume = st.d.volume();
+  return job.time(() => cacheVolume(url, s.d.volume(), s.bytes));
+}
+
+/** Recodes a decoded volume for the product builders and caches it under its URL. */
+function cacheVolume(url: string, volume: L2Volume, fileBytes: number): VolEntry {
   const sweeps = recodeVolume(volume);
-  const entry: VolEntry = { meta: describe(volume, st.bytes), sweeps, volume, products: new Map(), bytes: sizeOf(volume) + sizeOf(sweeps) };
+  const entry: VolEntry = { meta: describe(volume, fileBytes), sweeps, volume, products: new Map(), bytes: sizeOf(volume) + sizeOf(sweeps) };
   volumes.delete(url);
   volumes.set(url, entry);
   evict();
   return entry;
 }
 
-async function loadVolume(url: string, live: boolean, chunks?: string[]): Promise<VolEntry> {
-  if (chunks?.length) return loadChunks(url, chunks);
+async function loadVolume(url: string, live: boolean, job: JobClock, chunks?: string[]): Promise<VolEntry> {
+  if (chunks?.length) return loadChunks(url, chunks, job);
   const hit = volumes.get(url);
   if (hit && !live) { volumes.delete(url); volumes.set(url, hit); return hit; }
   const bytes = await fetchBytes(url, { cache: live ? 'none' : 'immutable' });
-  let buf = bytes;
-  // tgftp serves whole volumes compressed with bzip2 when the name ends in .bz2 but the content is still
-  // an AR2V file with bzip2 records; a fully compressed file starts with "BZh".
-  if (buf[0] === 0x42 && buf[1] === 0x5a && buf[2] === 0x68) {
-    buf = bunzip2(buf);
-  }
-  const d = new Archive2Decoder();
-  d.feed(buf);
-  const volume = d.volume();
-  const sweeps = recodeVolume(volume);
-  const entry: VolEntry = { meta: describe(volume, bytes.length), sweeps, volume, products: new Map(), bytes: sizeOf(volume) + sizeOf(sweeps) };
-  volumes.delete(url);
-  volumes.set(url, entry);
-  evict();
-  return entry;
+  return job.time(() => {
+    let buf = bytes;
+    // tgftp serves whole volumes compressed with bzip2 when the name ends in .bz2 but the content is still
+    // an AR2V file with bzip2 records; a fully compressed file starts with "BZh".
+    if (buf[0] === 0x42 && buf[1] === 0x5a && buf[2] === 0x68) buf = bunzip2(buf);
+    const d = new Archive2Decoder();
+    d.feed(buf);
+    return cacheVolume(url, d.volume(), bytes.length);
+  });
 }
 
-async function l2Product(a: { url: string; live: boolean; chunks?: string[]; sweep: number; product: number; params: L2BuildParams }) {
-  const v = await loadVolume(a.url, a.live, a.chunks);
+function l2Product(v: VolEntry, a: { sweep: number; product: number; params: L2BuildParams }) {
   const vol = a.product >= 11;
   const key = `${a.product}:${vol ? 'vol' : a.sweep}:${JSON.stringify(a.params)}`;
   let p = v.products.get(key);
@@ -161,12 +160,14 @@ function l3Result(p: L3Product) {
 const inflate = (b: Uint8Array) => inflateZlib(b);
 
 /** MRMS mosaic → 2×2 max-downsampled byte codes: 0 = no data, else round((dBZ + 32) × 2) + 1 (−32..95 dBZ). */
-async function mrms(a: { url: string; factor: number }) {
-  let bytes = await fetchBytes(a.url, { cache: 'immutable' });
-  if (bytes[0] === 0x1f && bytes[1] === 0x8b) bytes = await gunzip(bytes);
-  const [f] = await decodeGrib2(bytes, inflate);
+async function mrms(a: { url: string; factor: number }, job: JobClock) {
+  const raw = await fetchBytes(a.url, { cache: 'immutable' });
+  const [f] = await job.time(async () => decodeGrib2(raw[0] === 0x1f && raw[1] === 0x8b ? await gunzip(raw) : raw, inflate));
+  return job.time(() => mrmsCodes(f, a.factor));
+}
+function mrmsCodes(f: GribField | undefined, factor: number) {
   if (!f || f.grid.kind !== 'latlon') throw new Error('mrms: unexpected grid');
-  const g = f.grid, k = Math.max(1, a.factor);
+  const g = f.grid, k = Math.max(1, factor);
   const W = Math.floor(g.ni / k), H = Math.floor(g.nj / k);
   const codes = new Uint8Array(W * H);
   for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
@@ -182,7 +183,7 @@ async function mrms(a: { url: string; factor: number }) {
 }
 
 /** HRRR fields by .idx byte ranges. Values are returned as Float32 on the native Lambert grid. */
-async function hrrr(a: { url: string; fields: HrrrField[] }) {
+async function hrrr(a: { url: string; fields: HrrrField[] }, job: JobClock) {
   const idx = parseIdx(await fetchText(a.url + '.idx'));
   const out: Record<string, Float32Array> = {};
   let grid: GribField['grid'] | null = null, refTimeMs = 0, fcst = 0;
@@ -191,7 +192,7 @@ async function hrrr(a: { url: string; fields: HrrrField[] }) {
     const e = findIdx(idx, variable, level);
     if (!e) return;
     const bytes = await fetchBytes(a.url, { cache: 'immutable', range: [e.start, e.end ?? e.start + 50_000_000] });
-    const [f] = await decodeGrib2(bytes, inflate);
+    const [f] = await job.time(() => decodeGrib2(bytes, inflate));
     if (!f) return;
     out[name] = f.values; grid = f.grid; refTimeMs = f.refTimeMs; fcst = f.forecastMinutes;
   }));
@@ -199,13 +200,14 @@ async function hrrr(a: { url: string; fields: HrrrField[] }) {
 }
 
 /** Values of GRIB fields (by .idx variable + level) bilinearly sampled at one point; null when absent/outside. */
-async function gribPoint(a: { url: string; fields: [string, string][]; lon: number; lat: number }) {
+async function gribPoint(a: { url: string; fields: [string, string][]; lon: number; lat: number }, job: JobClock) {
   const idx = parseIdx(await fetchText(a.url + '.idx'));
   let validMs = 0;
   const values = await Promise.all(a.fields.map(async ([variable, level]) => {
     const e = findIdx(idx, variable, level);
     if (!e) return null;
-    const [f] = await decodeGrib2(await fetchBytes(a.url, { cache: 'immutable', range: [e.start, e.end ?? e.start + 50_000_000] }), inflate);
+    const bytes = await fetchBytes(a.url, { cache: 'immutable', range: [e.start, e.end ?? e.start + 50_000_000] });
+    const [f] = await job.time(() => decodeGrib2(bytes, inflate));
     if (!f) return null;
     validMs = f.refTimeMs + f.forecastMinutes * 60000;
     const m = gridMap(f.grid), [fi, fj] = m.fwd(a.lon, a.lat);
@@ -229,23 +231,44 @@ async function getH5(): Promise<H5Like> {
 }
 
 /** ABI band image: area-averaged by `factor`, encoded as bytes over [min,max]: 0 = no data, 1..255 = data. */
-async function goes(a: { url?: string; bytes?: Uint8Array; factor: number; min: number; max: number }) {
-  const img = readAbiCmi(await getH5(), a.bytes ?? await fetchBytes(a.url!, { cache: 'immutable' }));
-  const k = Math.max(1, a.factor), W = Math.floor(img.width / k), H = Math.floor(img.height / k);
+/** Block-averages a fixed-grid image by `factor` and quantises it to codes 1–255 over [min, max] (0 = no data). */
+function encodeFixedGrid(img: { width: number; height: number; values: Float32Array; proj: GoesProjection }, factor: number, min: number, max: number) {
+  const k = Math.max(1, factor), W = Math.floor(img.width / k), H = Math.floor(img.height / k);
   const codes = new Uint8Array(W * H);
-  const span = a.max - a.min;
+  const span = max - min;
   for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
     let s = 0, n = 0;
     for (let dy = 0; dy < k; dy++) for (let dx = 0; dx < k; dx++) { const v = img.values[(y * k + dy) * img.width + x * k + dx]; if (v === v) { s += v; n++; } }
-    codes[y * W + x] = n ? 1 + Math.round(Math.min(1, Math.max(0, (s / n - a.min) / span)) * 254) : 0;
+    codes[y * W + x] = n ? 1 + Math.round(Math.min(1, Math.max(0, (s / n - min) / span)) * 254) : 0;
   }
   const proj = { ...img.proj, dx: img.proj.dx * k, dy: img.proj.dy * k, x0: img.proj.x0 + (img.proj.dx * (k - 1)) / 2, y0: img.proj.y0 + (img.proj.dy * (k - 1)) / 2 };
-  return { band: img.band, width: W, height: H, codes, proj, startMs: img.startMs, endMs: img.endMs, platform: img.platform, scene: img.scene };
+  return { width: W, height: H, codes, proj };
 }
 
-async function glm(a: { urls: string[] }) {
+async function goes(a: { url?: string; bytes?: Uint8Array; factor: number; min: number; max: number }, job: JobClock) {
+  const h = await getH5(), bytes = a.bytes ?? await fetchBytes(a.url!, { cache: 'immutable' });
+  return job.time(() => {
+    const img = readAbiCmi(h, bytes);
+    return { band: img.band, ...encodeFixedGrid(img, a.factor, a.min, a.max), startMs: img.startMs, endMs: img.endMs, platform: img.platform, scene: img.scene };
+  });
+}
+
+/** ABI L2+ product: cloud-top height/temperature as encoded grids, fire/hot spot as a detection list. */
+async function goesL2(a: { url: string; factor: number; min: number; max: number }, job: JobClock) {
+  const h = await getH5(), bytes = await fetchBytes(a.url, { cache: 'immutable' });
+  return job.time(() => {
+    const r = readAbiL2(h, bytes);
+    if (r.kind === 'FDC') return r;
+    return { kind: r.kind, ...encodeFixedGrid(r, a.factor, a.min, a.max), good: r.good, marginal: r.marginal, startMs: r.startMs, endMs: r.endMs, platform: r.platform, scene: r.scene };
+  });
+}
+
+async function glm(a: { urls: string[] }, job: JobClock) {
   const h = await getH5();
-  const parts = await Promise.all(a.urls.map(async (u) => { try { return readGlmLcfa(h, await fetchBytes(u, { cache: 'immutable' })); } catch { return null; } }));
+  const parts = await Promise.all(a.urls.map(async (u) => { try { const b = await fetchBytes(u, { cache: 'immutable' }); return job.time(() => readGlmLcfa(h, b)); } catch { return null; } }));
+  return job.time(() => mergeGlm(parts));
+}
+function mergeGlm(parts: (ReturnType<typeof readGlmLcfa> | null)[]) {
   const ok = parts.filter((p): p is NonNullable<typeof p> => !!p);
   const n = ok.reduce((s, p) => s + p.lat.length, 0);
   const lat = new Float32Array(n), lon = new Float32Array(n), energy = new Float32Array(n), timeMs = new Float64Array(n);
@@ -255,8 +278,11 @@ async function glm(a: { urls: string[] }) {
 }
 
 // ------------------------------------------------------------------------------------------- Shapefile zip
-async function zipLines(a: { url: string; tol: number; classField?: string; nameField?: string }) {
-  const files = await unzip(await fetchBytes(a.url, { cache: 'immutable' }), (n) => /\.(shp|dbf)$/i.test(n));
+async function zipLines(a: { url: string; tol: number; classField?: string; nameField?: string }, job: JobClock) {
+  const bytes = await fetchBytes(a.url, { cache: 'immutable' });
+  return job.time(async () => roadLines(await unzip(bytes, (n) => /\.(shp|dbf)$/i.test(n)), a));
+}
+function roadLines(files: Map<string, Uint8Array>, a: { tol: number; classField?: string; nameField?: string }) {
   const shp = readShp(files.get([...files.keys()].find((k) => /\.shp$/i.test(k))!)!);
   const dbfKey = [...files.keys()].find((k) => /\.dbf$/i.test(k));
   const dbf = dbfKey ? readDbf(files.get(dbfKey)!) : [];
@@ -279,50 +305,52 @@ function roadClass(rttyp: string, mtfcc: string): number {
 }
 
 /** HRRR surface products for one hour: MSLP isolines (mb), 10 m wind samples and a byte-coded fill field. */
-async function surface(a: { url: string; mslp?: { interval: number; kernel: number }; wind?: { step: number }; fill?: { field: HrrrField; min: number; max: number; unit: 'F' | 'J' } }) {
+async function surface(a: { url: string; mslp?: { interval: number; kernel: number }; wind?: { step: number }; fill?: { field: HrrrField; min: number; max: number; unit: 'F' | 'J' } }, job: JobClock) {
   const fields: HrrrField[] = [];
   if (a.mslp) fields.push('mslp');
   if (a.wind) fields.push('u10', 'v10');
   if (a.fill) fields.push(a.fill.field);
-  const h = await hrrr({ url: a.url, fields });
-  const g = h.grid as LambertGrid | null;
-  if (!g) throw new Error('hrrr: no grid');
-  const inv = lambertInverse(g);
-  const out: any = { validMs: h.validMs, nx: g.nx, ny: g.ny, grid: g };
-  if (a.mslp && h.fields.mslp) {
-    // Work at half resolution (6 km); smoothing kernel scaled to grid cells.
-    const W = Math.floor(g.nx / 2), H = Math.floor(g.ny / 2), mb = new Float32Array(W * H);
-    for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) mb[y * W + x] = h.fields.mslp[(y * 2) * g.nx + x * 2] / 100;
-    const sm = gaussianBlur(mb, W, H, a.mslp.kernel * 4);
-    let lo = Infinity, hi = -Infinity;
-    for (const v of sm) if (v === v) { lo = Math.min(lo, v); hi = Math.max(hi, v); }
-    const levels: number[] = [];
-    for (let L = Math.ceil(lo / a.mslp.interval) * a.mslp.interval; L <= hi; L += a.mslp.interval) levels.push(L);
-    const iso = isolines(sm, W, H, levels);
-    out.contours = iso.flatMap((lv) => lv.lines.filter((l) => l.length >= 8).map((l) => {
-      const ll: number[] = [];
-      for (let k = 0; k < l.length; k += 2) { const [lon, lat] = inv(l[k] * 2, l[k + 1] * 2); ll.push(lon, lat); }
-      return { level: lv.level, coords: ll };
-    }));
-  }
-  if (a.wind && h.fields.u10 && h.fields.v10) {
-    const pts: number[] = [];
-    for (let j = 0; j < g.ny; j += a.wind.step) for (let i = 0; i < g.nx; i += a.wind.step) {
-      const k = j * g.nx + i; const [lon, lat] = inv(i, j);
-      pts.push(lon, lat, h.fields.u10[k], h.fields.v10[k]);
+  const h = await hrrr({ url: a.url, fields }, job);
+  return job.time(() => {
+    const g = h.grid as LambertGrid | null;
+    if (!g) throw new Error('hrrr: no grid');
+    const inv = lambertInverse(g);
+    const out: any = { validMs: h.validMs, nx: g.nx, ny: g.ny, grid: g };
+    if (a.mslp && h.fields.mslp) {
+      // Work at half resolution (6 km); smoothing kernel scaled to grid cells.
+      const W = Math.floor(g.nx / 2), H = Math.floor(g.ny / 2), mb = new Float32Array(W * H);
+      for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) mb[y * W + x] = h.fields.mslp[(y * 2) * g.nx + x * 2] / 100;
+      const sm = gaussianBlur(mb, W, H, a.mslp.kernel * 4);
+      let lo = Infinity, hi = -Infinity;
+      for (const v of sm) if (v === v) { lo = Math.min(lo, v); hi = Math.max(hi, v); }
+      const levels: number[] = [];
+      for (let L = Math.ceil(lo / a.mslp.interval) * a.mslp.interval; L <= hi; L += a.mslp.interval) levels.push(L);
+      const iso = isolines(sm, W, H, levels);
+      out.contours = iso.flatMap((lv) => lv.lines.filter((l) => l.length >= 8).map((l) => {
+        const ll: number[] = [];
+        for (let k = 0; k < l.length; k += 2) { const [lon, lat] = inv(l[k] * 2, l[k + 1] * 2); ll.push(lon, lat); }
+        return { level: lv.level, coords: ll };
+      }));
     }
-    out.wind = Float32Array.from(pts);
-  }
-  if (a.fill && h.fields[a.fill.field]) {
-    const f = h.fields[a.fill.field]!, codes = new Uint8Array(f.length), span = a.fill.max - a.fill.min;
-    for (let i = 0; i < f.length; i++) {
-      let v = f[i];
-      if (a.fill.unit === 'F') v = (v - 273.15) * 1.8 + 32;
-      codes[i] = v === v ? 1 + Math.round(Math.min(1, Math.max(0, (v - a.fill.min) / span)) * 254) : 0;
+    if (a.wind && h.fields.u10 && h.fields.v10) {
+      const pts: number[] = [];
+      for (let j = 0; j < g.ny; j += a.wind.step) for (let i = 0; i < g.nx; i += a.wind.step) {
+        const k = j * g.nx + i; const [lon, lat] = inv(i, j);
+        pts.push(lon, lat, h.fields.u10[k], h.fields.v10[k]);
+      }
+      out.wind = Float32Array.from(pts);
     }
-    out.fill = codes;
-  }
-  return out;
+    if (a.fill && h.fields[a.fill.field]) {
+      const f = h.fields[a.fill.field]!, codes = new Uint8Array(f.length), span = a.fill.max - a.fill.min;
+      for (let i = 0; i < f.length; i++) {
+        let v = f[i];
+        if (a.fill.unit === 'F') v = (v - 273.15) * 1.8 + 32;
+        codes[i] = v === v ? 1 + Math.round(Math.min(1, Math.max(0, (v - a.fill.min) / span)) * 254) : 0;
+      }
+      out.fill = codes;
+    }
+    return out;
+  });
 }
 
 /** Adds the padded upload image to a sweep result so the main thread only copies it to the GPU. */
@@ -333,81 +361,88 @@ function withUpload<T extends { sweep: any }>(r: T): T {
 }
 
 /** MRMS tab product: whole gzip GRIB2, unit conversion, max-downsampling, half-float range encoding. */
-async function gridMrms(a: { url: string; lo: number; hi: number; factor: number; conv: number }) {
-  const [[f]] = await fetchGrib(a.url, null, { gz: true, cache: 'immutable' });
-  if (!f) throw new Error('mrms: no field');
-  const [w, h] = gridSize(f.grid);
-  // MRMS missing / no-coverage values (−999, −99) are transparent.
-  const v = new Float32Array(f.values.length);
-  for (let i = 0; i < v.length; i++) { const x = f.values[i]; v[i] = x === x && x > -90 ? x * a.conv : NaN; }
-  const d = downsampleMax(v, w, h, a.factor);
-  const geo = geoOfGrid(downsampleGrid(f.grid, a.factor));
-  let mn = Infinity, mx = -Infinity;
-  for (const x of d.values) if (x === x) { if (x < mn) mn = x; if (x > mx) mx = x; }
-  return { nx: d.w, ny: d.h, data: encodeNormHalf(d.values, a.lo, a.hi), proj: geo.proj, bounds: geo.bounds, refTimeMs: f.refTimeMs + f.forecastMinutes * 60e3, min: mn, max: mx };
+async function gridMrms(a: { url: string; lo: number; hi: number; factor: number; conv: number }, job: JobClock) {
+  const [[f]] = await fetchGrib(a.url, null, job, { gz: true, cache: 'immutable' });
+  return job.time(() => {
+    if (!f) throw new Error('mrms: no field');
+    const [w, h] = gridSize(f.grid);
+    // MRMS missing / no-coverage values (−999, −99) are transparent.
+    const v = new Float32Array(f.values.length);
+    for (let i = 0; i < v.length; i++) { const x = f.values[i]; v[i] = x === x && x > -90 ? x * a.conv : NaN; }
+    const d = downsampleMax(v, w, h, a.factor);
+    const geo = geoOfGrid(downsampleGrid(f.grid, a.factor));
+    let mn = Infinity, mx = -Infinity;
+    for (const x of d.values) if (x === x) { if (x < mn) mn = x; if (x > mx) mx = x; }
+    return { nx: d.w, ny: d.h, data: encodeNormHalf(d.values, a.lo, a.hi), proj: geo.proj, bounds: geo.bounds, refTimeMs: f.refTimeMs + f.forecastMinutes * 60e3, min: mn, max: mx };
+  });
 }
 
 /** Fields of one inventory match grouped by GRIB parameter (sub-message pairs return both components). */
-async function rapFields(url: string, matches: string[]) {
-  const groups = await fetchGrib(url, matches, { cache: 'immutable' });
-  return groups.map((g) => g);
+function rapFields(url: string, matches: string[], job: JobClock) {
+  return fetchGrib(url, matches, job, { cache: 'immutable' });
 }
 
 const isU = (f: GribField) => f.discipline === 0 && f.category === 2 && (f.number === 2 || f.number === 15);
 const isV = (f: GribField) => f.discipline === 0 && f.category === 2 && (f.number === 3 || f.number === 16);
 
 /** MESO product: decoder units, derivation, 16-bit quantisation as exact texels; contours for heights. */
-async function gridMeso(a: { url: string; matches: string[]; lo: number; hi: number; derivation: string; render: string; corrected: boolean; contourInterval: number }) {
-  const groups = await rapFields(a.url, a.derivation.startsWith('speed') ? [a.matches[0]] : a.matches);
-  const all = groups.flat();
-  const f0 = all[0];
-  if (!f0) throw new Error('meso: no field');
-  const [w, h] = gridSize(f0.grid);
-  const n = w * h, v = new Float32Array(n);
-  if (a.derivation.startsWith('speed')) {
-    const u = all.find(isU), vv = all.find(isV);
-    if (!u || !vv) throw new Error('meso: wind components missing');
-    for (let i = 0; i < n; i++) v[i] = Math.sqrt(u.values[i] ** 2 + vv.values[i] ** 2) * 2.23693629;
-  } else if (a.derivation.startsWith('EHI')) {
-    const cape = groups[0][0], srh = groups[1][0];
-    for (let i = 0; i < n; i++) v[i] = (cape.values[i] * srh.values[i]) / 160000;
-  } else for (let i = 0; i < n; i++) v[i] = mesoDecoderUnits(a.matches[0], f0.values[i], a.corrected);
-  // 9999 → 0 (missing values become 0), then 16-bit codes over the table range.
-  const tex = new Float32Array(n);
-  for (let i = 0; i < n; i++) { const x = v[i] === v[i] && v[i] !== 9999 ? v[i] : 0; tex[i] = mesoCode(x, a.lo, a.hi) / 65535; }
-  const geo = geoOfGrid(f0.grid);
-  const contours = a.render === 'contour' ? contourLines(f0, a.contourInterval, 1, 1) : null;
-  return { nx: w, ny: h, data: tex, proj: geo.proj, bounds: geo.bounds, refTimeMs: f0.refTimeMs, validMs: f0.refTimeMs + f0.forecastMinutes * 60e3, contours };
+async function gridMeso(a: { url: string; matches: string[]; lo: number; hi: number; derivation: string; render: string; corrected: boolean; contourInterval: number }, job: JobClock) {
+  const groups = await rapFields(a.url, a.derivation.startsWith('speed') ? [a.matches[0]] : a.matches, job);
+  return job.time(() => {
+    const all = groups.flat();
+    const f0 = all[0];
+    if (!f0) throw new Error('meso: no field');
+    const [w, h] = gridSize(f0.grid);
+    const n = w * h, v = new Float32Array(n);
+    if (a.derivation.startsWith('speed')) {
+      const u = all.find(isU), vv = all.find(isV);
+      if (!u || !vv) throw new Error('meso: wind components missing');
+      for (let i = 0; i < n; i++) v[i] = Math.sqrt(u.values[i] ** 2 + vv.values[i] ** 2) * 2.23693629;
+    } else if (a.derivation.startsWith('EHI')) {
+      const cape = groups[0][0], srh = groups[1][0];
+      for (let i = 0; i < n; i++) v[i] = (cape.values[i] * srh.values[i]) / 160000;
+    } else for (let i = 0; i < n; i++) v[i] = mesoDecoderUnits(a.matches[0], f0.values[i], a.corrected);
+    // 9999 → 0 (missing values become 0), then 16-bit codes over the table range.
+    const tex = new Float32Array(n);
+    for (let i = 0; i < n; i++) { const x = v[i] === v[i] && v[i] !== 9999 ? v[i] : 0; tex[i] = mesoCode(x, a.lo, a.hi) / 65535; }
+    const geo = geoOfGrid(f0.grid);
+    const contours = a.render === 'contour' ? contourLines(f0, a.contourInterval, 1, 1) : null;
+    return { nx: w, ny: h, data: tex, proj: geo.proj, bounds: geo.bounds, refTimeMs: f0.refTimeMs, validMs: f0.refTimeMs + f0.forecastMinutes * 60e3, contours };
+  });
 }
 
 /** STP / SCP: seven RAP inputs, per-cell arithmetic and the coupled texture coding. */
-async function gridSevere(a: { url: string; corrected: boolean }) {
+async function gridSevere(a: { url: string; corrected: boolean }, job: JobClock) {
   const M = ['CAPE:surface', 'HLCY:1000-0 m above', 'VVCSH:0-6000 m', 'DPT:2 m', 'TMP:2 m', 'PRES:surface', 'HLCY:3000-0 m'];
-  const g = await rapFields(a.url, M);
-  const cape = g[0][0], srh1 = g[1][0], u6 = g[2].find(isU) ?? g[2][0], v6 = g[2].find(isV) ?? g[2][1], td = g[3][0], t = g[4][0], p = g[5][0], srh3 = g[6][0];
-  if (!cape || !srh1 || !u6 || !v6 || !td || !t || !p || !srh3) throw new Error('severe: not all seven inputs loaded');
-  const [w, h] = gridSize(cape.grid), n = w * h;
-  const stpTex = new Float32Array(n), scpTex = new Float32Array(n), stp = new Float32Array(n), scp = new Float32Array(n);
-  const F = (k: number) => (k - 273.15) * 1.8 + 32; // decoder English units (°F) for TMP/DPT
-  for (let i = 0; i < n; i++) {
-    const c = severeCell({ cape: cape.values[i], srh1: srh1.values[i], u6: u6.values[i], v6: v6.values[i], tF: F(t.values[i]), tdF: F(td.values[i]), pPa: p.values[i], srh3: srh3.values[i] }, a.corrected);
-    stp[i] = Math.fround(c.stp); scp[i] = Math.fround(c.scp);
-    const k = severeCodes(stp[i], scp[i], a.corrected);
-    stpTex[i] = k.stp / 65535; scpTex[i] = k.scp / 65535;
-  }
-  const geo = geoOfGrid(cape.grid);
-  return { nx: w, ny: h, stpTex, scpTex, stp, scp, proj: geo.proj, bounds: geo.bounds, refTimeMs: cape.refTimeMs, validMs: cape.refTimeMs + cape.forecastMinutes * 60e3 };
+  const g = await rapFields(a.url, M, job);
+  return job.time(() => {
+    const cape = g[0][0], srh1 = g[1][0], u6 = g[2].find(isU) ?? g[2][0], v6 = g[2].find(isV) ?? g[2][1], td = g[3][0], t = g[4][0], p = g[5][0], srh3 = g[6][0];
+    if (!cape || !srh1 || !u6 || !v6 || !td || !t || !p || !srh3) throw new Error('severe: not all seven inputs loaded');
+    const [w, h] = gridSize(cape.grid), n = w * h;
+    const stpTex = new Float32Array(n), scpTex = new Float32Array(n), stp = new Float32Array(n), scp = new Float32Array(n);
+    const F = (k: number) => (k - 273.15) * 1.8 + 32; // decoder English units (°F) for TMP/DPT
+    for (let i = 0; i < n; i++) {
+      const c = severeCell({ cape: cape.values[i], srh1: srh1.values[i], u6: u6.values[i], v6: v6.values[i], tF: F(t.values[i]), tdF: F(td.values[i]), pPa: p.values[i], srh3: srh3.values[i] }, a.corrected);
+      stp[i] = Math.fround(c.stp); scp[i] = Math.fround(c.scp);
+      const k = severeCodes(stp[i], scp[i], a.corrected);
+      stpTex[i] = k.stp / 65535; scpTex[i] = k.scp / 65535;
+    }
+    const geo = geoOfGrid(cape.grid);
+    return { nx: w, ny: h, stpTex, scpTex, stp, scp, proj: geo.proj, bounds: geo.bounds, refTimeMs: cape.refTimeMs, validMs: cape.refTimeMs + cape.forecastMinutes * 60e3 };
+  });
 }
 
 /** Temperature / dew point / MSLP difference between two RAP cycles, raw values for the palette range. */
-async function gridDiff(a: { urlNow: string; urlThen: string; match: string; lo: number; hi: number }) {
-  const [[now], [then]] = await Promise.all([fetchGrib(a.urlNow, [a.match], { cache: 'immutable' }).then((g) => g[0]), fetchGrib(a.urlThen, [a.match], { cache: 'immutable' }).then((g) => g[0])]);
-  if (!now || !then) throw new Error('diff: field missing');
-  const [w, h] = gridSize(now.grid), n = w * h, d = new Float32Array(n);
-  const conv = /^TMP|^DPT/.test(a.match) ? (k: number) => k * 1.8 : (pa: number) => pa / 100; // K difference → °F difference; Pa → mb
-  for (let i = 0; i < n; i++) d[i] = conv(now.values[i] - then.values[i]);
-  const geo = geoOfGrid(now.grid);
-  return { nx: w, ny: h, data: encodeNormHalf(d, a.lo, a.hi), proj: geo.proj, bounds: geo.bounds, validMs: now.refTimeMs + now.forecastMinutes * 60e3 };
+async function gridDiff(a: { urlNow: string; urlThen: string; match: string; lo: number; hi: number }, job: JobClock) {
+  const [[now], [then]] = await Promise.all([fetchGrib(a.urlNow, [a.match], job, { cache: 'immutable' }).then((g) => g[0]), fetchGrib(a.urlThen, [a.match], job, { cache: 'immutable' }).then((g) => g[0])]);
+  return job.time(() => {
+    if (!now || !then) throw new Error('diff: field missing');
+    const [w, h] = gridSize(now.grid), n = w * h, d = new Float32Array(n);
+    const conv = /^TMP|^DPT/.test(a.match) ? (k: number) => k * 1.8 : (pa: number) => pa / 100; // K difference → °F difference; Pa → mb
+    for (let i = 0; i < n; i++) d[i] = conv(now.values[i] - then.values[i]);
+    const geo = geoOfGrid(now.grid);
+    return { nx: w, ny: h, data: encodeNormHalf(d, a.lo, a.hi), proj: geo.proj, bounds: geo.bounds, validMs: now.refTimeMs + now.forecastMinutes * 60e3 };
+  });
 }
 
 /** Unit conversion to the display units used for NDFD/PWPF products (degrib-style English units, choose). */
@@ -439,54 +474,61 @@ function localStrings(b: Uint8Array | null): string[] {
 }
 
 /** Every message of a whole GRIB file (NDFD region file, WPC PWPF) encoded over [lo, hi] in display units. */
-async function gridAll(a: { url: string; lo: number; hi: number; maxFrames?: number; byCode?: boolean }) {
-  const [fields] = await fetchGrib(a.url, null, { cache: 'none' });
-  if (!fields.length) throw new Error('no GRIB messages');
-  const frames = fields.slice(0, a.maxFrames ?? 64).map((f) => {
-    const u = a.byCode ? { conv: null, unit: '' } : englishUnits(f);
-    const geo = geoOfGrid(f.grid);
-    const [w, h] = gridSize(f.grid);
-    return { nx: w, ny: h, data: encodeNormHalf(f.values, a.lo, a.hi, u.conv ?? undefined), proj: geo.proj, bounds: geo.bounds, refTimeMs: f.refTimeMs,
-      validMs: f.endTimeMs ?? f.refTimeMs + f.forecastMinutes * 60e3, startMs: f.refTimeMs + f.forecastMinutes * 60e3, unit: u.unit, strings: localStrings(f.local), percentile: f.percentile, prob: f.prob };
+async function gridAll(a: { url: string; lo: number; hi: number; maxFrames?: number; byCode?: boolean }, job: JobClock) {
+  const [fields] = await fetchGrib(a.url, null, job, { cache: 'none' });
+  return job.time(() => {
+    if (!fields.length) throw new Error('no GRIB messages');
+    const frames = fields.slice(0, a.maxFrames ?? 64).map((f) => {
+      const u = a.byCode ? { conv: null, unit: '' } : englishUnits(f);
+      const geo = geoOfGrid(f.grid);
+      const [w, h] = gridSize(f.grid);
+      return { nx: w, ny: h, data: encodeNormHalf(f.values, a.lo, a.hi, u.conv ?? undefined), proj: geo.proj, bounds: geo.bounds, refTimeMs: f.refTimeMs,
+        validMs: f.endTimeMs ?? f.refTimeMs + f.forecastMinutes * 60e3, startMs: f.refTimeMs + f.forecastMinutes * 60e3, unit: u.unit, strings: localStrings(f.local), percentile: f.percentile, prob: f.prob };
+    });
+    return { frames };
   });
-  return { frames };
 }
 
 
 /** One model product for one forecast hour: fill (scalar or vector magnitude), vectors or contours. */
-async function gridModel(a: { url: string; invExt: string; matches: string[]; kind: 'fill' | 'vector' | 'contour'; unit: string; lo: number; hi: number; interval: number; vectorStep: number; local?: boolean }) {
+async function gridModel(a: { url: string; invExt: string; matches: string[]; kind: 'fill' | 'vector' | 'contour'; unit: string; lo: number; hi: number; interval: number; vectorStep: number; local?: boolean }, job: JobClock) {
   let groups: GribField[][];
   if (a.local) {
     // User-supplied GRIB2 (Custom GRIB): decode the file and select fields by their generated inventory text.
-    const all = (await fetchGrib(a.url, null, { cache: 'none' }))[0];
+    const all = (await fetchGrib(a.url, null, job, { cache: 'none' }))[0];
     const desc = (f: GribField) => `:${paramName(f)}:${levelName(f.surfaceType, f.surfaceValue, f.surface2Type, f.surface2Value)}:${f.forecastMinutes / 60} hour fcst:`;
     groups = a.matches.map((m) => all.filter((f) => desc(f).includes(':' + m)).slice(0, 1));
     if (groups.some((g) => !g.length)) throw new Error(`no message matches "${a.matches[groups.findIndex((g) => !g.length)]}" in the file`);
-  } else groups = await fetchGrib(a.url, a.matches, { idxExt: a.invExt, cache: 'immutable' });
-  const all = groups.flat();
-  const f0 = all[0];
-  if (!f0) throw new Error('no field');
-  const [w, h] = gridSize(f0.grid);
-  const geo = geoOfGrid(f0.grid);
-  const base = { nx: w, ny: h, proj: geo.proj, bounds: geo.bounds, refTimeMs: f0.refTimeMs, validMs: f0.endTimeMs ?? f0.refTimeMs + f0.forecastMinutes * 60e3 };
-  const u = all.find(isU) ?? all[0], v = all.find(isV) ?? all[1];
-  if (a.kind === 'vector') {
-    if (!u || !v || u === v) throw new Error('vector product needs U and V components');
-    return { ...base, vectors: windSamples(u, v, Math.max(1, a.vectorStep)) };
-  }
-  if (a.kind === 'contour') {
-    // Contour the converted physical values (affine conversions such as K→°F keep their offset).
-    return { ...base, contours: contourLines(f0, a.interval, unitConv(a.unit, f0) ?? 1, 1.5, w > 1200 ? 2 : 1) };
-  }
-  let vals = f0.values;
-  if (a.matches.length >= 2 && u && v && u !== v) { vals = new Float32Array(u.values.length); for (let i = 0; i < vals.length; i++) vals[i] = Math.hypot(u.values[i], v.values[i]); }
-  const conv = unitConv(a.unit, f0);
-  return { ...base, data: encodeNormHalf(vals, a.lo, a.hi, conv ?? undefined) };
+  } else groups = await fetchGrib(a.url, a.matches, job, { idxExt: a.invExt, cache: 'immutable' });
+  return job.time(() => {
+    const all = groups.flat();
+    const f0 = all[0];
+    if (!f0) throw new Error('no field');
+    const [w, h] = gridSize(f0.grid);
+    const geo = geoOfGrid(f0.grid);
+    const base = { nx: w, ny: h, proj: geo.proj, bounds: geo.bounds, refTimeMs: f0.refTimeMs, validMs: f0.endTimeMs ?? f0.refTimeMs + f0.forecastMinutes * 60e3 };
+    const u = all.find(isU) ?? all[0], v = all.find(isV) ?? all[1];
+    if (a.kind === 'vector') {
+      if (!u || !v || u === v) throw new Error('vector product needs U and V components');
+      return { ...base, vectors: windSamples(u, v, Math.max(1, a.vectorStep)) };
+    }
+    if (a.kind === 'contour') {
+      // Contour the converted physical values (affine conversions such as K→°F keep their offset).
+      return { ...base, contours: contourLines(f0, a.interval, unitConv(a.unit, f0) ?? 1, 1.5, w > 1200 ? 2 : 1) };
+    }
+    let vals = f0.values;
+    if (a.matches.length >= 2 && u && v && u !== v) { vals = new Float32Array(u.values.length); for (let i = 0; i < vals.length; i++) vals[i] = Math.hypot(u.values[i], v.values[i]); }
+    const conv = unitConv(a.unit, f0);
+    return { ...base, data: encodeNormHalf(vals, a.lo, a.hi, conv ?? undefined) };
+  });
 }
 
 /** wgrib-style inventory of a local GRIB2 file (custom GRIB): n:offset:d=YYYYMMDDHH:PARAM:level:time: */
-async function gribInventory(a: { url: string }) {
+async function gribInventory(a: { url: string }, job: JobClock) {
   const bytes = await fetchBytes(a.url, { cache: 'none' });
+  return job.time(() => inventoryLines(bytes));
+}
+async function inventoryLines(bytes: Uint8Array) {
   const lines: string[] = [];
   let n = 1;
   for (const { offset: m, length } of scanGribMessages(bytes)) {
@@ -498,7 +540,7 @@ async function gribInventory(a: { url: string }) {
   return lines.join('\n') + '\n';
 }
 
-const HANDLERS: Record<string, (a: any) => Promise<any>> = {
+const HANDLERS: Record<string, JobHandler> = {
   'grid.all': gridAll,
   'grid.model': gridModel,
   'grib.inventory': gribInventory,
@@ -507,7 +549,10 @@ const HANDLERS: Record<string, (a: any) => Promise<any>> = {
   'grid.diff': gridDiff,
   'grid.mrms': gridMrms,
   'shapes': fetchShapes,
-  'geojson': async (a: { gj?: any; url?: string; tol?: number }) => geojsonFeatures(a.gj ?? JSON.parse(await fetchText(a.url!)), a.tol ?? 0),
+  'geojson': async (a: { gj?: any; url?: string; tol?: number }, job) => {
+    const text = a.gj ? null : await fetchText(a.url!);
+    return job.time(() => geojsonFeatures(a.gj ?? JSON.parse(text!), a.tol ?? 0));
+  },
   'config': async (a: { volumes?: number; byteBudget?: number }) => {
     if (a.volumes) cacheCfg.volumes = Math.max(1, Math.round(a.volumes));
     if (a.byteBudget) cacheCfg.byteBudget = a.byteBudget;
@@ -515,39 +560,54 @@ const HANDLERS: Record<string, (a: any) => Promise<any>> = {
     return { ...cacheCfg, cached: volumes.size };
   },
   'surface': surface,
-  'l2.meta': async (a) => (await loadVolume(a.url, a.live, a.chunks)).meta,
-  'l2.product': async (a) => {
-    const r = await l2Product(a);
-    // 8-bit ZDR codes are inverted by the builder; the display maps them back.
-    if (a.product === 3 && r.sweep && r.sweep.wordSize === 8) { const c = r.sweep.codes; for (let i = 0; i < c.length; i++) c[i] = c[i] ? 255 - c[i] : 0; }
-    return withUpload(r);
+  'l2.meta': async (a, job) => (await loadVolume(a.url, a.live, job, a.chunks)).meta,
+  'l2.product': async (a, job) => {
+    const v = await loadVolume(a.url, a.live, job, a.chunks);
+    return job.time(() => {
+      const r = l2Product(v, a);
+      // 8-bit ZDR codes are inverted by the builder; the display maps them back.
+      if (a.product === 3 && r.sweep && r.sweep.wordSize === 8) { const c = r.sweep.codes; for (let i = 0; i < c.length; i++) c[i] = c[i] ? 255 - c[i] : 0; }
+      return withUpload(r);
+    });
   },
-  'l2.composite': async (a: { url: string; live: boolean; chunks?: string[]; base: number; top: number; selectiveMax: boolean }) => {
-    const v = await loadVolume(a.url, a.live, a.chunks);
-    const g = liveComposite(v.sweeps, a.base, a.top, a.selectiveMax);
-    if (!g) return { meta: v.meta, sweep: null };
-    const az = new Float32Array(720);
-    for (let i = 0; i < 720; i++) az[i] = (g.az0 + i * 0.5) % 360;
-    return withUpload({ meta: v.meta, sweep: { product: 0, radials: 720, gates: g.gates, firstKm: g.firstKm, gateKm: g.gateKm, azimuths: az, half: true, complete: true, elevation: 0, codes: g.codes, wordSize: 8 } });
+  'l2.composite': async (a: { url: string; live: boolean; chunks?: string[]; base: number; top: number; selectiveMax: boolean }, job) => {
+    const v = await loadVolume(a.url, a.live, job, a.chunks);
+    return job.time(() => {
+      const g = liveComposite(v.sweeps, a.base, a.top, a.selectiveMax);
+      if (!g) return { meta: v.meta, sweep: null };
+      const az = new Float32Array(720);
+      for (let i = 0; i < 720; i++) az[i] = (g.az0 + i * 0.5) % 360;
+      return withUpload({ meta: v.meta, sweep: { product: 0, radials: 720, gates: g.gates, firstKm: g.firstKm, gateKm: g.gateKm, azimuths: az, half: true, complete: true, elevation: 0, codes: g.codes, wordSize: 8 } });
+    });
   },
-  'l3': async (a) => l3Result(decodeLevel3(await fetchBytes(a.url, { cache: a.live ? 'none' : 'immutable' }))),
+  'l3': async (a, job) => {
+    const bytes = await fetchBytes(a.url, { cache: a.live ? 'none' : 'immutable' });
+    return job.time(() => l3Result(decodeLevel3(bytes)));
+  },
   'mrms': mrms,
   'hrrr': hrrr,
   // P-type texels are packed here so only ~7.6 MB of RGBA8 (not six float fields) reach the main thread.
-  'hrrr.ptype': async (a: { url: string }) => {
-    const h = await hrrr({ url: a.url, fields: ['cpofp', 'crain', 'csnow', 'cicep', 'cfrzr', 't2m'] });
+  'hrrr.ptype': async (a: { url: string }, job) => {
+    const h = await hrrr({ url: a.url, fields: ['cpofp', 'crain', 'csnow', 'cicep', 'cfrzr', 't2m'] }, job);
     const g = h.grid as LambertGrid | null;
-    const packed = g ? packPtype(g.nx * g.ny, h.fields) : null;
+    const packed = g ? job.time(() => packPtype(g.nx * g.ny, h.fields)) : null;
     if (!g || !packed) return null;
     return { grid: g, packed };
   },
   'grib.point': gribPoint,
   'goes': goes,
+  'goes.l2': goesL2,
   'glm': glm,
   'zipLines': zipLines,
   'net.abort': async () => abortAll(),
-  'goes.examine': async (a: { bytes: Uint8Array }) => examineAbi(await getH5(), a.bytes),
+  'goes.examine': async (a: { bytes: Uint8Array }, job) => { const h = await getH5(); return job.time(() => examineAbi(h, a.bytes)); },
 };
+/**
+ * Tasks that wrap their decode/build work in `job.time()`; a cache hit then reports 0 ms. Any other task reports its
+ * processing time as unavailable rather than zero.
+ */
+const TIMED = new Set(['grid.all', 'grid.model', 'grib.inventory', 'grid.meso', 'grid.severe', 'grid.diff', 'grid.mrms', 'shapes', 'geojson', 'surface',
+  'l2.meta', 'l2.product', 'l2.composite', 'l3', 'mrms', 'hrrr', 'hrrr.ptype', 'grib.point', 'goes', 'goes.l2', 'glm', 'zipLines', 'goes.examine']);
 
 function transferables(v: any, out: Transferable[] = [], seen = new Set<any>()): Transferable[] {
   if (!v || typeof v !== 'object' || seen.has(v)) return out;
@@ -559,13 +619,7 @@ function transferables(v: any, out: Transferable[] = [], seen = new Set<any>()):
 
 scope.onmessage = async (ev: MessageEvent<Req>) => {
   const { id, task, args } = ev.data;
-  const t0 = performance.now();
-  try {
-    const h = HANDLERS[task];
-    if (!h) throw new Error(`unknown task ${task}`);
-    const result = await h(args);
-    scope.postMessage({ id, ok: true, result, ms: performance.now() - t0 }, transferables(result));
-  } catch (err) {
-    scope.postMessage({ id, ok: false, error: String((err as Error)?.message ?? err), ms: performance.now() - t0 });
-  }
+  const reply = await runJob(HANDLERS[task], task, args, TIMED.has(task));
+  const list = reply.ok ? transferables(reply.result) : [];
+  scope.postMessage({ id, ...reply, bytes: list.reduce<number>((n, b) => n + (b as ArrayBuffer).byteLength, 0) }, list);
 };

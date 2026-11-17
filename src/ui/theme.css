@@ -11,26 +11,32 @@
 html, body { margin: 0; height: 100%; background: var(--bg0); color: var(--text); font: 11px/1.25 var(--font); overflow: hidden; user-select: none; }
 button, select, input { font: inherit; color: inherit; }
 
-#app { position: fixed; inset: 0; display: grid; grid-template-rows: 22px 130px 1fr 25px; min-width: 1070px; min-height: 480px; }
+/* Title and head bars wrap onto further rows in narrow windows instead of clipping controls off-screen. */
+#app { position: fixed; inset: 0; display: grid; grid-template-rows: auto auto 1fr 25px; grid-template-columns: minmax(0, 1fr); min-height: 480px; }
 
 /* ---- title bar ---- */
-#titlebar { display: flex; align-items: stretch; background: linear-gradient(#0d0c4a, #04022c); border-bottom: 1px solid var(--edge); }
+#titlebar { display: flex; flex-wrap: wrap; align-items: stretch; background: linear-gradient(#0d0c4a, #04022c); border-bottom: 1px solid var(--edge); }
 #titlebar .menubtn { display: flex; align-items: center; gap: 4px; padding: 0 8px; font-weight: 700; color: #cfe0ff; letter-spacing: .5px; cursor: pointer; border-right: 1px solid var(--edge); }
 #titlebar .menubtn:hover { background: var(--bgHi); }
-#titlebar .tabs { display: flex; align-items: stretch; }
+#titlebar .tabs { display: flex; flex-wrap: wrap; align-items: stretch; }
+#titlebar > *, #titlebar .tabs > .tab { min-height: 22px; }
 .tab { padding: 3px 5px 0; color: var(--textDim); cursor: pointer; border-right: 1px solid #353538; font-size: 10.5px; }
 .tab.on { color: #fff; background: linear-gradient(#2c4a8a, #39393c); }
 .tab.disabled { color: #707073; cursor: not-allowed; }
 .tab:not(.disabled):not(.on):hover { color: #fff; background: var(--bg3); }
 #titlebar .spacer { flex: 1; }
-#titlebar .basegroup { display: flex; align-items: stretch; border-left: 1px solid var(--edge); }
+#titlebar .basegroup { display: flex; align-items: stretch; margin-left: auto; border-left: 1px solid var(--edge); }
 
 /* ---- head bar ---- */
-#headbar { position: relative; display: flex; background: linear-gradient(#29292c, #1f1f22 60%, #1a1a1d); border-bottom: 1px solid var(--edge); }
+#headbar { position: relative; display: flex; flex-wrap: wrap; background: linear-gradient(#29292c, #1f1f22 60%, #1a1a1d); border-bottom: 1px solid var(--edge); }
 #framepanel { position: relative; width: 780px; height: 130px; flex: none; }
 .hb-block { position: relative; height: 130px; flex: none; border-left: 1px solid var(--edge); }
 #hb-fill { flex: 1; }
-#timelinepages { width: 190px; }
+#timelinepages { width: 191px; } /* 190 px pages plus the block border */
+/* Below the frame panel's design width it keeps its layout, scaled to fit (zoom scales layout boxes, so pointer
+   hit-testing and keyboard focus follow). */
+@media (max-width: 799px) { #framepanel { zoom: .9; } }
+@media (max-width: 719px) { #framepanel { zoom: .8; } }
 
 /* ---- generic controls rendered at design geometry ---- */
 .form { position: relative; }
@@ -90,8 +96,8 @@ button, select, input { font: inherit; color: inherit; }
 
 /* ---- status bar ---- */
 #statusbar { display: flex; background: linear-gradient(#262629, #19191c); border-top: 1px solid var(--edge); align-items: stretch; }
-#statusbar > div { border-right: 1px solid var(--edge); padding: 5px 5px 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; color: var(--textDim); }
-#statusbar .gauge { margin: 3px 6px; width: 190px; height: 18px; border: 1px solid #5a5a5d; background: #141417; padding: 0; }
+#statusbar > div { flex: 0 1 auto; min-width: 0; border-right: 1px solid var(--edge); padding: 5px 5px 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; color: var(--textDim); }
+#statusbar .gauge { flex: 0 1 190px; min-width: 60px; margin: 3px 6px; width: 190px; height: 18px; border: 1px solid #5a5a5d; background: #141417; padding: 0; }
 #statusbar .gauge > div { height: 100%; width: 0; background: linear-gradient(#3fd27a, #1e8a4b); }
 
 /* ---- HUD on the map ---- */
@@ -160,6 +166,10 @@ button, select, input { font: inherit; color: inherit; }
 .hud-cities, .hud-cell { white-space: pre; font: 12px/1.35 "DejaVu Sans Mono", ui-monospace, monospace; z-index: 4; }
 .hud-cell-title { font: 600 11px "Noto Sans Condensed", sans-serif; color: #9fb3e6; margin-bottom: 2px; cursor: pointer; }
 .credits .hint { color: #8a97b8; font-weight: 400; }
+.credits-repo { display: inline-flex; align-items: center; gap: 5px; margin-top: 3px; color: #9ec3ff; text-decoration: underline; overflow-wrap: anywhere; }
+.credits-repo:hover { color: #c8dcff; }
+.credits-repo:focus-visible { outline: 2px solid var(--accent2); outline-offset: 2px; }
+.credits-gh { width: 14px; height: 14px; flex: none; background: currentColor; -webkit-mask: url(/assets/icons/tabler/brand-github.svg) center / contain no-repeat; mask: url(/assets/icons/tabler/brand-github.svg) center / contain no-repeat; }
 .hud-roadlabel { position: absolute; white-space: nowrap; pointer-events: auto; cursor: move; z-index: 4; font: 600 13px "Noto Sans", sans-serif; color: #fff; text-shadow: 0 0 3px #000, 0 0 6px #000; }
 #app.recording-box { outline: 3px dashed #e33; outline-offset: -3px; }
 .hud-watches { white-space: pre; font: 600 12px/1.35 var(--font); color: #ffe07a; pointer-events: none; }
@@ -177,3 +187,14 @@ button, select, input { font: inherit; color: inherit; }
 #framepanel .ctl.chk.on::before { content: '✕'; color: #fff; font: 700 10px/12px var(--font); text-align: center; background: #1d47b8; border-color: #6f9bff; box-shadow: 0 0 3px #3d7bff; }
 #framepanel .ctl.btn, #framepanel .ctl.speedbtn { text-shadow: 0 1px 1px #000; box-shadow: inset 0 1px 0 rgba(255, 255, 255, .08), 0 1px 2px rgba(0, 0, 0, .6); }
 .ctl.chk > .lines { white-space: pre-line; line-height: 1.05; }
+.ctl:focus-visible, .tab:focus-visible, .tabsrow > div:focus-visible, #titlebar .menubtn:focus-visible, .group > .cap:focus-visible { outline: 2px solid var(--accent2); outline-offset: -2px; }
+/* Debug / performance panel (F8). */
+.perfpanel { position: absolute; right: 8px; top: 64px; z-index: 6; width: min(900px, calc(100% - 16px)); max-height: calc(100% - 80px); overflow: auto; padding: 4px 6px; background: rgba(12, 14, 20, .92); border: 1px solid var(--edge); border-radius: 3px; color: var(--text); user-select: text; }
+.perfpanel table { border-collapse: collapse; width: 100%; font-size: 11px; }
+.perfpanel caption { text-align: left; color: var(--textDim); padding-bottom: 3px; }
+.perfpanel th { text-align: left; color: var(--accent2); padding: 4px 0 1px; }
+.perfpanel td { padding: 1px 4px; vertical-align: top; border-top: 1px solid #2a2a2e; }
+.perfpanel td:first-child { color: var(--textDim); width: 38%; }
+.perfpanel table.perfmatrix { margin-top: 8px; }
+.perfpanel .perfmatrix th { padding: 2px 4px; font-weight: normal; vertical-align: bottom; }
+.perfpanel .perfmatrix td:first-child { width: auto; color: var(--text); white-space: nowrap; }

@@ -44,8 +44,8 @@ export class SatelliteLayer extends MapLayer {
     if (!s) {
       const [min, max] = bandRange(band);
       s = new FrameStore<BandFrame>(async (f) => {
-        const res = await pool.run('goes', { url: f.key, factor: bandFactor(band, settings.num('config.performanceMode'), this.cfg.domain()), min, max });
-        const tex = this.r.gpu.texture2D(res.width, res.height, 'r8unorm', res.codes, 1);
+        const res = await pool.for(this.id).run('goes', { url: f.key, factor: bandFactor(band, settings.num('config.performanceMode'), this.cfg.domain()), min, max });
+        const tex = this.r.gpu.texture2D(res.width, res.height, 'r8unorm', res.codes, 1, this.id);
         return { tex, proj: geosProj(res.proj, res.width, res.height), bounds: this.boundsFor(res.proj.lon0), startMs: res.startMs };
       }, (d) => d.tex.destroy(), 2, () => this.updateStatus());
       this.stores.set(band, s);
@@ -74,7 +74,7 @@ export class SatelliteLayer extends MapLayer {
     const bucket = `https://noaa-${this.cfg.platform()}.s3.amazonaws.com`;
     const product = DOMAIN_PRODUCT[this.cfg.domain()], tag = DOMAIN_TAG[this.cfg.domain()];
     const hours: number[] = [];
-    for (let t = Math.floor(timeline.start / 3600e3) * 3600e3; t <= timeline.end; t += 3600e3) hours.push(t);
+    for (let t = Math.floor(timeline.loopStart / 3600e3) * 3600e3; t <= timeline.loopEnd; t += 3600e3) hours.push(t);
     const files: { key: string; band: number; t: number }[] = [];
     try {
       await Promise.all(hours.map(async (h) => {
@@ -90,12 +90,8 @@ export class SatelliteLayer extends MapLayer {
         }
       }));
     } catch (e) { this.setStatus('error', `GOES listing failed: ${(e as Error).message}`); return; }
-    const conus15 = settings.bool('settings.goesCONUSThird') && this.cfg.domain() === 0;
-    const meso3 = settings.bool('settings.goesMesoThird') && this.cfg.domain() >= 2;
     for (const band of this.cfg.bands()) {
-      let fs = files.filter((f) => f.band === band && f.t >= timeline.start - 10 * 60e3).sort((a, b) => a.t - b.t);
-      if (conus15) fs = fs.filter((f) => new Date(f.t).getUTCMinutes() % 15 < 5);
-      if (meso3) fs = fs.filter((f, i) => i % 3 === fs.length % 3 - 1 || i === fs.length - 1);
+      let fs = thinGoesFiles(files.filter((f) => f.band === band && f.t >= timeline.loopStart - 10 * 60e3).sort((a, b) => a.t - b.t), this.cfg.domain());
       fs = fs.slice(-this.cfg.maxFrames());
       this.store(band).setWanted(fs.map((f) => ({ t: f.t, key: f.key })));
     }
@@ -161,6 +157,13 @@ export class SatelliteLayer extends MapLayer {
   }
 }
 
+/** "15-min CONUS mode" and "3-min mesoscale mode" thinning of a time-sorted file list (newest file always kept). */
+export function thinGoesFiles<T extends { t: number }>(fs: T[], domain: number): T[] {
+  if (settings.bool('settings.goesCONUSThird') && domain === 0) fs = fs.filter((f) => new Date(f.t).getUTCMinutes() % 15 < 5);
+  if (settings.bool('settings.goesMesoThird') && domain >= 2) { const n = fs.length; fs = fs.filter((_, i) => i % 3 === n % 3 - 1 || i === n - 1); }
+  return fs;
+}
+
 export function basicSatelliteConfig(): SatConfig {
   const idx = () => settings.num('layerState.SatelliteProductIndex');
   return {
@@ -185,7 +188,7 @@ export function extendedSatelliteConfig(): SatConfig {
   const multi = () => settings.bool('layerState.ExtendedSatelliteUseMulti');
   return {
     id: 'satelliteExtended', title: 'Extended GOES',
-    enabled: () => settings.bool('layerState.ExtendedSatelliteOn') && settings.num('ext.layerState.ExtendedSatellitePlatform') !== 2,
+    enabled: () => settings.bool('layerState.ExtendedSatelliteOn') && !settings.bool('ext.layerState.ExtendedSatelliteUseL2') && settings.num('ext.layerState.ExtendedSatellitePlatform') !== 2,
     bands: () => {
       if (!multi()) return [Math.min(16, Math.max(1, settings.num('layerState.ExtendedSatelliteProductIndex') + 1))];
       const r = userRecipe();

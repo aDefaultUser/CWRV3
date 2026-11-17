@@ -30,7 +30,7 @@ abstract class RapLayer extends GridLayer {
   protected cache = new Map<string, GridFrame & { extra?: unknown }>();
   protected abstract frameKey(valid: number): string;
   protected abstract load(p: Pending): Promise<GridFrame & { extra?: unknown }>;
-  protected wanted(): Pending[] { return rapValidTimes(timeline.anchor ?? Date.now(), timeline.start).map((v) => ({ valid: v, key: this.frameKey(v) })); }
+  protected wanted(): Pending[] { return rapValidTimes(timeline.anchor ?? Date.now(), timeline.loopStart).map((v) => ({ valid: v, key: this.frameKey(v) })); }
   async refresh() {
     if (!this.enabled()) { this.setStatus('off', ''); return; }
     const want = this.wanted();
@@ -68,8 +68,8 @@ export class MesoLayer extends RapLayer {
   protected frameKey(v: number) { return `${this.product().index}|${v}|${settings.bool('ext.settings.mesoCorrectedFormulas')}|${settings.num('settings.generalHeightContourInterval')}`; }
   protected async load(p: Pending) {
     const prod = this.product();
-    const res = await pool.run('grid.meso', { url: rapUrl(p.valid - 3600e3), matches: prod.match, lo: prod.range[0], hi: prod.range[1], derivation: prod.derivation, render: prod.render, corrected: settings.bool('ext.settings.mesoCorrectedFormulas'), contourInterval: Math.max(1, settings.num('settings.generalHeightContourInterval')) });
-    return { t: p.valid, key: p.key, tex: uploadGrid(this.r, res.nx, res.ny, res.data), proj: res.proj, bounds: res.bounds, extra: res.contours };
+    const res = await pool.for(this.id).run('grid.meso', { url: rapUrl(p.valid - 3600e3), matches: prod.match, lo: prod.range[0], hi: prod.range[1], derivation: prod.derivation, render: prod.render, corrected: settings.bool('ext.settings.mesoCorrectedFormulas'), contourInterval: Math.max(1, settings.num('settings.generalHeightContourInterval')) });
+    return { t: p.valid, key: p.key, tex: uploadGrid(this.r, res.nx, res.ny, res.data, this.id), proj: res.proj, bounds: res.bounds, extra: res.contours };
   }
   display(): GridDisplay {
     const p = this.product();
@@ -114,8 +114,8 @@ export class SevereLayer extends RapLayer {
   protected frameKey(v: number) { return `${v}|${settings.bool('ext.settings.mesoCorrectedFormulas')}`; }
   private pair = new Map<string, { stp: GPUTexture; scp: GPUTexture }>();
   protected async load(p: Pending) {
-    const res = await pool.run('grid.severe', { url: rapUrl(p.valid - 3600e3), corrected: settings.bool('ext.settings.mesoCorrectedFormulas') });
-    const stp = uploadGrid(this.r, res.nx, res.ny, res.stpTex), scp = uploadGrid(this.r, res.nx, res.ny, res.scpTex);
+    const res = await pool.for(this.id).run('grid.severe', { url: rapUrl(p.valid - 3600e3), corrected: settings.bool('ext.settings.mesoCorrectedFormulas') });
+    const stp = uploadGrid(this.r, res.nx, res.ny, res.stpTex, this.id), scp = uploadGrid(this.r, res.nx, res.ny, res.scpTex, this.id);
     this.pair.set(p.key, { stp, scp });
     // The frame's texture is chosen at draw time (STP or SCP); both are kept.
     return { t: p.valid, key: p.key, tex: stp, proj: res.proj, bounds: res.bounds, extra: scp };
@@ -146,8 +146,8 @@ export class DiffLayer extends RapLayer {
     const h = Math.min(24, Math.max(1, settings.num('layerState.Misc2MTDifferenceHours')));
     const match = XPRODUCTS.misc.diffFields[this.idx()].split(':').slice(0, 2).join(':');
     const [lo, hi] = this.range();
-    const res = await pool.run('grid.diff', { urlNow: rapUrl(p.valid - 3600e3), urlThen: rapUrl(p.valid - 3600e3 - h * 3600e3), match, lo, hi });
-    return { t: p.valid, key: p.key, tex: uploadGrid(this.r, res.nx, res.ny, res.data), proj: res.proj, bounds: res.bounds };
+    const res = await pool.for(this.id).run('grid.diff', { urlNow: rapUrl(p.valid - 3600e3), urlThen: rapUrl(p.valid - 3600e3 - h * 3600e3), match, lo, hi });
+    return { t: p.valid, key: p.key, tex: uploadGrid(this.r, res.nx, res.ny, res.data, this.id), proj: res.proj, bounds: res.bounds };
   }
   display(): GridDisplay {
     const [low, high] = this.range();

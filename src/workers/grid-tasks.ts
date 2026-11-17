@@ -8,6 +8,7 @@ import { gunzip, inflateZlib } from '../decode/zip';
 import { gridProj, gridBounds, gridMap, type ProjParamsLike } from '../gis/gridproj';
 import { toHalf } from '../render/half';
 import { gaussianBlur, isolines } from '../gis/contour';
+import type { JobClock } from './job-clock';
 
 const inflate = (b: Uint8Array) => inflateZlib(b);
 
@@ -20,12 +21,14 @@ export function geoOf(f: GribField): GeoInfo {
   return { nx, ny, proj: gridProj(f.grid), bounds: gridBounds(f.grid), grid: f.grid };
 }
 
-/** Fetches GRIB2 messages: whole file (optionally gzip) or, with matches, the inventory-selected byte ranges. */
-export async function fetchGrib(url: string, matches: string[] | null, o: { gz?: boolean; idxExt?: string; cache?: 'immutable' | 'none' } = {}): Promise<GribField[][]> {
+/**
+ * Fetches GRIB2 messages: whole file (optionally gzip) or, with matches, the inventory-selected byte ranges.
+ * Decompression and decoding (PNG inflate, JPEG 2000) count as the job's processing time.
+ */
+export async function fetchGrib(url: string, matches: string[] | null, job: JobClock, o: { gz?: boolean; idxExt?: string; cache?: 'immutable' | 'none' } = {}): Promise<GribField[][]> {
   if (!matches) {
-    let bytes = await fetchBytes(url, { cache: o.cache ?? 'none', maxBytes: 256 * 1024 * 1024 });
-    if (o.gz || (bytes[0] === 0x1f && bytes[1] === 0x8b)) bytes = await gunzip(bytes);
-    return [await decodeGrib2(bytes, inflate)];
+    const bytes = await fetchBytes(url, { cache: o.cache ?? 'none', maxBytes: 256 * 1024 * 1024 });
+    return [await job.time(async () => decodeGrib2(o.gz || (bytes[0] === 0x1f && bytes[1] === 0x8b) ? await gunzip(bytes) : bytes, inflate))];
   }
   const idx = parseIdx(await fetchText(url + (o.idxExt ?? '.idx'), { cache: o.cache }));
   return Promise.all(matches.map(async (m) => {
@@ -35,7 +38,7 @@ export async function fetchGrib(url: string, matches: string[] | null, o: { gz?:
     // The first matching line is used (lines matching the product's GRIB match select messages).
     const e = hits[0];
     const bytes = await fetchBytes(url, { cache: o.cache ?? 'immutable', range: [e.start, e.end ?? e.start + 200_000_000] });
-    out.push(...(await decodeGrib2(bytes, inflate)));
+    out.push(...(await job.time(() => decodeGrib2(bytes, inflate))));
     return out;
   }));
 }

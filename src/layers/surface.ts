@@ -50,9 +50,9 @@ export class SurfaceLayer extends MapLayer {
     const latest = await latestCycle();
     if (latest === null) { this.setStatus('error', 'HRRR: no recent cycle found'); return; }
     const hours: number[] = [];
-    for (let t = Math.floor(timeline.start / 3600e3) * 3600e3; t <= Math.min(latest, timeline.end); t += 3600e3) hours.push(t);
+    for (let t = Math.floor(timeline.loopStart / 3600e3) * 3600e3; t <= Math.min(latest, timeline.loopEnd); t += 3600e3) hours.push(t);
     // The newest analysis is added only for a live window (an archived loop keeps its own hours).
-    if (!hours.includes(latest) && latest <= timeline.end + 3600e3 && latest >= timeline.start) hours.push(latest);
+    if (!hours.includes(latest) && latest <= timeline.loopEnd + 3600e3 && latest >= timeline.loopStart) hours.push(latest);
     const wantM = settings.bool('layerState.MSLPOn'), wantW = settings.bool('layerState.10mWindVectorsOn'), wantF = settings.bool('layerState.saFillOn');
     const fillIdx = settings.num('layerState.saFillIdx');
     for (const h of hours.slice(-7)) {
@@ -64,7 +64,7 @@ export class SurfaceLayer extends MapLayer {
       if (this.loading.has(key)) continue;
       this.loading.add(key);
       const ff = FILL_FIELDS[fillIdx];
-      pool.run('surface', {
+      pool.for(this.id).run('surface', {
         url: hrrrUrl(new Date(h)),
         mslp: needM ? { interval: settings.num('settings.generalMSLPContourInterval'), kernel: settings.num('settings.generalContourKernel') } : undefined,
         wind: needW ? { step: 14 } : undefined,
@@ -72,12 +72,12 @@ export class SurfaceLayer extends MapLayer {
       }).then((res) => {
         if (res.contours) cur.contours = res.contours;
         if (res.wind) cur.wind = res.wind;
-        if (res.fill) { cur.fill?.destroy(); cur.fill = this.r.gpu.texture2D(res.nx, res.ny, 'r8unorm', res.fill, 1); cur.fillIdx = fillIdx; cur.proj = lambertProj(res.grid); this.fillDraw.invalidate(); }
+        if (res.fill) { cur.fill?.destroy(); cur.fill = this.r.gpu.texture2D(res.nx, res.ny, 'r8unorm', res.fill, 1, this.id); cur.fillIdx = fillIdx; cur.proj = lambertProj(res.grid); this.fillDraw.invalidate(); }
         this.lastKey = '';
         this.setStatus('ready', `HRRR ${new Date(h).toISOString().slice(0, 13)}Z loaded`);
       }, (e) => this.setStatus('error', `HRRR: ${e.message}`)).finally(() => this.loading.delete(key));
     }
-    for (const k of [...this.hours.keys()]) if (k < timeline.start - 3600e3) { this.hours.get(k)!.fill?.destroy(); this.hours.delete(k); }
+    for (const k of [...this.hours.keys()]) if (k < timeline.loopStart - 3600e3) { this.hours.get(k)!.fill?.destroy(); this.hours.delete(k); }
     if (settings.bool('layerState.FrontsOn') || settings.bool('layerState.CentersOn')) {
       try { this.wpc = parseCodsus(await fetchText('https://tgftp.nws.noaa.gov/data/raw/as/asus01.kwbc.cod.sus.txt')); this.lastKey = ''; }
       catch (e) { this.setStatus('error', `WPC fronts: ${(e as Error).message}`); }

@@ -41,7 +41,7 @@ export class ShapeLayer extends VectorLayer {
     try {
       const shapes: VShape[] = [];
       for (const s of src) {
-        const layers = await pool.run<Decoded[]>('shapes', s);
+        const layers = await pool.for(this.id).run<Decoded[]>('shapes', s);
         for (const l of layers) for (const f of l.features) { const v = this.cfg.shape(f, l.name); if (v) shapes.push(v); }
       }
       this.key = key; this.at = Date.now();

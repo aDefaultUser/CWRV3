@@ -75,7 +75,7 @@ export class OutlookLayer extends VectorLayer {
       for (const url of [urls.main, urls.cig]) {
         if (!url) continue;
         const gj = await fetchJson<{ features: { geometry: any; properties: Record<string, unknown> }[] }>(url);
-        const feats = await pool.run<{ kind: string; attrs: Record<string, unknown>; parts: number[][]; tris?: number[] }[]>('geojson', { gj });
+        const feats = await pool.for(this.id).run<{ kind: string; attrs: Record<string, unknown>; parts: number[][]; tris?: number[] }[]>('geojson', { gj });
         for (const f of feats) {
           const label = String(f.attrs.LABEL ?? f.attrs.LABEL2 ?? '');
           const st = outlookStyle(label, fam, day);
@@ -212,7 +212,7 @@ export class LsrLayer extends VectorLayer {
     if (Date.now() - this.at > 5 * 60e3) {
       this.setStatus('loading', 'Local storm reports');
       try {
-        const layers = await pool.run<VectorLayerData[]>('shapes', { url: 'https://mesonet.agron.iastate.edu/data/gis/shape/4326/us/lsr_24hour.zip', kind: 'zip' });
+        const layers = await pool.for(this.id).run<VectorLayerData[]>('shapes', { url: 'https://mesonet.agron.iastate.edu/data/gis/shape/4326/us/lsr_24hour.zip', kind: 'zip' });
         this.reports = (layers[0]?.features ?? []).filter((f) => f.kind === 'point').map((f) => {
           const a = f.attrs as Record<string, string | number | null>;
           return { lon: f.parts[0][0], lat: f.parts[0][1], t: spcTime(a.VALID) ?? 0, type: lsrTypeIndex(String(a.TYPETEXT ?? '')), typeText: String(a.TYPETEXT ?? ''), mag: a.MAG === null || a.MAG === '' || Number.isNaN(Number(a.MAG)) ? null : Number(a.MAG), wfo: String(a.WFO ?? ''), city: String(a.CITY ?? ''), county: String(a.COUNTY ?? ''), state: String(a.STATE ?? ''), source: String(a.SOURCE ?? ''), remark: String(a.REMARK ?? '') };
@@ -278,7 +278,7 @@ export class AdvisoryLayer extends VectorLayer {
         const p = f.properties;
         const info = [p.event, p.headline ?? '', p.areaDesc ?? '', p.expires ? `Expires ${new Date(p.expires).toLocaleString()}` : ''];
         if (f.geometry) {
-          const [feat] = await pool.run<{ parts: number[][]; tris?: number[] }[]>('geojson', { gj: { features: [{ geometry: f.geometry, properties: {} }] }, tol: advisoryTolerance(0.004) });
+          const [feat] = await pool.for(this.id).run<{ parts: number[][]; tris?: number[] }[]>('geojson', { gj: { features: [{ geometry: f.geometry, properties: {} }] }, tol: advisoryTolerance(0.004) });
           if (feat) out.push({ event: p.event, parts: feat.parts, tris: feat.tris, info });
           return;
         }
@@ -296,7 +296,7 @@ export class AdvisoryLayer extends VectorLayer {
   private zone(url: string) {
     let p = this.zoneGeo.get(url);
     if (!p) {
-      p = fetchJson<{ geometry: any }>(url, { cache: 'immutable' }).then(async (z) => (z.geometry ? (await pool.run<{ parts: number[][]; tris?: number[] }[]>('geojson', { gj: { features: [{ geometry: z.geometry, properties: {} }] }, tol: advisoryTolerance(0.01) }))[0] ?? null : null), () => null);
+      p = fetchJson<{ geometry: any }>(url, { cache: 'immutable' }).then(async (z) => (z.geometry ? (await pool.for(this.id).run<{ parts: number[][]; tris?: number[] }[]>('geojson', { gj: { features: [{ geometry: z.geometry, properties: {} }] }, tol: advisoryTolerance(0.01) }))[0] ?? null : null), () => null);
       this.zoneGeo.set(url, p);
     }
     return p;
