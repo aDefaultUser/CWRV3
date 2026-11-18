@@ -9,6 +9,7 @@ import { settings } from '../settings/store';
 import { labelDb, labelKey, type LabelDb } from '../app/stores';
 import { MapLayer } from './base';
 import { RADAR_SITES } from '../generated/radar-sites';
+import { radarStatus } from '../radar/status';
 import { lonLatToXYZ } from '../render/camera';
 import { loadPref, savePref, isArray, isBool } from '../app/persist';
 
@@ -299,6 +300,11 @@ export class SiteLabelLayer extends MapLayer {
   constructor(r: Renderer, atlas: GlyphAtlas) { super(r); this.text = new TextSet(r, atlas); this.dots = new PointSet(r); this.rebuild(); }
   enabled() { return settings.bool('settings.nexradSitesOn'); }
   sites() { return RADAR_SITES.filter((s) => !(settings.bool('config.radarSites.HideTDWRs') && s.type === 'TDWR')); }
+  /** Radar status (api.weather.gov) while site labels or NEXRAD are on; sites reported down are drawn grey and dimmed. */
+  async refresh() {
+    if (!this.enabled() && !settings.bool('layerState.NEXRADOn')) return;
+    if (await radarStatus.refresh()) this.rebuild();
+  }
   /** Label scale near the cursor (MouseProximityScale): up to 1.5× within 250 CSS px, 1× beyond. */
   static proximityScale(d: number) { return 1 + 0.5 * Math.max(0, 1 - d / 250); }
   private scaleKey = '';
@@ -312,8 +318,9 @@ export class SiteLabelLayer extends MapLayer {
       const [px, py, front] = this.r.camera.project(lonLatToXYZ(lon, lat));
       return front ? SiteLabelLayer.proximityScale(Math.hypot(px - near[0], py - near[1])) : 1;
     };
-    this.text.setLabels(sites.map((s) => ({ lon: s.lon, lat: s.lat, text: s.id, size: 11 * settings.num('config.radarSites.Scale') * scale(s.lon, s.lat), color: (s.id === cur ? [...curC, 255] : [...other, 255]) as [number, number, number, number], halo: [0, 0, 0, 170], dx: 6, align: 'left' as const, priority: s.id === cur ? 1e9 : 0 })));
-    this.dots.setPoints(sites.map((s) => ({ lon: s.lon, lat: s.lat, size: 5, shape: SHAPE.circle, color: (s.id === cur ? [...curC, 255] : [...other, 255]) as [number, number, number, number] })));
+    const color = (id: string) => (radarStatus.get(id)?.down ? [140, 140, 140, 255] : id === cur ? [...curC, 255] : [...other, 255]) as [number, number, number, number];
+    this.text.setLabels(sites.map((s) => ({ lon: s.lon, lat: s.lat, text: s.id, size: 11 * settings.num('config.radarSites.Scale') * scale(s.lon, s.lat), color: color(s.id), halo: [0, 0, 0, 170], dx: 6, align: 'left' as const, priority: s.id === cur ? 1e9 : 0 })));
+    this.dots.setPoints(sites.map((s) => ({ lon: s.lon, lat: s.lat, size: 5, shape: SHAPE.circle, color: color(s.id) })));
   }
   /** Site under the cursor (CSS px) within 14 px. */
   hit(x: number, y: number): string | null {
@@ -345,6 +352,7 @@ export class SiteLabelLayer extends MapLayer {
         a = fadeOut + (base - fadeOut) * Math.max(0, 1 - d / 250);
       }
       if (s.id === cur && settings.bool('config.radarSites.CurrentShowAlways')) a = 1;
+      if (radarStatus.get(s.id)?.down) a *= 0.5;
       this.text.alpha[i] = pointOnly && s.id !== cur ? 0 : a;
       this.dots.setAlpha(i, a);
     });

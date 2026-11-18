@@ -94,7 +94,7 @@ export function modelUrl(c: ModelConfig, cycleMs: number, hour: number, base: nu
 }
 
 const range = (a: number, b: number, s: number) => { const o: number[] = []; for (let h = a; h <= b; h += s) o.push(h); return o.join(','); };
-const SURFACE = (msl: string, apcp: boolean) => `Parameters:
+const SURFACE = (msl: string, apcp: boolean, upper = true) => `Parameters:
 1,0,0,°F,2 m Temperature,M_2MTGLOBAL,TMP:2 m above ground
 1,0,0,°F,2 m Dew Point,M_2MD,DPT:2 m above ground
 1,1,0,mph,10 m Wind,surfacewind,UGRD:10 m above ground@VGRD:10 m above ground
@@ -105,9 +105,9 @@ const SURFACE = (msl: string, apcp: boolean) => `Parameters:
 1,0,0,J/kg,Surface CIN,M_CI,CIN:surface
 1,0,0,m²/s²,0-3 km Storm-Relative Helicity,M_SRH,HLCY:3000-0 m above ground
 1,0,0,in,Precipitable Water,DefaultPrecip,PWAT:entire atmosphere (considered as a single layer)
-${apcp ? '1,0,0,in,Total Precipitation,DefaultPrecip,APCP:surface:0-\n' : ''}1,0,0,in,Snow Depth,SnowDepth,SNOD:surface
+${apcp ? '1,0,0,in,Total Precipitation,DefaultPrecip,APCP:surface:0-\n' : ''}1,0,0,in,Snow Depth,SnowDepth,SNOD:surface${upper ? `
 0,0,1,dam,500 mb Height,,HGT:500 mb
-1,1,0,mph,250 mb Wind,UpperLevelWinds,UGRD:250 mb@VGRD:250 mb`;
+1,1,0,mph,250 mb Wind,UpperLevelWinds,UGRD:250 mb@VGRD:250 mb` : ''}`;
 
 /** Public replacement configurations. */
 export const DEFAULT_CONFIGS: Record<string, string> = {
@@ -235,6 +235,64 @@ Parameters:
 1,0,0,in,1-hour Precipitation,Default1HrPrecip,APCP:surface
 1,0,0,in,Snow Depth,SnowDepth,SNOD:surface
 1,0,0,mi,Visibility,M_VIS,VIS:surface`,
+  // RRFS v1 (operational successor of NAM/HiresW) on NOAA Open Data (noaa-rrfs-ops-pds, bucket listing 2026-11-17):
+  // the 3 km CONUS files (Lambert grid of HRRR) run every 3 h to 18 h and at 00/06/12/18 UTC to 84 h. The 2dfld
+  // file holds the surface fields, prslev the pressure levels.
+  'RRFS.config': `; RRFS 3 km CONUS, 2-D surface file. Availability observed 2026-11-17: f018 70–140 min after the cycle.
+Caption
+RRFS
+ForecastTiming
+${range(0, 18, 1)}
+CycleTiming
+0,3,150
+ProjectionFile
+RRFSCONUS3KMProjection.dat
+Dimensions
+1799,1059
+DownloadURL
+https://noaa-rrfs-ops-pds.s3.amazonaws.com/rrfs.[YYYY][MM][DD]/[HH]/rrfs.t[HH]z.2dfld.3km.f[FFF].conus.grib2
+InventoryExt
+.idx
+${SURFACE('MSLET', true, false)}
+1,0,0,mi,Visibility,M_VIS,VIS:surface
+1,0,0,%,Total Cloud Cover,M_PCT,TCDC:entire atmosphere`,
+  'RRFS84Hr.config': `; RRFS 3 km CONUS extended runs (00/06/12/18 UTC) to 84 h; f084 140–205 min after the cycle (2026-11-17).
+Caption
+RRFS 84 hour
+ForecastTiming
+${range(0, 84, 1)}
+CycleTiming
+0,6,210
+ProjectionFile
+RRFSCONUS3KMProjection.dat
+Dimensions
+1799,1059
+DownloadURL
+https://noaa-rrfs-ops-pds.s3.amazonaws.com/rrfs.[YYYY][MM][DD]/[HH]/rrfs.t[HH]z.2dfld.3km.f[FFF].conus.grib2
+InventoryExt
+.idx
+${SURFACE('MSLET', true, false)}`,
+  'RRFSPressure.config': `; RRFS 3 km CONUS pressure-level file (prslev).
+Caption
+RRFS Pressure Levels
+ForecastTiming
+${range(0, 18, 1)}
+CycleTiming
+0,3,150
+ProjectionFile
+RRFSCONUS3KMProjection.dat
+Dimensions
+1799,1059
+DownloadURL
+https://noaa-rrfs-ops-pds.s3.amazonaws.com/rrfs.[YYYY][MM][DD]/[HH]/rrfs.t[HH]z.prslev.3km.f[FFF].conus.grib2
+InventoryExt
+.idx
+Parameters:
+0,0,1,dam,500 mb Height,,HGT:500 mb
+1,1,0,mph,500 mb Wind,UpperLevelWinds,UGRD:500 mb@VGRD:500 mb
+1,1,0,mph,250 mb Wind,UpperLevelWinds,UGRD:250 mb@VGRD:250 mb
+1,0,0,°F,850 mb Temperature,M_2MTGLOBAL,TMP:850 mb
+1,0,0,%,700 mb Relative Humidity,RelativeHumidity,RH:700 mb`,
   // Currently unavailable from public servers when these configurations were written (2026-11-15): kept with
   // their NCEP paths so that they work if the products return; the loader reports the HTTP error instead of
   // substituting another model.

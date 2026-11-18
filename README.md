@@ -73,6 +73,22 @@ Probe reads the displayed value under the pointer.
   synthesised in the browser (a different pattern per alert type; one tone per check, the most severe), speech and
   OS notifications (permission is asked when the option is turned on). Test alert sends a sample through the enabled
   outputs. Browsers start audio only after a click, so after a reload tones resume with the first click on the page.
+* MRMS adds, from the public MRMS bucket: reflectivity at −10 °C and −20 °C; H50/H60 (depth of the 50/60 dBZ echo
+  above the 0 °C and −20 °C levels, kft); 50 and 60 dBZ echo tops; 48 and 72 h multi-sensor QPE (Pass 2); next-60-minute
+  lightning probability; 24 h low- and mid-level rotation tracks; FLASH flash-flood guidance (CREST maximum unit
+  streamflow, QPE-to-FFG ratio as a percentage, QPE average recurrence interval in years; 2–10 min cadence); and the
+  MRMS model freezing level (0 °C height, ft MSL) and surface wet-bulb temperature (°C). Products that share a unit
+  with an existing one use its palette setting; the others have their own palette settings
+  (`ext.settings.mrms*Palette`). The lightning jump grids are not offered: their dimensionless codes are not
+  documented in the public MRMS table.
+* Model → RRFS (the operational successor of NAM/HiresW): 3 km CONUS from `noaa-rrfs-ops-pds`, every 3 h to 18 h
+  (RRFS), 00/06/12/18 UTC to 84 h (RRFS 84 hour), and the pressure-level file (RRFS Pressure Levels), by `.idx`
+  byte ranges like HRRR. The 13 km North America file (rotated lat/lon grid) is not used.
+* Radar status (api.weather.gov `/radar/stations`, read at most every 5 minutes while site labels or NEXRAD are on):
+  the NEXRAD status line shows the selected site's current VCP (with the RDA operability or state when it is not
+  on-line/operating); the site's "i" badge and the map rollover over a site show VCP, operability, state, Level 2
+  latency, alarms and the check time. A site reported inoperable or shut down, or whose Level 2 data is more than 30
+  minutes old, is drawn grey and dimmed. Missing fields read "unknown"; a table older than 15 minutes is not shown.
 * F8 (or CWRV3 → Advanced → Performance panel) shows the global frame rate and times, GPU pass time where the adapter
   supports timestamp queries, total tracked texture memory and the JS heap (N/A where the browser does not report
   it), and one row per layer or owner with its decode jobs, texture uploads, live texture memory and status. Each layer's decode time excludes network, queueing and transfer, shown beside
@@ -157,7 +173,8 @@ Exact parity with the original program is not claimed. Known differences:
 * Some Level 2 derived products carry approximations (echo-top interpolation, VILD scaling, POSH for WT ≤ 0); the
   Level 3 general status message product is not drawn.
 * NAM-family and HiresW model feeds were unavailable from the public servers when last checked (HTTP 404 on
-  2026-11-15) and are reported as unavailable instead of being substituted.
+  2026-11-17; the `noaa-nam-pds` bucket ends on 2026-11-03) and are reported as unavailable instead of being
+  substituted. RRFS, which replaced them operationally, is listed as its own model.
 * The live sweep depends on the public real-time chunk bucket being current for the site; otherwise it falls back to
   the TGFTP volume and says so.
 
@@ -180,10 +197,10 @@ measurements.
 
 ## Data sources
 
-NOAA Open Data on AWS (MRMS including the ProbSevere v3 storm objects, with the NCEP MRMS real-time directory as a
-fallback, HRRR, RAP, GFS, NBM, GOES ABI/GLM including the ABI L2+ cloud-top height, cloud-top
+NOAA Open Data on AWS (MRMS including FLASH and the ProbSevere v3 storm objects, with the NCEP MRMS real-time directory as a
+fallback, HRRR, RRFS, RAP, GFS, NBM, GOES ABI/GLM including the ABI L2+ cloud-top height, cloud-top
 temperature and fire/hot spot products, NEXRAD Level 2 archive and real-time chunks), NWS
-TGFTP (Level 2/3, NDFD, text products), api.weather.gov, Aviation Weather Center, SPC, WPC, CPC, NHC, NDBC, USGS
+TGFTP (Level 2/3, NDFD, text products), api.weather.gov (alerts, zones, radar station status), Aviation Weather Center, SPC, WPC, CPC, NHC, NDBC, USGS
 earthquakes, NASA FIRMS, NOAA water data, the US Drought Monitor (University of Nebraska–Lincoln), Iowa Environmental
 Mesonet, NASA GIBS imagery and AWS Terrain Tiles. Bundled GIS layers come from Natural Earth and US Census TIGER.
 
@@ -212,7 +229,7 @@ Mesonet, NASA GIBS imagery and AWS Terrain Tiles. Bundled GIS layers come from N
 
 | Part | Lines |
 | --- | ---: |
-| TypeScript / JavaScript | 17,942 |
+| TypeScript / JavaScript | 18,096 |
 | WGSL shaders | 689 |
-| **Total functional** | **18,631** |
+| **Total functional** | **18,785** |
 | CSS (separate) | 174 |

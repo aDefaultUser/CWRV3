@@ -1,4 +1,4 @@
-// MRMS tab: 32 products from the public NOAA MRMS bucket, per-product index refresh, newest-first
+// MRMS tab: 50 products from the public NOAA MRMS bucket, per-product index refresh, newest-first
 // back-fill to the loop start, the vendor display-range table (corrected mode optional), precipitation-typed
 // reflectivity for products 0–2 and the "Wrap timeline to MRMS loop" rule.
 import type { DrawContext, Renderer } from '../render/renderer';
@@ -21,10 +21,10 @@ export const MRMS = XPRODUCTS.mrms;
 /** S3 directory of a product: the catalog's public template without the date part. */
 export function mrmsDir(p: MrmsProduct) { return /CONUS\/([^/]+)\//.exec(p.s3)![1]; }
 
-/** Unit conversion from MRMS native units (mm, km) to the unit label (in, kft); others unchanged. */
+/** Unit conversion from MRMS native units (mm, km, m) to the unit label (in, kft, ft); others unchanged. */
 export function mrmsValueFactor(p: MrmsProduct): number {
   if (p.unit === 'in' || p.unit === 'in/hr') return 0.0393701;
-  if (p.unit === 'kft') return 3.28084;
+  if (p.unit === 'kft' || p.unit === 'ft') return 3.28084;
   return 1;
 }
 
