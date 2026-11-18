@@ -980,6 +980,36 @@ export const PRODUCTS = {
    "high": 100,
    "reserve": false,
    "unit": "mph"
+  },
+  {
+   "index": 17,
+   "name": "ZDR Column (max ZDR above -10°C)",
+   "kind": "derived",
+   "paletteKey": "NEXRAD/Level2ColumnZDRPalette",
+   "low": -4.75,
+   "high": 8,
+   "reserve": false,
+   "unit": "dB"
+  },
+  {
+   "index": 18,
+   "name": "KDP Column (max KDP above -10°C)",
+   "kind": "derived",
+   "paletteKey": "NEXRAD/Level2ColumnKDPPalette",
+   "low": -2,
+   "high": 9,
+   "reserve": false,
+   "unit": "deg/km"
+  },
+  {
+   "index": 19,
+   "name": "Hail Core (max reflectivity above -20°C)",
+   "kind": "derived",
+   "paletteKey": "NEXRAD/Level2HailCorePalette",
+   "low": -32,
+   "high": 95.5,
+   "reserve": false,
+   "unit": "dBz"
   }
  ],
  "level3Categories": [

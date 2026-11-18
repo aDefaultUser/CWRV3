@@ -15,7 +15,7 @@ import { PointSet, TextSet, GlyphAtlas, SHAPE } from '../render/prims';
 import type { L2Meta } from '../workers/decode.worker';
 import type { NexradLayer } from './nexrad';
 import { l2Moment } from '../radar/sources';
-import { algorithmKey, type L2BuildParams } from '../radar/l2products';
+import { algorithmKey, columnNote, usesIsotherms, type L2BuildParams } from '../radar/l2products';
 import { hailEnvironment, onIsotherms, pointKey, type RadarPoint } from '../radar/environment';
 import { ptypeAt, ptypeLabel, type PtypeState, type PtypeTex } from '../render/ptype';
 import { loadPref, savePref, isArray } from '../app/persist';
@@ -26,12 +26,13 @@ const siteKey = (s: CustomSite | null) => (s ? `${s.name}@${s.lon},${s.lat},${s.
 /** `sweep.id` is the display identity it was built for (see CustomRadarLayer.identity); `req` the request in flight. */
 interface Volume { name: string; url: string; t: number; size: number; meta?: L2Meta; sweep?: SweepTex & { elevation: number; id: string }; key?: string; req?: string; error?: string; pct: number }
 
-/** Palette setting per Level 2 product index (0–7 base/dealiased, 8–16 derived products built by the same engine). */
+/** Palette setting per Level 2 product index (0–7 base/dealiased, 8–19 derived products built by the same engine). */
 export const CUSTOM_RADAR_PALETTE_KEYS = ['Reflectivity', 'BaseVelocity', 'SpectrumWidth', 'ZDR', 'PHI', 'CC', 'BaseVelocity', 'StormRelativeVelocity',
-  'Shear', 'G2GShear', 'KDP', 'MEHS', 'POSH', 'VIL', 'VILD', 'ET', 'GUST'].map((k) => `settings.customRadarLevel2${k}Palette`);
+  'Shear', 'G2GShear', 'KDP', 'MEHS', 'POSH', 'VIL', 'VILD', 'ET', 'GUST'].map((k) => `settings.customRadarLevel2${k}Palette`)
+  .concat(['ColumnZDR', 'ColumnKDP', 'HailCore'].map((k) => `ext.settings.customRadarLevel2${k}Palette`));
 export const CUSTOM_RADAR_PRODUCT_COUNT = CUSTOM_RADAR_PALETTE_KEYS.length;
 
-/** Sweep used for a product: volume products (MEHS…GUST, index ≥ 11) take the whole volume (sweep 0 handle). */
+/** Sweep used for a product: volume products (MEHS…hail core, index ≥ 11) take the whole volume (sweep 0 handle). */
 export function customRadarSweep(sweeps: { elevation: number; moments: string[] }[], product: number, angle: number): number {
   if (product >= 11) return sweeps.length ? 0 : -1;
   const need = l2Moment(product);
@@ -101,7 +102,7 @@ export class CustomRadarLayer extends MapLayer {
     // vector as soon as it appears or changes (not at the next poll).
     onIsotherms((key) => {
       const p = this.sitePoint();
-      if (this.enabled() && p && key === pointKey(p) && (this.product() === 11 || this.product() === 12) && this.algorithmParams().isothermAuto) this.reloadProducts();
+      if (this.enabled() && p && key === pointKey(p) && usesIsotherms(this.product()) && this.algorithmParams().isothermAuto) this.reloadProducts();
     });
     nexrad.autoMotionListeners.add(() => { if (this.enabled() && this.product() === 7 && !settings.bool('settings.customRadarStormMotionCustom')) this.reloadProducts(); });
   }
@@ -307,9 +308,10 @@ export class CustomRadarLayer extends MapLayer {
   typed() { return this.product() === 0 && settings.bool('settings.nexradPrecipitationTyping'); }
   private ptypeShown: PtypeState<PtypeTex> | null = null;
   legends(): LegendSpec[] {
-    if (!this.enabled() || !this.shown().length) return [];
+    const shown = this.enabled() ? this.shown() : [];
+    if (!shown.length) return [];
     const d = this.range();
-    const note = this.typed() && this.ptypeShown ? ptypeLabel(this.ptypeShown) : undefined;
+    const note = this.typed() && this.ptypeShown ? ptypeLabel(this.ptypeShown) : columnNote(this.product(), () => this.buildParams(this.product(), shown[shown.length - 1].t));
     if (this.typed() && this.ptypeShown?.status === 'ready') {
       const k = this.nexrad.ptypeKeys(true), L = (key: string) => ({ palette: getPalette(settings.str(key)), lut: this.lut(settings.str(key)) });
       return [{ id: this.id, ...L(k.rain), low: d.low, high: d.high, unit: d.unit, reserve: d.reserve, note, extra: [{ label: 'Snow', ...L(k.snow) }, { label: 'FrzRain', ...L(k.fr) }, ...(settings.bool('settings.generalPrecipTypingSleetEnabled') ? [{ label: 'Sleet', ...L(k.ip) }] : [])] }];

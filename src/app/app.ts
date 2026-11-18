@@ -43,7 +43,7 @@ import { lonLatToXYZ, wrapLon } from '../render/camera';
 import { onProgress } from '../data/net';
 import { pool } from '../workers/pool';
 import { siteIndex } from '../settings/postload';
-import { L3, l3PaletteKey } from '../radar/sources';
+import { L3, l3PaletteKey, L2_PALETTE_KEYS } from '../radar/sources';
 import { FrameMeter, setActiveMeter, perfMark } from '../perf/meter';
 import { mainMenuActions, tracksMenuActions, l2ProductActions, mlMenuActions, ctrlRightActions } from '../ui/menus';
 import { buildSections, type Section } from '../sections';
@@ -405,7 +405,7 @@ export class App {
     const mem = (performance as unknown as { memory?: { usedJSHeapSize: number; jsHeapSizeLimit: number } }).memory;
     return {
       frames: this.meter.summary(2000), totalFrames: this.meter.total,
-      gpuMs: g.timestamps ? this.renderer.gpuMs : null,
+      gpuMs: g.timestamps ? this.renderer.gpuMs : null, gpuPrepassMs: this.renderer.gpuPrepassMs,
       heap: mem ? { used: mem.usedJSHeapSize, limit: mem.jsHeapSizeLimit } : null,
       textureBytes: g.trackedTextureBytes, textures: [...g.textureBytes].sort((a, b) => b[1] - a[1]),
       uploads: [...g.uploads].sort((a, b) => b[1].bytes - a[1].bytes),
@@ -580,8 +580,7 @@ export class App {
   }
   currentRadarPaletteSelector() {
     if (settings.bool('layerState.NEXRADLevel2')) {
-      const keys = ['settings.nexradLevel2ReflectivityPalette', 'settings.nexradLevel2BaseVelocityPalette', 'settings.nexradLevel2SpectrumWidthPalette', 'settings.nexradLevel2ZDRPalette', 'settings.nexradLevel2PHIPalette', 'settings.nexradLevel2CCPalette', 'settings.nexradLevel2BaseVelocityPalette', 'settings.nexradLevel2StormRelativeVelocityPalette', 'settings.nexradLevel2ShearPalette', 'settings.nexradLevel2G2GShearPalette', 'settings.nexradLevel2KDPPalette', 'settings.nexradLevel2MEHSPalette', 'settings.nexradLevel2POSHPalette', 'settings.nexradLevel2VILPalette', 'settings.nexradLevel2VILDPalette', 'settings.nexradLevel2ETPalette', 'settings.nexradLevel2GUSTPalette'];
-      this.paletteSelector(keys[settings.num('layerState.NEXRADLevel2Product')], PRODUCTS.level2[settings.num('layerState.NEXRADLevel2Product')].name);
+      this.paletteSelector(L2_PALETTE_KEYS[settings.num('layerState.NEXRADLevel2Product')], PRODUCTS.level2[settings.num('layerState.NEXRADLevel2Product')].name);
     } else this.paletteSelector(l3PaletteKey(L3[settings.num('layerState.NEXRADLevel3Product')]), L3[settings.num('layerState.NEXRADLevel3Product')].name);
   }
   alphaSelector(id: string, max = 255) {

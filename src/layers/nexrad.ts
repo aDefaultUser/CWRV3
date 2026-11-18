@@ -16,7 +16,8 @@ import { LineSet, PointSet, TextSet, GlyphAtlas, SHAPE, type Polyline, type Poin
 import { RADAR_SITES } from '../generated/radar-sites';
 import { listL2, listL3, l2Retention, l3Last, effectiveSource, L2, L3, l3Range, l3PaletteKey, L2_PALETTE_KEYS, l2Moment, type L2File, type L3Entry } from '../radar/sources';
 import type { L2Meta, L2SweepMeta } from '../workers/decode.worker';
-import { algorithmKey, type L2BuildParams } from '../radar/l2products';
+import { algorithmKey, columnNote, usesIsotherms, type L2BuildParams, type VolumeMoment } from '../radar/l2products';
+import { VolumeStore, type GpuPack, type PackRequest } from '../render/volume';
 import { hailThresholds } from '../settings/postload';
 import { perfMark } from '../perf/meter';
 import { ChunkFeed } from '../radar/chunks';
@@ -84,12 +85,35 @@ export class NexradLayer extends MapLayer {
   /** Fixed volume list (archive data) used instead of the live index; set by the benchmark and recorded references. */
   fixture: { site: string; files: L2File[] } | null = null;
   private lastDrawn: L2Frame | null = null;
+  /** Volume packs (every tilt of one moment) of this layer's volumes, for the cross-section and 3D views. */
+  readonly volumes: VolumeStore;
+  /**
+   * What the pack of `moment` for the Level 2 volume drawn now is requested for (site, volume, tilt-selection and
+   * dealiasing settings, and how much of a live volume has arrived); null when no Level 2 volume is drawn.
+   */
+  volumeRequest(moment: VolumeMoment): PackRequest | null {
+    const f = this.lastDrawn, info = this.siteInfo();
+    if (!f || !info || !this.isL2() || !this.l2.includes(f)) return null;
+    const last = f.meta?.sweeps[f.meta.sweeps.length - 1];
+    return {
+      site: this.currentSite(), url: f.file.url, live: f.file.live, chunks: f.file.chunks, moment,
+      latest: settings.num('settings.nexradLatestUpdateMode') >= 1, qualityDealiasing: settings.bool('settings.nexradQualityDealiasing'),
+      version: f.file.live ? `${f.meta?.sweeps.length}/${last?.radials}` : '', lon: info.lon, lat: info.lat, heightKm: (info.elevFt * 0.3048) / 1000,
+    };
+  }
+  /**
+   * The uploaded pack of volumeRequest(moment), requested on first use; null while it loads or when there is none.
+   * Call it every frame the pack is wanted: a pack nobody asks for is dropped.
+   */
+  volumePack(moment: VolumeMoment): GpuPack | null { const q = this.volumeRequest(moment); return q && this.volumes.get(q); }
+  prepass() { this.volumes.pump(); }
 
   constructor(r: Renderer, atlas: GlyphAtlas) {
     super(r);
     this.radar = new RadarDraw(r); this.shadow = new RadarDraw(r); this.oldSweep = new RadarDraw(r); this.l3raster = new RasterDraw(r);
     this.overlayLines = new LineSet(r); this.overlayPts = new PointSet(r); this.overlayText = new TextSet(r, atlas); this.overlayFill = new PolySet(r);
     this.ageText = new TextSet(r, atlas);
+    this.volumes = new VolumeStore(r, this.id);
     onIsotherms(this.isothermsArrived);
   }
 
@@ -121,6 +145,7 @@ export class NexradLayer extends MapLayer {
   /** Frees everything for a site change ("Radar site switched. Freeing all volumes."). */
   freeAll() {
     this.gen++;
+    this.volumes.clear();
     for (const f of this.l2) f.sweep?.tex.destroy();
     for (const f of this.l3) { f.tex?.tex.destroy(); f.raster?.tex.destroy(); }
     this.l2 = []; this.l3 = []; this.tilts = []; this.onTilts();
@@ -142,7 +167,7 @@ export class NexradLayer extends MapLayer {
   /** Rebuilds a hail product of the selected site when its isotherms arrive (other radars' arrivals are ignored). */
   private readonly isothermsArrived = (key: string) => {
     const p = this.sitePoint();
-    if (p && key === pointKey(p) && this.isL2() && (this.product() === 11 || this.product() === 12) && !settings.bool('settings.nexradAlgorithmHailIsothermCustom')) this.reloadL2();
+    if (p && key === pointKey(p) && this.isL2() && usesIsotherms(this.product()) && !settings.bool('settings.nexradAlgorithmHailIsothermCustom')) this.reloadL2();
   };
   /** Listeners told when the automatic (Level 3) storm motion appears, changes or is dropped. */
   readonly autoMotionListeners = new Set<() => void>();
@@ -668,7 +693,7 @@ export class NexradLayer extends MapLayer {
   legends(): LegendSpec[] {
     if (!this.enabled() || !settings.bool('settings.nexradMapLegend')) return [];
     const d = this.displayRange();
-    const note = this.typed() && this.ptypeShown ? ptypeLabel(this.ptypeShown) : undefined;
+    const note = this.typed() && this.ptypeShown ? ptypeLabel(this.ptypeShown) : this.isL2() ? columnNote(this.product(), () => this.buildParams(this.lastDrawn?.t)) : undefined;
     if (this.typed() && this.ptypeShown?.status === 'ready') {
       const L = (k: string) => ({ palette: getPalette(settings.str(k)), lut: this.lut(settings.str(k), d.low, d.high, d.reserve, d.top) });
       const extra: NonNullable<LegendSpec['extra']> = [];

@@ -69,6 +69,8 @@ interface RadialAcc {
   azSpacing: number; nyquist: number | null; unambKm: number | null;
   moments: Map<MomentName, { gates: number; first: number; spacing: number; scale: number; offset: number; word: 8 | 16; rows: (Uint8Array | Uint16Array | null)[] }>;
   complete: boolean;
+  /** The sweep built from these radials; cleared when a radial (or the VCP) arrives. */
+  built: L2Sweep | null;
 }
 
 export class Archive2Decoder {
@@ -142,6 +144,7 @@ export class Archive2Decoder {
       pattern, sails: !!(supp & 1), sailsCuts: (supp >> 1) & 7, mrle: !!(supp & 16), mrleCuts: (supp >> 5) & 7,
       mpda: !!(supp & 0x800), baseTilt: !!(supp & 0x1000), baseTilts: (supp >> 13) & 7, avset: null, cuts,
     };
+    for (const a of this.sweeps.values()) a.built = null; // cut and nominal elevation come from the VCP
   }
 
   private msg31(v: DataView) {
@@ -158,9 +161,10 @@ export class Archive2Decoder {
     if (!(el >= -10 && el <= 90) || !(az >= 0 && az <= 360) || elNum < 1 || elNum > 32) return;
     let acc = this.sweeps.get(elNum);
     if (!acc) {
-      acc = { azimuths: [], elevations: [], times: [], azSpacing: azSpacingCode === 1 ? 0.5 : 1, nyquist: null, unambKm: null, moments: new Map(), complete: false };
+      acc = { azimuths: [], elevations: [], times: [], azSpacing: azSpacingCode === 1 ? 0.5 : 1, nyquist: null, unambKm: null, moments: new Map(), complete: false, built: null };
       this.sweeps.set(elNum, acc);
     }
+    acc.built = null;
     const r = acc.azimuths.length;
     acc.azimuths.push(az); acc.elevations.push(el); acc.times.push(timeMs);
     if (status === 2 || status === 4) acc.complete = true;
@@ -203,27 +207,31 @@ export class Archive2Decoder {
     }
   }
 
-  /** Builds the volume from everything fed so far (callable repeatedly for live chunks). */
+  /**
+   * Builds the volume from everything fed so far (callable repeatedly for live chunks). A sweep that received no
+   * radial since the last call is the same object as before, so callers can keep what they derived from it.
+   */
   volume(): L2Volume {
     const nums = [...this.sweeps.keys()].sort((a, b) => a - b);
-    const sweeps: L2Sweep[] = nums.map((n) => {
-      const a = this.sweeps.get(n)!;
-      const radials = a.azimuths.length;
-      const moments: Partial<Record<MomentName, L2Moment>> = {};
-      for (const [name, m] of a.moments) {
-        const raw = m.word === 16 ? new Uint16Array(radials * m.gates) : new Uint8Array(radials * m.gates);
-        for (let r = 0; r < radials; r++) { const row = m.rows[r]; if (row) raw.set(row, r * m.gates); }
-        moments[name] = { name, gates: m.gates, firstGateM: m.first, gateSpacingM: m.spacing, scale: m.scale, offset: m.offset, wordSize: m.word, raw };
-      }
-      const cut = this.vcp?.cuts[n - 1] ?? null;
-      const elevations = Float32Array.from(a.elevations);
-      return {
-        elevationNumber: n, elevation: elevations.reduce((s, x) => s + x, 0) / Math.max(1, radials), nominalElevation: cut?.elevation ?? null,
-        cut, azimuthSpacing: a.azSpacing, nyquist: a.nyquist, unambiguousRangeKm: a.unambKm, radialCount: radials,
-        azimuths: Float32Array.from(a.azimuths), elevations, timesMs: Float64Array.from(a.times), moments, complete: a.complete,
-      };
-    });
+    const sweeps = nums.map((n) => { const a = this.sweeps.get(n)!; return (a.built ??= this.buildSweep(n, a)); });
     return { site: this.site, volumeTimeMs: this.volumeTimeMs, lat: this.lat, lon: this.lon, heightM: this.heightM, vcpNumber: this.vcpNumber ?? this.vcp?.pattern ?? null, vcp: this.vcp, sweeps };
+  }
+
+  private buildSweep(n: number, a: RadialAcc): L2Sweep {
+    const radials = a.azimuths.length;
+    const moments: Partial<Record<MomentName, L2Moment>> = {};
+    for (const [name, m] of a.moments) {
+      const raw = m.word === 16 ? new Uint16Array(radials * m.gates) : new Uint8Array(radials * m.gates);
+      for (let r = 0; r < radials; r++) { const row = m.rows[r]; if (row) raw.set(row, r * m.gates); }
+      moments[name] = { name, gates: m.gates, firstGateM: m.first, gateSpacingM: m.spacing, scale: m.scale, offset: m.offset, wordSize: m.word, raw };
+    }
+    const cut = this.vcp?.cuts[n - 1] ?? null;
+    const elevations = Float32Array.from(a.elevations);
+    return {
+      elevationNumber: n, elevation: elevations.reduce((s, x) => s + x, 0) / Math.max(1, radials), nominalElevation: cut?.elevation ?? null,
+      cut, azimuthSpacing: a.azSpacing, nyquist: a.nyquist, unambiguousRangeKm: a.unambKm, radialCount: radials,
+      azimuths: Float32Array.from(a.azimuths), elevations, timesMs: Float64Array.from(a.times), moments, complete: a.complete,
+    };
   }
 }
 
