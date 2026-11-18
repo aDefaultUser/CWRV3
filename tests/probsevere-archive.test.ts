@@ -99,8 +99,11 @@ describe('MRMS index in archive mode', () => {
     settings.set('ext.layerState.LoopLength', 2);
     await layer.refresh();
     expect(h.listed.some((p) => p.endsWith('/20251001/'))).toBe(true);
-    const listings = h.listed.length;
-    await layer.refresh(); // archive listings do not change: no re-list for the same days
-    expect(h.listed.length).toBe(listings);
+    const listings = h.listed.length, now = Date.now();
+    vi.spyOn(Date, 'now').mockReturnValue(now + 6 * 3600e3); // past any product's live refresh interval
+    try {
+      await layer.refresh(); // archive listings do not change: no re-list for the same days
+      expect(h.listed.length).toBe(listings);
+    } finally { vi.restoreAllMocks(); }
   });
 });
