@@ -224,8 +224,8 @@ Probe reads the displayed value under the pointer.
   * Local storm reports, SPC mesoscale discussions and WPC precipitation discussions (each shown while it was in
     effect at the timeline time) and the SPC convective outlook that was the newest issued at the archive time, from
     IEM. MRMS and the national mosaic by bucket date (2020-10-14 on), ProbSevere v3 where the archived files are v3
-    (those of 2025-10-01 and later that were checked are; those of 2025-06-01 and earlier are an older version and
-    are not drawn), GOES imagery, GOES Level 2 products and GLM
+    (those of 2025-10-01 and later that were checked are; those of 2025-06-01 and earlier are an older version: the
+    first such file stops the downloads and the status says so), GOES imagery, GOES Level 2 products and GLM
     lightning from the satellite that held the position then (GOES-16 as East before 2025-04-07, GOES-17 as West
     before 2023-01-04), MESO/STP/SCP from the RAP archive, precipitation typing and hail isotherms from HRRR valid at
     the data time, and soundings (radiosonde, model, VAD from the Level 3 archive) for the timeline time.
@@ -440,7 +440,7 @@ profiles from `api/1/nws/bufkit.json`, and for archive replay `api/1/vtec/sbw_in
 
 | Part | Lines |
 | --- | ---: |
-| TypeScript / JavaScript | 21,714 |
+| TypeScript / JavaScript | 21,727 |
 | WGSL shaders | 921 |
-| **Total functional** | **22,635** |
+| **Total functional** | **22,648** |
 | CSS (separate) | 178 |

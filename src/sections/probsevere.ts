@@ -49,10 +49,13 @@ const hhmm = (t: number) => `${new Date(t).toISOString().slice(11, 16)}Z`;
 const stamp = (t: number) => new Date(t).toISOString().slice(0, 19).replace(/[-:]/g, '').replace('T', '_');
 const fileTime = (name: string) => (/MRMS_PROBSEVERE_\d{8}_\d{6}\.json$/.test(name) ? probSevereTime(name) : null);
 
+/** A file of another ProbSevere version (archived files before v3): its fields differ. */
+export class ProbSevereVersionError extends Error {}
+
 /** Parses a ProbSevere v3 file; other products and versions are rejected (their fields differ). */
 export function parseProbSevere(j: any): PsFile {
   if (j?.type !== 'FeatureCollection' || !Array.isArray(j.features)) throw new Error('not a ProbSevere feature collection');
-  if (!/^ProbSevere 3(\.|$)/.test(String(j.product ?? ''))) throw new Error(`unsupported product "${j.product}" (ProbSevere v3 only)`);
+  if (!/^ProbSevere 3(\.|$)/.test(String(j.product ?? ''))) throw new ProbSevereVersionError(`unsupported product "${j.product}" (ProbSevere v3 only)`);
   const t = probSevereTime(String(j.validTime ?? ''));
   if (t === null) throw new Error('missing validTime');
   const objects: PsObject[] = [];
@@ -146,12 +149,21 @@ export class ProbSevereLayer extends MapLayer {
   private gen = 0;
   private shown: PsFile | null = null;
   private builtKey = '';
+  /** Archive listing whose files turned out to be an earlier ProbSevere version: nothing more of it is downloaded. */
+  private oldVersionKey = '';
   private lines: LineSet; private fills: PolySet; private text: TextSet;
 
   constructor(r: Renderer, atlas: GlyphAtlas) {
     super(r);
     this.lines = new LineSet(r); this.fills = new PolySet(r); this.text = new TextSet(r, atlas);
-    this.store = new FrameStore<PsFile>(async (f) => checkedProbSevere(await fetchJson(f.key, { cache: 'immutable', maxBytes: 30e6 }), f.t, f.key), () => {}, 4, () => { this.builtKey = ''; this.updateStatus(); });
+    this.store = new FrameStore<PsFile>(async (f) => {
+      try {
+        return checkedProbSevere(await fetchJson(f.key, { cache: 'immutable', maxBytes: 30e6 }), f.t, f.key);
+      } catch (e) {
+        if (e instanceof ProbSevereVersionError && timeline.mode === 'archive' && this.listing) { this.oldVersionKey = this.listing.key; queueMicrotask(() => void this.refresh()); }
+        throw e;
+      }
+    }, () => {}, 4, () => { this.builtKey = ''; this.updateStatus(); });
   }
 
   enabled() { return settings.bool('ext.layerState.ProbSevereOn'); }
@@ -177,6 +189,7 @@ export class ProbSevereLayer extends MapLayer {
       }
     }
     if (!on) this.setStatus('off', '');
+    if (archive && this.oldVersionKey === this.listing.key) { this.store.setWanted([]); this.shown = null; this.builtKey = ''; this.updateStatus(); return; }
     const files = this.listing.files;
     // Shown: the loop window plus the hour before the newest file (trends); hidden for alerts: the newest file only.
     const from = Math.min(timeline.loopStart, (files.at(-1)?.t ?? 0) - 62 * 60e3);
@@ -213,9 +226,11 @@ export class ProbSevereLayer extends MapLayer {
   private updateStatus() {
     if (!this.enabled()) return;
     const c = this.store.counts(), n = this.store.frames.length;
-    if (!n) { this.setStatus('unavailable', timeline.mode === 'archive' ? NOT_AVAILABLE : 'ProbSevere: no files in the loop period'); return; }
-    // Archived files from before ProbSevere v3 are rejected by the parser: nothing of this product exists for the time.
-    if (timeline.mode === 'archive' && c.error === n) { this.setStatus('unavailable', `ProbSevere v3: ${NOT_AVAILABLE} (the archived files are an earlier version)`); return; }
+    if (!n) {
+      const old = timeline.mode === 'archive' && this.oldVersionKey === this.listing?.key;
+      this.setStatus('unavailable', old ? `ProbSevere v3: ${NOT_AVAILABLE} (the archived files are an earlier version)` : timeline.mode === 'archive' ? NOT_AVAILABLE : 'ProbSevere: no files in the loop period');
+      return;
+    }
     const shown = this.shown ? `showing ${hhmm(this.shown.t)}, ${this.visible(this.shown).length} objects ≥ ${settings.num('ext.settings.probSevereMinProb')}%`
       : `no file within ${PS_MATCH_MS / 60e3} min of ${hhmm(timeline.t)}`;
     this.setStatus(c.ready ? 'ready' : c.error && !c.loading && !c.pending ? 'error' : 'loading', `ProbSevere v3: ${c.ready}/${n} files${c.error ? `, ${c.error} failed` : ''}; ${shown}`, { frames: c.ready, newestMs: this.store.ready().at(-1)?.t });
