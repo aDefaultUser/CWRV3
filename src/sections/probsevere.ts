@@ -4,7 +4,7 @@
 // trend in the probe text. A file is drawn only at times it is valid for (see pickProbSevereFrame).
 import earcut from 'earcut';
 import type { DrawContext, Renderer } from '../render/renderer';
-import { MapLayer } from '../layers/base';
+import { MapLayer, NOT_AVAILABLE } from '../layers/base';
 import { FrameStore } from '../layers/frames';
 import { timeline } from '../app/timeline';
 import { settings } from '../settings/store';
@@ -137,11 +137,12 @@ export function probeLines(o: PsObject, t: number, type: number, trend: number[]
 
 export class ProbSevereLayer extends MapLayer {
   readonly id = 'probSevere';
+  readonly archive = 'resolver';
   readonly title = 'MRMS ProbSevere v3';
   /** Set by the storm alerts: keep the newest file loaded while the layer is hidden. */
   keepLatest = false;
   private store: FrameStore<PsFile>;
-  private listing: { at: number; files: { t: number; key: string }[] } | null = null;
+  private listing: { at: number; key: string; files: { t: number; key: string }[] } | null = null;
   private gen = 0;
   private shown: PsFile | null = null;
   private builtKey = '';
@@ -161,12 +162,15 @@ export class ProbSevereLayer extends MapLayer {
     const on = this.enabled();
     const gen = ++this.gen;
     if (!on && !this.keepLatest) { this.store.setWanted([]); this.shown = null; this.setStatus('off', ''); return; }
-    if (!this.listing || Date.now() - this.listing.at > 50e3) {
+    const key = `${timeline.key}|${timeline.loopStart}`, archive = timeline.mode === 'archive';
+    // Archive files do not change: one listing per archive time and loop length. Live: at most every 50 s.
+    if (this.listing && this.listing.key.split('|')[0] !== timeline.key) { this.listing = null; this.store.setWanted([]); this.shown = null; }
+    if (!this.listing || (archive ? this.listing.key !== key : Date.now() - this.listing.at > 50e3)) {
       if (on) this.setStatus('loading', 'ProbSevere: listing files…');
       try {
         const files = await this.list(Math.min(timeline.loopStart, timeline.loopEnd - 65 * 60e3), timeline.loopEnd);
         if (gen !== this.gen) return; // a newer refresh (or a switch off) superseded this listing
-        this.listing = { at: Date.now(), files };
+        this.listing = { at: Date.now(), key, files };
       } catch (e) {
         if (gen === this.gen && on) this.setStatus('error', `ProbSevere listing failed: ${(e as Error).message}`);
         return;
@@ -176,7 +180,7 @@ export class ProbSevereLayer extends MapLayer {
     const files = this.listing.files;
     // Shown: the loop window plus the hour before the newest file (trends); hidden for alerts: the newest file only.
     const from = Math.min(timeline.loopStart, (files.at(-1)?.t ?? 0) - 62 * 60e3);
-    this.store.setWanted(on ? files.filter((f) => f.t >= from).slice(-200) : files.slice(-1));
+    this.store.setWanted(on ? files.filter((f) => f.t >= from).slice(-200) : archive ? [] : files.slice(-1));
     this.builtKey = '';
     this.updateStatus();
   }
@@ -192,6 +196,7 @@ export class ProbSevereLayer extends MapLayer {
         for (const o of objects) { const t = fileTime(o.key); if (t !== null && t >= from) out.push({ t, key: `${MRMS_BUCKET}/${o.key}` }); }
       }
     } catch (e) {
+      if (timeline.mode === 'archive') throw e; // the real-time directory holds only the newest files
       const dir = parseDirIndex(await fetchText(PS_NCEP_DIR, { cache: 'none' }).catch(() => { throw e; }));
       out.length = 0;
       for (const f of dir) { const t = fileTime(f.name); if (t !== null && t >= from) out.push({ t, key: PS_NCEP_DIR + f.name }); }
@@ -202,13 +207,15 @@ export class ProbSevereLayer extends MapLayer {
   /** The newest file when it is the newest listed and at most `maxAgeMs` old (live data for the alerts), else null. */
   latestLive(maxAgeMs = 10 * 60e3): PsFile | null {
     const f = this.store.ready().at(-1);
-    return f && f.t === this.newestListed() && Date.now() - f.t <= maxAgeMs ? f.data : null;
+    return timeline.mode === 'live' && f && f.t === this.newestListed() && Date.now() - f.t <= maxAgeMs ? f.data : null;
   }
 
   private updateStatus() {
     if (!this.enabled()) return;
     const c = this.store.counts(), n = this.store.frames.length;
-    if (!n) { this.setStatus('unavailable', 'ProbSevere: no files in the loop period'); return; }
+    if (!n) { this.setStatus('unavailable', timeline.mode === 'archive' ? NOT_AVAILABLE : 'ProbSevere: no files in the loop period'); return; }
+    // Archived files from before ProbSevere v3 are rejected by the parser: nothing of this product exists for the time.
+    if (timeline.mode === 'archive' && c.error === n) { this.setStatus('unavailable', `ProbSevere v3: ${NOT_AVAILABLE} (the archived files are an earlier version)`); return; }
     const shown = this.shown ? `showing ${hhmm(this.shown.t)}, ${this.visible(this.shown).length} objects ≥ ${settings.num('ext.settings.probSevereMinProb')}%`
       : `no file within ${PS_MATCH_MS / 60e3} min of ${hhmm(timeline.t)}`;
     this.setStatus(c.ready ? 'ready' : c.error && !c.loading && !c.pending ? 'error' : 'loading', `ProbSevere v3: ${c.ready}/${n} files${c.error ? `, ${c.error} failed` : ''}; ${shown}`, { frames: c.ready, newestMs: this.store.ready().at(-1)?.t });

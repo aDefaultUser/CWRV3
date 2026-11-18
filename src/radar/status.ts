@@ -2,6 +2,7 @@
 // operability and state, and the Level 2 feed latency. Fetched at most every 5 minutes while radar site labels or
 // NEXRAD are on. Missing fields read "unknown"; a site is marked down only by the two rules in `parseRadarStations`.
 import { fetchJson } from '../data/net';
+import { timeline } from '../app/timeline';
 
 export const RADAR_STATUS_URL = 'https://api.weather.gov/radar/stations';
 export const RADAR_STATUS_INTERVAL_MS = 5 * 60e3;
@@ -88,11 +89,13 @@ export class RadarStatusStore {
 
   /** Status of a site, or undefined when unknown or the table is older than 15 minutes. */
   get(id: string, nowMs = Date.now()): RadarStatus | undefined {
+    if (timeline.mode === 'archive') return undefined; // the table is the current status, not that of the archive time
     return nowMs - this.checkedMs > EXPIRE_MS ? undefined : this.sites.get(id.toUpperCase());
   }
   /** Fetches when the last attempt is at least 5 minutes old; resolves true when an attempt finished. */
   refresh(nowMs = Date.now()): Promise<boolean> {
     if (this.pending) return this.pending;
+    if (timeline.mode === 'archive') return Promise.resolve(false);
     if (nowMs - this.lastTry < RADAR_STATUS_INTERVAL_MS) return Promise.resolve(false);
     this.lastTry = nowMs;
     this.pending = this.load().then((json) => {

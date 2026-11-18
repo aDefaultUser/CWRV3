@@ -21,7 +21,8 @@ export function matchVolume<T extends { volumeTimeMs: number; volumeScan?: numbe
   let best: T | null = null, bestD = Infinity;
   for (const p of products) {
     const d = Math.abs(p.volumeTimeMs - frameT);
-    const same = scan === undefined ? d <= tolMs : p.volumeScan === scan && p.volumeTimeMs <= frameT + tolMs && frameT - p.volumeTimeMs <= VOLUME_MAX_MS;
+    // A product without a scan number (archived IEM attributes) is matched by its volume time alone.
+    const same = scan === undefined || p.volumeScan === undefined ? d <= tolMs : p.volumeScan === scan && p.volumeTimeMs <= frameT + tolMs && frameT - p.volumeTimeMs <= VOLUME_MAX_MS;
     if (same && d < bestD) { best = p; bestD = d; }
   }
   return best;

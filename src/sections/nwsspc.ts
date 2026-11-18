@@ -13,6 +13,8 @@ import { timeline } from '../app/timeline';
 import type { VectorLayer as VectorLayerData } from '../workers/shape-tasks';
 import { registerStyleResolver } from '../app/styles';
 import { loadPref, savePref, isRecord } from '../app/persist';
+import { NOT_AVAILABLE } from '../layers/base';
+import { loadArchiveLsrs, loadArchiveDiscussions, loadArchiveOutlook, outlookCategory } from './nwsspc-archive';
 
 const SPC = 'https://www.spc.noaa.gov/';
 
@@ -49,6 +51,7 @@ export function spcTime(s: unknown): number | null {
 
 export class OutlookLayer extends VectorLayer {
   readonly id = 'spcOutlook';
+  readonly archive = 'resolver';
   readonly title = 'SPC convective outlook';
   validText = 'Valid: ---';
   private key = '';
@@ -65,16 +68,29 @@ export class OutlookLayer extends VectorLayer {
     const day = settings.num('layerState.NWSConvectiveOutlooksDayIdx');
     const fam = normalizeFamily(day, settings.num('layerState.NWSConvectiveOutlooksFamilyIdx'));
     const cig = settings.num('layerState.NWSConvectiveOutlooksCIGMode');
-    const key = `${day}_${fam}_${cig}`; // cache key
-    if (key === this.key && Date.now() - this.at < 10 * 60e3) return;
+    const key = `${day}_${fam}_${cig}_${timeline.key}`; // cache key
+    const epoch = timeline.epoch, archive = timeline.mode === 'archive';
+    if (!this.key.endsWith(`_${timeline.key}`)) { this.setShapes([]); this.validText = 'Valid: ---'; this.key = ''; }
+    // An archived outlook does not change; the current one is re-read every 10 minutes.
+    if (key === this.key && (archive || Date.now() - this.at < 10 * 60e3)) return;
     const urls = outlookUrls(day, fam, cig);
     this.setStatus('loading', `SPC Day ${day + 1} outlook`);
     try {
       const out: VShape[] = [];
       let valid: number | null = null, expire: number | null = null;
-      for (const url of [urls.main, urls.cig]) {
-        if (!url) continue;
-        const gj = await fetchJson<{ features: { geometry: any; properties: Record<string, unknown> }[] }>(url);
+      const sources: { features: { geometry: any; properties: Record<string, unknown> }[] }[] = [];
+      if (archive) {
+        // The outlook that was current at the archive time; its significant/CIG areas follow the CIG mode.
+        const o = await loadArchiveOutlook(day, timeline.loopEnd);
+        if (epoch !== timeline.epoch) return;
+        if (!o) { this.setShapes([]); this.validText = 'Valid: ---'; this.key = key; this.setStatus('unavailable', NOT_AVAILABLE); return; }
+        const cat = outlookCategory(day, fam), sig = (l: string) => /^(SIGN|CIG)/.test(l);
+        const mine = o.features.filter((f) => f.properties.category === cat && (fam === 0 || (sig(String(f.properties.threshold)) ? cig !== 0 : cig !== 2)));
+        valid = Date.parse(mine[0]?.properties.issue ?? o.features[0].properties.issue); expire = Date.parse(mine[0]?.properties.expire ?? o.features[0].properties.expire);
+        sources.push({ features: mine.map((f) => ({ geometry: f.geometry, properties: { LABEL: f.properties.threshold } })) });
+      } else for (const url of [urls.main, urls.cig]) if (url) sources.push(await fetchJson(url));
+      if (epoch !== timeline.epoch) return; // requested for another mode or archive time
+      for (const gj of sources) {
         const feats = await pool.for(this.id).run<{ kind: string; attrs: Record<string, unknown>; parts: number[][]; tris?: number[] }[]>('geojson', { gj });
         for (const f of feats) {
           const label = String(f.attrs.LABEL ?? f.attrs.LABEL2 ?? '');
@@ -88,10 +104,11 @@ export class OutlookLayer extends VectorLayer {
       const hi = out.filter((s) => !s.style.startsWith('COCIG')).sort((a, b) => (b.z ?? 0) - (a.z ?? 0))[0];
       for (const s of out) if (hi) this.top.set(s.label ?? '', hi);
       this.validText = `Valid: ${fmtRange(valid, expire)}`;
+      if (epoch !== timeline.epoch) return;
       this.key = key; this.at = Date.now();
       this.setShapes(out);
       this.setStatus('ready', `${out.length} outlook areas`);
-    } catch (e) { this.setStatus('error', `SPC outlook: ${(e as Error).message}`); }
+    } catch (e) { if (epoch === timeline.epoch) this.setStatus('error', `SPC outlook: ${(e as Error).message}`); }
   }
   textUrl() {
     const d = settings.num('layerState.NWSConvectiveOutlooksDayIdx');
@@ -131,14 +148,34 @@ export function mdType(text: string): 'Severe' | 'Winter' | 'HeavyRain' {
 
 export class MdLayer extends VectorLayer {
   readonly id = 'mesoDiscussions';
+  readonly archive = 'resolver';
   readonly title = 'Mesoscale discussions';
-  texts: { title: string; text: string; t: number }[] = [];
+  /** Loaded discussions; archived ones carry their polygon and the time they stopped being in effect. */
+  texts: { title: string; text: string; t: number; until?: number; ring?: number[] }[] = [];
   private at = 0;
+  /** Timeline key (mode, archive time) and loop period the discussions belong to. */
+  private loaded = '';
+  private shownKey = '';
   constructor(r: Renderer, atlas: GlyphAtlas) { super(r, atlas); }
   enabled() { return settings.bool('layerState.NWSMesoscaleDiscussionsOn'); }
   labelsOn() { return settings.bool('settings.NWSMesoscaleDiscussionShowLabels'); }
   async refresh() {
     if (!this.enabled()) { this.setStatus('off', ''); return; }
+    const epoch = timeline.epoch;
+    if (!this.loaded.startsWith(`${timeline.key}|`)) { this.texts = []; this.at = 0; this.setShapes([]); this.loaded = `${timeline.key}|`; }
+    if (timeline.mode === 'archive') {
+      const key = `${timeline.key}|${timeline.loopStart}`;
+      if (key === this.loaded) { this.apply(); return; }
+      this.setStatus('loading', 'Archived mesoscale discussions (IEM)');
+      try {
+        // Discussions last up to about three hours: the look-back covers those still in effect at the loop start.
+        const texts = await loadArchiveDiscussions(timeline.loopEnd, timeline.loopHours + 3);
+        if (epoch !== timeline.epoch) return;
+        this.texts = texts; this.loaded = key;
+        this.apply();
+      } catch (e) { if (epoch === timeline.epoch) this.setStatus('error', `MDs: ${(e as Error).message}`); }
+      return;
+    }
     if (Date.now() - this.at < 5 * 60e3 && this.texts.length) { this.apply(); return; }
     this.setStatus('loading', 'Mesoscale discussions');
     try {
@@ -156,15 +193,21 @@ export class MdLayer extends VectorLayer {
         const mpd = await fetchText(XPRODUCTS.md.wpc);
         for (const part of mpd.split(/(?=Mesoscale Precipitation Discussion \d+)/i)) if (/LAT\.\.\.LON/.test(part)) texts.push({ title: /Mesoscale Precipitation Discussion \d+/i.exec(part)?.[0] ?? 'WPC MPD', text: part, t: Date.now() });
       } catch { /* WPC MPD file may be empty or unavailable */ }
+      if (epoch !== timeline.epoch) return; // archive mode was entered meanwhile
       this.texts = texts; this.at = Date.now();
       this.apply();
-    } catch (e) { this.setStatus('error', `MDs: ${(e as Error).message}`); }
+    } catch (e) { if (epoch === timeline.epoch) this.setStatus('error', `MDs: ${(e as Error).message}`); }
   }
+  /** Archived discussions are shown only while they were in effect at the timeline time. */
+  private active() { return this.texts.filter((m) => m.until === undefined || (m.t <= timeline.t && timeline.t < m.until)); }
+  tick(t: number, now: number) { super.tick(t, now); if (timeline.mode === 'archive' && this.enabled() && this.active().map((m) => m.title).join('|') !== this.shownKey) this.apply(); }
   apply() {
     const show = { Severe: settings.bool('settings.NWSMesoscaleDiscussionShowSevere'), Winter: settings.bool('settings.NWSMesoscaleDiscussionShowWinter'), HeavyRain: settings.bool('settings.NWSMesoscaleDiscussionShowHeavyRainfall') };
     const shapes: VShape[] = [];
-    for (const m of this.texts) {
-      const ring = parseLatLon(m.text);
+    const active = this.active();
+    this.shownKey = active.map((m) => m.title).join('|');
+    for (const m of active) {
+      const ring = m.ring ?? parseLatLon(m.text);
       if (!ring) continue;
       const type = /Precipitation Discussion/i.test(m.title) ? 'HeavyRain' : mdType(m.text);
       if (!show[type]) continue;
@@ -201,14 +244,33 @@ export function lsrVisible(l: Lsr, now: number, filter: string, ageH: number, ma
 
 export class LsrLayer extends VectorLayer {
   readonly id = 'lsr';
+  readonly archive = 'resolver';
   readonly title = 'Local storm reports';
   reports: Lsr[] = [];
   private at = 0;
+  /** Timeline key (mode, archive time) and loop period the reports belong to. */
+  private loaded = '';
+  private shownMinute = 0;
   constructor(r: Renderer, atlas: GlyphAtlas) { super(r, atlas); this.labelSpacing = 0; }
   enabled() { return settings.bool('layerState.NWSLocalStormReportsOn'); }
   labelsOn() { return false; }
   async refresh() {
     if (!this.enabled()) { this.setStatus('off', ''); return; }
+    const epoch = timeline.epoch;
+    if (!this.loaded.startsWith(`${timeline.key}|`)) { this.reports = []; this.at = 0; this.setShapes([]); this.loaded = `${timeline.key}|`; }
+    if (timeline.mode === 'archive') {
+      const ageH = settings.num('settings.NWSLSRShowReportsWithinHours'), key = `${timeline.key}|${timeline.loopStart}|${ageH}`;
+      if (key !== this.loaded) {
+        this.setStatus('loading', 'Archived local storm reports (IEM)');
+        try {
+          const reports = await loadArchiveLsrs(timeline.loopStart - ageH * 3600e3, timeline.loopEnd);
+          if (epoch !== timeline.epoch) return;
+          this.reports = reports; this.loaded = key;
+        } catch (e) { if (epoch === timeline.epoch) this.setStatus('error', `LSR: ${(e as Error).message}`); return; }
+      }
+      this.apply();
+      return;
+    }
     if (Date.now() - this.at > 5 * 60e3) {
       this.setStatus('loading', 'Local storm reports');
       try {
@@ -218,11 +280,14 @@ export class LsrLayer extends VectorLayer {
           return { lon: f.parts[0][0], lat: f.parts[0][1], t: spcTime(a.VALID) ?? 0, type: lsrTypeIndex(String(a.TYPETEXT ?? '')), typeText: String(a.TYPETEXT ?? ''), mag: a.MAG === null || a.MAG === '' || Number.isNaN(Number(a.MAG)) ? null : Number(a.MAG), wfo: String(a.WFO ?? ''), city: String(a.CITY ?? ''), county: String(a.COUNTY ?? ''), state: String(a.STATE ?? ''), source: String(a.SOURCE ?? ''), remark: String(a.REMARK ?? '') };
         });
         this.at = Date.now();
-      } catch (e) { this.setStatus('error', `LSR: ${(e as Error).message}`); return; }
+      } catch (e) { if (epoch === timeline.epoch) this.setStatus('error', `LSR: ${(e as Error).message}`); return; }
     }
-    this.apply();
+    if (epoch === timeline.epoch) this.apply();
   }
+  /** Archive replay: the reports follow the timeline time (once per timeline minute). */
+  tick(t: number, now: number) { super.tick(t, now); if (timeline.mode === 'archive' && this.enabled() && Math.floor(t / 60e3) !== this.shownMinute) this.apply(); }
   apply() {
+    this.shownMinute = Math.floor(timeline.t / 60e3);
     const filter = settings.str('ini.NWSLocalStormReports.TypeFilter');
     // Age is measured from the map time, so looping the timeline replays the reports.
     const shapes: VShape[] = this.reports.filter((l) => lsrVisible(l, timeline.t, filter, settings.num('settings.NWSLSRShowReportsWithinHours'), settings.bool('settings.NWSLSRMagnitudeFilter'), settings.num('settings.NWSLSRMagnitudeFilterValue'))).map((l) => ({

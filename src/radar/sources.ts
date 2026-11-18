@@ -27,7 +27,8 @@ export function effectiveSource(src: number, custom: string): 2 | 3 | 4 {
   return 2;
 }
 
-export async function listL2(site: string, source: 2 | 3 | 4, custom: string, sinceMs: number): Promise<L2File[]> {
+/** Volumes from `sinceMs` on; `untilMs` (the archive time) bounds the AWS listing, which is the only source of the past. */
+export async function listL2(site: string, source: 2 | 3 | 4, custom: string, sinceMs: number, untilMs = Date.now()): Promise<L2File[]> {
   const S = site.toUpperCase();
   if (source === 2) {
     const items = parseDirIndex(await fetchText(`${TGFTP_L2}${S}/`));
@@ -39,14 +40,14 @@ export async function listL2(site: string, source: 2 | 3 | 4, custom: string, si
   }
   if (source === 3) {
     const days = new Set<string>();
-    for (let t = sinceMs - 86400e3 / 4; t <= Date.now(); t += 6 * 3600e3) days.add(new Date(t).toISOString().slice(0, 10).replace(/-/g, '/'));
-    days.add(new Date().toISOString().slice(0, 10).replace(/-/g, '/'));
+    for (let t = sinceMs - 86400e3 / 4; t <= untilMs; t += 6 * 3600e3) days.add(new Date(t).toISOString().slice(0, 10).replace(/-/g, '/'));
+    days.add(new Date(untilMs).toISOString().slice(0, 10).replace(/-/g, '/'));
     const out: L2File[] = [];
     for (const d of days) {
       const { objects } = await listS3(AWS_L2, `${d}/${S}/`, { maxPages: 2 });
-      for (const o of objects) if (!/_MDM$/.test(o.key) && /_V\d\d$/.test(o.key)) out.push({ t: nameTime(o.key), url: `${AWS_L2}/${o.key}`, live: false, name: o.key.split('/').pop()! });
+      for (const o of objects) if (!/_MDM$/.test(o.key) && /_V\d\d(\.gz)?$/.test(o.key)) out.push({ t: nameTime(o.key), url: `${AWS_L2}/${o.key}`, live: false, name: o.key.split('/').pop()! });
     }
-    return out.filter((f) => f.t >= sinceMs - 10 * 60e3).sort((a, b) => a.t - b.t);
+    return out.filter((f) => f.t >= sinceMs - 10 * 60e3 && f.t <= untilMs).sort((a, b) => a.t - b.t);
   }
   const base = custom.endsWith('/') ? custom : custom + '/';
   const txt = await fetchText(`${base}${S}/dir.list`);

@@ -115,6 +115,40 @@ Probe reads the displayed value under the pointer.
     pressure-weighted means). The panel names the station, position, run and valid time that were returned. The
     formulations follow MetPy 1.7 (Ambaum saturation pressure, Romps LCL, virtual-temperature CAPE/CIN,
     pressure-weighted Bunkers motion); the unit tests compare them with MetPy's documented values.
+* Archive replay (CWRV3 menu → Archive replay…): enter a UTC date and time (and optionally a radar site) and choose
+  Go to time. The loop then ends at that time instead of now: radar, warnings, storm reports, SPC products, MRMS and
+  satellite are loaded for it, the status bar shows **ARCHIVE yyyy-mm-dd HH:MMZ** (click it to reopen the dialog) and
+  names the enabled layers that have nothing for that time. "◀ One loop" / "One loop ▶" move the time by the loop
+  length (Loop Length still sets how much is loaded), Live (or CWRV3 menu → Return to live data) goes back to current
+  data. The mode and time are kept across a reload. Event presets hold a name, time, radar site and map view: four
+  built-in events (2011-04-27 Tuscaloosa–Birmingham KBMX, 2013-05-20 Moore KTLX, 2021-12-10 Mayfield KPAH, 2024-05-06
+  Barnsdall KINX; each checked to have Level 2 volumes) and your own (Save current as…, Delete). What is shown in
+  archive mode:
+  * NEXRAD Level 2 from the AWS archive only (1991 on; the gzip volumes of the years before mid-2016 included), no
+    live sweep. Level 3 products from the Unidata Level 3 archive bucket (2020-03-30 on); where the archive has no
+    digital base reflectivity or velocity (N?Q / N?U, from 2022–23), their super-resolution successors (N?B / N?G) are
+    drawn and named in the status line. Storm attributes are matched per volume as in live mode: storm tracks,
+    mesocyclones, melting layer and the automatic storm motion from the archived Level 3 products, and what the
+    archive does not hold for the period (TVS, hail and the storm-cell table always; cells and mesocyclones before
+    2020) from IEM's storm attributes, stored under the volume time IEM reports for them.
+  * Warnings: IEM storm-based warning polygons (Tornado, Severe Thunderstorm, Flash Flood, Special Marine, Snow
+    Squall, Extreme Wind), each version drawn only from when it took effect until an update, cancellation or expiry
+    replaced it. Hail, wind, tornado and damage tags are those of the issuance and are shown on the issued polygon
+    only (later statements can change them; their polygons carry no tags); there is no storm-motion line, so no
+    tracking objects. Watches are SPC's issued four-sided outlines, not county unions. Nothing is announced as new,
+    and the storm alerts stay silent.
+  * Local storm reports, SPC mesoscale discussions and WPC precipitation discussions (each shown while it was in
+    effect at the timeline time) and the SPC convective outlook that was the newest issued at the archive time, from
+    IEM. MRMS and the national mosaic by bucket date (2020-10-14 on), ProbSevere v3 where the archived files are v3
+    (those of 2025-10-01 and later that were checked are; those of 2025-06-01 and earlier are an older version and
+    are not drawn), GOES imagery, GOES Level 2 products and GLM
+    lightning from the satellite that held the position then (GOES-16 as East before 2025-04-07, GOES-17 as West
+    before 2023-01-04), MESO/STP/SCP from the RAP archive, precipitation typing and hail isotherms from HRRR valid at
+    the data time, and soundings (radiosonde, model, VAD from the Level 3 archive) for the timeline time.
+  * Everything else shows "not available for this time" and is neither loaded nor drawn: surface analysis, METAR and
+    marine observations, the model, NDFD, winter, forecast, tropical and Misc layers, NWS advisories, Special Weather
+    Statements, placefiles, the custom radar, radar status, zone alerts and the current text products. A product
+    whose archive does not reach the chosen time says the same (for example MRMS in 2013).
 * F8 (or CWRV3 → Advanced → Performance panel) shows the global frame rate and times, GPU pass time where the adapter
   supports timestamp queries, total tracked texture memory and the JS heap (N/A where the browser does not report
   it), and one row per layer or owner with its decode jobs, texture uploads, live texture memory and status. Each layer's decode time excludes network, queueing and transfer, shown beside
@@ -146,8 +180,8 @@ the production build; Level 2 runs use the fixed KTLX archive volumes listed in 
 Every preference is saved in the browser's `localStorage` under the `cwrv3.` prefix. Each setting is its own record,
 `cwrv3.setting/<id>` holding the JSON value; the other user state (styles, text styles, style library, presets,
 viewpoints, scene and layer presets, layer order, RGB recipes, model configurations, palettes loaded from files,
-placefile and shapefile lists, road labels, dialog options, GPS serial options, storm alert points) uses one key per
-preference.
+placefile and shapefile lists, road labels, dialog options, GPS serial options, storm alert points, the archive
+replay time and archive event presets) uses one key per preference.
 Large user files (shapefiles, custom background, logo, overlay image) are kept in Cache Storage
 (`cwrv3-user-files`); downloaded public data is cached in `cwrv3-data-v1`.
 
@@ -204,6 +238,12 @@ Exact parity with the original program is not claimed. Known differences:
   substituted. RRFS, which replaced them operationally, is listed as its own model.
 * The live sweep depends on the public real-time chunk bucket being current for the site; otherwise it falls back to
   the TGFTP volume and says so.
+* Archive replay is a CWRV3 addition built on public archives, so it differs from live mode where those differ:
+  warning tags and watch shapes (see Archive replay above), no Special Weather Statements, storm attributes partly
+  from IEM's table instead of the Level 3 graphics (no past or forecast track positions for cells that come from it),
+  and super-resolution Level 3 base products where the original ones are no longer archived. IEM answers a
+  storm-attribute request with each radar's volume nearest the asked time; a frame without a volume within 2 minutes
+  shows "No storm attributes". Queries for a period that ended more than a day ago are cached as immutable.
 
 ## Performance
 
@@ -226,11 +266,15 @@ measurements.
 
 NOAA Open Data on AWS (MRMS including FLASH and the ProbSevere v3 storm objects, with the NCEP MRMS real-time directory as a
 fallback, HRRR, RRFS, RAP, GFS, NBM, GOES ABI/GLM including the ABI L2+ cloud-top height, cloud-top
-temperature and fire/hot spot products, NEXRAD Level 2 archive and real-time chunks), NWS
+temperature and fire/hot spot products, from GOES-16/17 for archive times before GOES-19/18 took over; NEXRAD Level 2
+archive and real-time chunks; and, for archive replay only, the NEXRAD Level 3 archive `unidata-nexrad-level3`, a
+direct CORS-enabled host added because TGFTP keeps only the newest ~250 files per product), NWS
 TGFTP (Level 2/3, NDFD, text products), api.weather.gov (alerts, zones, radar station status), Aviation Weather Center, SPC, WPC, CPC, NHC, NDBC, USGS
 earthquakes, NASA FIRMS, NOAA water data, the US Drought Monitor (University of Nebraska–Lincoln), Iowa Environmental
-Mesonet (including radiosondes from `json/raob.py` with the station list `api/1/network/RAOB.json`, and BUFKIT model
-profiles from `api/1/nws/bufkit.json`), NASA GIBS imagery and AWS Terrain Tiles. Bundled GIS layers come from Natural Earth and US Census TIGER.
+Mesonet (including radiosondes from `json/raob.py` with the station list `api/1/network/RAOB.json`, BUFKIT model
+profiles from `api/1/nws/bufkit.json`, and for archive replay `api/1/vtec/sbw_interval.geojson`, `geojson/sbw.php`,
+`geojson/lsr.php`, `api/1/spc_watch_outline.geojson`, `api/1/nws/spc_mcd.geojson`, `api/1/nws/wpc_mpd.geojson`,
+`api/1/nws/spc_outlook.geojson` and `geojson/nexrad_attr.php`), NASA GIBS imagery and AWS Terrain Tiles. Bundled GIS layers come from Natural Earth and US Census TIGER.
 
 ## Licences and third-party material
 
@@ -258,7 +302,7 @@ profiles from `api/1/nws/bufkit.json`), NASA GIBS imagery and AWS Terrain Tiles.
 
 | Part | Lines |
 | --- | ---: |
-| TypeScript / JavaScript | 18,935 |
+| TypeScript / JavaScript | 19,420 |
 | WGSL shaders | 689 |
-| **Total functional** | **19,624** |
-| CSS (separate) | 174 |
+| **Total functional** | **20,109** |
+| CSS (separate) | 175 |

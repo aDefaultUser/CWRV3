@@ -3,7 +3,7 @@
 // radiative power). Shares the Extended GOES dialog's satellite and sector; a product is listed only for the
 // sectors NOAA produces it for (no CONUS cloud-top temperature).
 import type { DrawContext, Renderer } from '../render/renderer';
-import { MapLayer, type LegendSpec } from './base';
+import { MapLayer, NOT_AVAILABLE, type LegendSpec } from './base';
 import { FrameStore } from './frames';
 import { bracket, timeline } from '../app/timeline';
 import { settings } from '../settings/store';
@@ -15,7 +15,7 @@ import { getPalette } from '../palettes/library';
 import { evalPalette } from '../render/palette';
 import { lonLatToXYZ } from '../render/camera';
 import { FIRE_CATEGORY, type AbiFires } from '../decode/goes';
-import { thinGoesFiles } from './satellite';
+import { thinGoesFiles, goesAt } from './satellite';
 
 export interface GoesL2Product { key: 'ACHA' | 'ACHT' | 'FDC'; name: string; unit: string; low: number; high: number; sectors: readonly number[] }
 /** Sector indices as in the Extended GOES dialog: 0 CONUS, 1 Full Disk, 2 Mesoscale 1, 3 Mesoscale 2. */
@@ -43,6 +43,7 @@ type L2Frame = GridFrame | FireFrame;
 
 export class GoesL2Layer extends MapLayer {
   readonly id = 'satelliteL2';
+  readonly archive = 'window';
   readonly title = 'Extended GOES Level 2';
   private store: FrameStore<L2Frame> | null = null;
   /** Identity (product, satellite, sector) the store's frames were requested for. */
@@ -56,7 +57,7 @@ export class GoesL2Layer extends MapLayer {
 
   enabled() { return settings.bool('layerState.ExtendedSatelliteOn') && settings.bool('ext.layerState.ExtendedSatelliteUseL2') && settings.num('ext.layerState.ExtendedSatellitePlatform') !== 2; }
   product(): GoesL2Product { return GOES_L2[settings.num('ext.layerState.ExtendedSatelliteL2Product')] ?? GOES_L2[0]; }
-  platform() { return settings.num('ext.layerState.ExtendedSatellitePlatform') === 1 ? 'goes18' : 'goes19'; }
+  platform() { return goesAt(settings.num('ext.layerState.ExtendedSatellitePlatform') === 1 ? 'goes18' : 'goes19', timeline.loopEnd); }
   sector() { return settings.num('ext.layerState.ExtendedSatelliteDomain'); }
   /** Why the selected product cannot be shown in the selected sector, or null. */
   unavailable(): string | null {
@@ -66,7 +67,7 @@ export class GoesL2Layer extends MapLayer {
   palette() { return settings.arr<string>('ext.settings.goesL2Palettes')[settings.num('ext.layerState.ExtendedSatelliteL2Product')] ?? 'GOESL2CloudTopHeight'; }
   invalidate() { this.raster.invalidate(); }
   /** Product, satellite, sector and resolution the frames are requested for. */
-  private selection() { return `${this.product().key}|${this.platform()}|${this.sector()}|${settings.num('config.performanceMode')}`; }
+  private selection() { return `${timeline.key}|${this.product().key}|${this.platform()}|${this.sector()}|${settings.num('config.performanceMode')}`; }
   /** The store while it still matches the settings (they can change before the next refresh), else null. */
   private current() { return this.enabled() && this.store && this.identity === this.selection() ? this.store : null; }
 
@@ -101,7 +102,7 @@ export class GoesL2Layer extends MapLayer {
     if (stale()) return;
     let fs = files.filter((f) => f.t >= timeline.loopStart - 10 * 60e3).sort((a, b) => a.t - b.t);
     fs = thinGoesFiles(fs, sector).slice(-(settings.bool('settings.goesExtendedForce60fps') ? 60 : 36));
-    if (!fs.length) { this.setStatus('unavailable', `No ${platform.toUpperCase()} ${p.name} files for ${SECTOR_NAME[sector]} in the loop period.`); return; }
+    if (!fs.length) { this.setStatus('unavailable', timeline.mode === 'archive' ? NOT_AVAILABLE : `No ${platform.toUpperCase()} ${p.name} files for ${SECTOR_NAME[sector]} in the loop period.`); return; }
     store.setWanted(fs);
     this.updateStatus();
   }

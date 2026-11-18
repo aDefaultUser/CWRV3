@@ -91,6 +91,9 @@ export class Archive2Decoder {
       p = 24;
     }
     const dv = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
+    // Archive volumes before mid-2016 have no compressed records: the messages follow the volume header directly
+    // (a zero where the first record length would be).
+    if (p === 24 && buf.length > 28 && dv.getInt32(24) === 0) { this.parseMessages(buf.subarray(24)); return; }
     while (p + 4 <= buf.length) {
       const size = Math.abs(dv.getInt32(p));
       p += 4;

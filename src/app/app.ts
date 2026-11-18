@@ -55,6 +55,9 @@ import { AlertCenter, fetchActiveWarnings, nexradStorms } from './alerts';
 import type { ProbSevereLayer } from '../sections/probsevere';
 import { radarStatus, radarStatusDetail } from '../radar/status';
 import { analysisBindings, analysisMenu, analysisMenuActions, analysisPointMenu, analysisPointActions } from '../ui/analysis-forms';
+import { archiveBindings, archiveMenu, archiveMenuActions } from '../ui/archive-forms';
+import { archiveBadge } from './archive';
+import { NOT_AVAILABLE } from '../layers/base';
 import { openSounding } from '../ui/sounding-panel';
 
 type Tool = null | 'line' | 'path' | 'radial' | 'motion' | 'manualTrack' | 'light' | 'telestrate' | 'annotate' | 'labelPlace' | 'vrShear' | 'sounding';
@@ -65,6 +68,7 @@ export class App {
   atlas!: GlyphAtlas;
   tiles!: TileLayer;
   layers = new Map<string, MapLayer | TileLayer>();
+  private archiveBadge!: HTMLElement;
   nexrad!: NexradLayer;
   warnings!: WarningsLayer;
   lightning!: LightningLayer;
@@ -184,6 +188,7 @@ export class App {
     Object.assign(this.bindings, styleFormBindings(this));
     Object.assign(this.bindings, toolFormBindings(this));
     Object.assign(this.bindings, analysisBindings(this));
+    Object.assign(this.bindings, archiveBindings(this));
     this.bindings.TFrmStringDisplay = stringDisplayBindings(() => this.viewerText, () => closeDialog('TFrmStringDisplay'));
     this.buildShell();
     // "Show exceptions" (Advanced menu): uncaught errors also appear as toasts (always logged to the console).
@@ -241,12 +246,29 @@ export class App {
     timeline.refreshWindow();
     for (const l of this.layers.values()) if ('refresh' in l) (l as MapLayer).refresh().catch((e) => console.warn(l.id, e));
   }
+  /**
+   * Enters archive mode at `t` (UTC ms, optionally at a radar site), moves the archive time, or returns to live data
+   * (null). Every layer reloads for the new time; false when the time or site is not usable.
+   */
+  setArchive(t: number | null, site?: string): boolean {
+    if (t !== null && !(t <= Date.now())) { this.toast('The archive time must be in the past'); return false; }
+    const icao = site?.trim().toUpperCase();
+    if (icao && icao !== settings.str('settings.nexradSiteICAO').toUpperCase()) { this.setSite(icao); if (settings.str('settings.nexradSiteICAO').toUpperCase() !== icao) return false; }
+    timeline.setArchive(t);
+    this.sites.rebuild(); // the live radar status colours do not apply to a past time
+    this.refreshAll();
+    this.poke();
+    return true;
+  }
+  /** Moves the archive time by one loop length (not past the present). */
+  stepArchive(dir: 1 | -1) { if (timeline.archive !== null) this.setArchive(Math.min(Date.now(), timeline.archive + dir * timeline.loopHours * 3600e3)); }
   refreshLayer(id: string) { const l = this.layers.get(id) as MapLayer | undefined; l?.refresh().catch((e) => console.warn(id, e)); this.poke(); }
   /** Zone alert list (TFrmAdvisories) for the NWS forecast zone containing a point. */
   zoneAlerts: { status: string; sel: number; items: { row: string; text: string }[] } = { status: '', sel: -1, items: [] };
   async openZoneAlerts(lon: number, lat: number) {
     this.zoneAlerts = { status: 'Finding the NWS zone…', sel: -1, items: [] };
     this.dialog('TFrmAdvisories');
+    if (timeline.mode === 'archive') { this.zoneAlerts.status = `Zone alerts are the currently active alerts: ${NOT_AVAILABLE}.`; return; }
     try {
       const pt = JSON.parse(await fetchText(`https://api.weather.gov/points/${lat.toFixed(4)},${lon.toFixed(4)}`, { cache: 'none' }));
       const zone = String(pt.properties?.forecastZone ?? '').split('/').pop();
@@ -413,6 +435,8 @@ export class App {
     this.hud.cell.addEventListener('click', () => { if (downAt === `${this.hud.cell.offsetLeft},${this.hud.cell.offsetTop}`) { this.cellInfoMore = !this.cellInfoMore; this.trackHudKey = ''; } });
     // Status bar: 7 panels [100,100,100,100,300,200,50] + gauge.
     const sb = this.el('div', '', app); sb.id = 'statusbar';
+    this.archiveBadge = this.el('div', 'archive', sb);
+    this.archiveBadge.title = 'Archive replay: click to change the time or return to live data'; this.archiveBadge.onclick = () => this.dialog('TFrmArchive');
     for (const w of [100, 100, 100, 100, 300, 200, 50]) { const p = this.el('div', '', sb); p.style.width = `${w}px`; if (w === 300 || w === 50) p.style.textAlign = 'center'; this.status.push(p); }
     const g = this.el('div', 'gauge', sb); this.gauge = this.el('div', '', g);
     g.title = 'Downloads (click for details)'; g.style.cursor = 'pointer'; g.onclick = () => this.dialog('TFrmDownloader');
@@ -621,6 +645,7 @@ export class App {
   }
   async textProduct(title: string, url: string) {
     this.textViewer(title, 'Downloading…');
+    if (timeline.mode === 'archive') { this.viewerText = `This text product is the current issuance: ${NOT_AVAILABLE}.`; return; }
     try { this.viewerText = await fetchText(url); } catch (e) { this.viewerText = `Text product unavailable: ${(e as Error).message}\n${url}`; }
   }
   popup(form: string, popupName: string, anchor: HTMLElement, actions: Record<string, MenuAction>, extra: MenuNode[] = []) {
@@ -665,7 +690,7 @@ export class App {
   mainMenu(anchor: HTMLElement) {
     const r = anchor.getBoundingClientRect();
     const node = this.menuNode('TFrmMap', 'MainMenu');
-    showMenu({ ...node, children: [...node.children, ...analysisMenu()] }, r.left, r.bottom, { ...mainMenuActions(this), ...analysisMenuActions(this) });
+    showMenu({ ...node, children: [...node.children, ...analysisMenu(), ...archiveMenu()] }, r.left, r.bottom, { ...mainMenuActions(this), ...analysisMenuActions(this), ...archiveMenuActions(this) });
   }
   l2ProductMenu(anchor: HTMLElement) {
     if (!settings.bool('layerState.NEXRADLevel2')) return;
@@ -706,6 +731,7 @@ export class App {
   }
   flyOpts() { return { jerk: settings.num('config.generalCameraFlyJerk'), end: settings.num('config.generalCameraFlyEndSmoothing'), nonLinear: settings.bool('config.generalCameraFlyNonLinear') }; }
   setLiveScan(on: boolean) {
+    if (on && timeline.mode === 'archive') { this.toast('Live sweep is not available in archive mode'); return; }
     this.nexrad.liveScan = on;
     if (on) { settings.set('layerState.NEXRADLevel2', true); settings.set('layerState.NEXRADOn', true); this.nexrad.statusText = 'Live sweep activated'; }
     this.refreshLayer('nexrad');
@@ -1251,7 +1277,7 @@ export class App {
     const order = [...this.renderer.layers].reverse();
     for (const l of order) {
       const p = (l as unknown as { probeAt?: (lon: number, lat: number, x: number, y: number) => string[] | null; enabled?: () => boolean }).probeAt;
-      if (!p || (l as MapLayer).enabled?.() === false) continue;
+      if (!p || (l as MapLayer).enabled?.() === false || (l as MapLayer).archiveBlocked?.()) continue;
       const r = p.call(l, ll[0], ll[1], x, y);
       if (r && r.length) return r;
     }
@@ -1489,7 +1515,7 @@ export class App {
         : mode === 1
           ? new Intl.DateTimeFormat('en-US', { timeZone: tz, hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: true }).format(d)
           : new Intl.DateTimeFormat('en-US', { timeZone: tz, month: '2-digit', day: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: true }).format(d).replace(',', '');
-      if (mode === 2) { const age = Math.round((Date.now() - timeline.t) / 60e3); text += age > 0 ? ` (${age} min ago)` : ' (now)'; }
+      if (mode === 2 && timeline.mode === 'live') { const age = Math.round((Date.now() - timeline.t) / 60e3); text += age > 0 ? ` (${age} min ago)` : ' (now)'; }
       h.time.textContent = zoneName ? `${text} ${zoneName}` : text;
       const off = settings.arr<number>('config.labelOffset');
       const legendH = h.legend.clientHeight;
@@ -1497,7 +1523,7 @@ export class App {
       h.time.style.zIndex = settings.bool('config.labelOnTop') ? '5' : '1';
     }
     // Product time labels (NDFD forecast time, Winter range, model run): stacked under the timestamp.
-    const ml = [...this.layers.values()].map((l) => (l as { mapLabel?: () => string | null }).mapLabel?.() ?? null).filter((x): x is string => !!x).join('\n');
+    const ml = [...this.layers.values()].filter((l) => (l as MapLayer).status?.state !== 'unavailable').map((l) => (l as { mapLabel?: () => string | null }).mapLabel?.() ?? null).filter((x): x is string => !!x).join('\n');
     if (ml !== this.mapLabelText) { this.mapLabelText = ml; h.maplabel.textContent = ml; h.maplabel.style.display = ml ? '' : 'none'; }
     if (ml) { h.maplabel.style.left = h.time.style.left; h.maplabel.style.top = `${(parseFloat(h.time.style.top) || 8) + 30}px`; }
     // Severe watch text box at General/SevereWatchBoxPosition: watches in effect at map time.
@@ -1582,7 +1608,12 @@ export class App {
     s[3].textContent = settings.bool('config.generalShowPerfMetrics') ? `cpu ${m.cpuMean.toFixed(1)} gpu ${this.renderer.gpuMs.toFixed(1)} ms` : '';
     const busy = [...this.layers.values()].filter((l) => 'status' in l && (l as MapLayer).status.state === 'loading').map((l) => (l as MapLayer).title);
     const errs = [...this.layers.values()].filter((l) => 'status' in l && (l as MapLayer).status.state === 'error').map((l) => `${(l as MapLayer).title}: ${(l as MapLayer).status.text}`);
-    s[4].textContent = busy.length ? `Loading: ${busy.join(', ')}` : errs[0] ?? `${new Date(timeline.t).toUTCString().slice(17, 25)} UTC`;
+    // Archive mode: the badge stays on, and enabled layers without data for the time are named.
+    const na = timeline.mode === 'archive' ? [...this.layers.values()].filter((l) => 'status' in l && (l as MapLayer).enabled() && (l as MapLayer).status.state === 'unavailable' && (l as MapLayer).status.text.includes(NOT_AVAILABLE)).map((l) => (l as MapLayer).title) : [];
+    this.archiveBadge.style.display = timeline.archive === null ? 'none' : '';
+    this.archiveBadge.textContent = timeline.archive === null ? '' : archiveBadge(timeline.archive);
+    s[4].textContent = busy.length ? `Loading: ${busy.join(', ')}` : errs[0] ?? (na.length ? `Not available for this time: ${na.join(', ')}` : `${new Date(timeline.t).toUTCString().slice(17, 25)} UTC`);
+    s[4].title = na.length ? `Not available for this time: ${na.join(', ')}` : '';
     s[5].textContent = this.dl.active ? `Downloads: ${this.dl.active} (${(this.dl.received / 1e6).toFixed(1)} MB)` : 'Data current';
     s[6].textContent = this.warnings.status.state === 'ready' ? '●' : '○';
     s[6].title = 'Public NWS alert polling (60 s); no push feed';

@@ -1,7 +1,7 @@
 // NEXRAD Pro (30): Level 2 volumes (all 17 products, tilts with split-cut/SAILS/MRLE handling, scan transitions,
 // live sweep, live composite) and Level 3 products/overlays, with probe value mapping.
 import type { DrawContext, Renderer } from '../render/renderer';
-import { MapLayer, type LegendSpec } from './base';
+import { MapLayer, NOT_AVAILABLE, type LegendSpec } from './base';
 import { bracket, timeline } from '../app/timeline';
 import { settings } from '../settings/store';
 import { pool } from '../workers/pool';
@@ -23,6 +23,9 @@ import { ChunkFeed } from '../radar/chunks';
 import { loadPref, savePref, prefObject } from '../app/persist';
 import { matchVolume, overlayFiles, LISTING_LAG_MAX_MS } from '../radar/overlay-match';
 import { RadarTools } from './radar-tools';
+import { AWS_L3, IEM_DS, iemAttrUrl, iemStormProducts, l3ArchiveCode, l3ArchiveCodes, listL3Archive } from '../radar/archive';
+import { fetchJson } from '../data/net';
+import { archiveCache } from '../data/iem';
 
 export interface TiltTab { key: string; label: string; angle: number; sweepIndices: number[] }
 
@@ -57,12 +60,16 @@ function stiMotion(pages: string[][]) {
 
 export class NexradLayer extends MapLayer {
   readonly id = 'nexrad';
+  readonly archive = 'resolver';
   readonly title = 'NEXRAD';
   l2: L2Frame[] = [];
   l3: L3Frame[] = [];
   tilts: TiltTab[] = [];
   tiltAngle = loadPref('l2tilt', 0.5, (v) => typeof v === 'number' && Number.isFinite(v));
-  liveScan = false;
+  /** Live sweep requested; it is never active while an archive time is shown. */
+  private liveSweep = false;
+  get liveScan() { return this.liveSweep && timeline.mode === 'live'; }
+  set liveScan(on: boolean) { this.liveSweep = on; }
   liveComposite = false;
   statusText = 'Awaiting activation (L2)...';
   vcpText = 'VCP: --';
@@ -172,6 +179,13 @@ export class NexradLayer extends MapLayer {
   private shownL3(): L3Frame[] { const id = this.l3Identity(); return this.l3.filter((f) => f.id === id && (f.tex || f.raster)); }
   private dropSweep(f: L2Frame) { f.sweep?.tex.destroy(); f.sweep = undefined; }
 
+  /** Frees the radar frames (nothing is listed for the selection). */
+  private freeFrames() {
+    for (const f of this.l2) f.sweep?.tex.destroy();
+    for (const f of this.l3) { f.tex?.tex.destroy(); f.raster?.tex.destroy(); }
+    this.l2 = []; this.l3 = [];
+  }
+
   /** Frees everything for a site change ("Radar site switched. Freeing all volumes."). */
   freeAll() {
     this.gen++;
@@ -218,7 +232,7 @@ export class NexradLayer extends MapLayer {
     this.autoMotionChanged();
   }
   /** Drops an automatic vector whose product is older than AUTO_MOTION_MAX_AGE (no longer current). */
-  expireAutoMotion(now = Date.now()) { if (this.autoMotion && now - this.autoMotion.timeMs > AUTO_MOTION_MAX_AGE) this.clearAutoMotion(); }
+  expireAutoMotion(now = timeline.now()) { if (this.autoMotion && now - this.autoMotion.timeMs > AUTO_MOTION_MAX_AGE) this.clearAutoMotion(); }
   private autoMotionChanged() {
     for (const fn of this.autoMotionListeners) fn();
   }
@@ -238,8 +252,12 @@ export class NexradLayer extends MapLayer {
   }
 
   private running: Promise<void> | null = null; private again = false;
+  /** Timeline epoch (mode and archive time) everything held was requested under. */
+  private epoch = timeline.epoch;
   /** Overlapping refresh requests (live polling, setting changes) coalesce into one pass plus at most one rerun. */
   refresh(): Promise<void> {
+    // A mode or archive-time change frees everything at once; results still in flight are discarded (freeAll).
+    if (timeline.epoch !== this.epoch) { this.epoch = timeline.epoch; this.freeAll(); this.index = null; if (this.enabled()) this.setStatus('loading', 'Retrieving index...'); }
     if (this.running) { this.again = true; return this.running; }
     this.running = (async () => { do { this.again = false; await this.refreshOnce(); } while (this.again); })().finally(() => { this.running = null; });
     return this.running;
@@ -269,9 +287,11 @@ export class NexradLayer extends MapLayer {
   private index: { key: string; at: number; files: L2File[] } | null = null;
   /** Live polls are frequent (chunks arrive every few seconds); the volume index is re-read at most every 60 s. */
   private async l2Index(site: string, src: 2 | 3 | 4): Promise<L2File[]> {
-    const key = `${site}|${src}|${settings.str('settings.nexradL2CustomDataSource')}`;
-    if (this.index && this.index.key === key && Date.now() - this.index.at < (this.liveScan ? 60e3 : 10e3)) return this.index.files;
-    const files = await listL2(site, src, settings.str('settings.nexradL2CustomDataSource'), timeline.loopStart);
+    const archive = timeline.mode === 'archive';
+    const key = `${site}|${src}|${settings.str('settings.nexradL2CustomDataSource')}|${timeline.key}|${archive ? timeline.loopStart : ''}`;
+    // An archive listing does not change; the live one is re-read.
+    if (this.index && this.index.key === key && (archive || Date.now() - this.index.at < (this.liveScan ? 60e3 : 10e3))) return this.index.files;
+    const files = await listL2(site, src, settings.str('settings.nexradL2CustomDataSource'), timeline.loopStart, archive ? timeline.loopEnd : undefined);
     this.index = { key, at: Date.now(), files };
     return files;
   }
@@ -291,7 +311,9 @@ export class NexradLayer extends MapLayer {
 
   private async refreshL2(site: string) {
     const gen = this.gen;
-    const src = effectiveSource(settings.num('settings.nexradL2DataSource'), settings.str('settings.nexradL2CustomDataSource'));
+    // Only the AWS archive keeps past volumes.
+    const archive = timeline.mode === 'archive';
+    const src = archive ? 3 : effectiveSource(settings.num('settings.nexradL2DataSource'), settings.str('settings.nexradL2CustomDataSource'));
     this.statusText = 'Retrieving Level 2 index...';
     this.onStatus(this);
     let files = this.fixture && this.fixture.site === site ? this.fixture.files : await this.l2Index(site, src);
@@ -302,9 +324,10 @@ export class NexradLayer extends MapLayer {
       if (gen !== this.gen) return;
       if (live) files = [...files.filter((f) => !f.live && Math.abs(f.t - live.t) > 60e3), live].sort((a, b) => a.t - b.t);
     } else this.liveSource = { kind: null, note: '' };
+    if (!files.length && archive) { this.freeFrames(); this.statusText = `Level 2 at ${site}: ${NOT_AVAILABLE}`; this.setStatus('unavailable', NOT_AVAILABLE); this.publishTimeline(); return; }
     if (!files.length) { this.statusText = 'Server returned empty file index for active site. No action taken.'; this.setStatus('error', this.statusText); return; }
     const newest = files[files.length - 1];
-    if (!this.fixture && Date.now() - newest.t > 30 * 60e3) this.statusText = `Site down. Last volume ${new Date(newest.t).toUTCString().slice(17, 22)}Z`;
+    if (!this.fixture && !archive && Date.now() - newest.t > 30 * 60e3) this.statusText = `Site down. Last volume ${new Date(newest.t).toUTCString().slice(17, 22)}Z`;
     const download = settings.num('settings.nexradLevel2MaxVolumeDownloadCount');
     const memory = settings.num('settings.nexradLevel2VolumeCountMemory');
     const held = new Set(this.l2.filter((f) => !f.file.live).map((f) => f.file.url));
@@ -445,7 +468,7 @@ export class NexradLayer extends MapLayer {
   private updateL2Status() {
     const ready = this.shownL2();
     const newest = this.l2[this.l2.length - 1];
-    this.nrtText = newest ? `NRT: ${Math.max(0, Math.round((Date.now() - (newest.sweep?.endMs || newest.t)) / 60e3))} min` : 'NRT: ---';
+    this.nrtText = newest ? `NRT: ${Math.max(0, Math.round((timeline.now() - (newest.sweep?.endMs || newest.t)) / 60e3))} min` : 'NRT: ---';
     if (this.liveScan) {
       const how = this.liveSource.kind === 'chunks' ? `chunk feed: ${this.liveSource.note}` : `full-volume fallback${this.liveSource.note ? ` (${this.liveSource.note})` : ''}`;
       this.statusText = `${newest?.file.live ? 'Live sweep active' : 'Awaiting next scan'} · ${how}`;
@@ -471,8 +494,15 @@ export class NexradLayer extends MapLayer {
     const key = `${site}|${p.ds}`;
     const current = () => gen === this.gen && this.l3Identity() === key;
     this.statusText = `Retrieving ${p.awips} index...`;
-    const files = await listL3(site, p.ds);
+    const archive = timeline.mode === 'archive';
+    let files = archive ? [] : await listL3(site, p.ds), name: string = p.awips;
+    if (archive) for (const code of l3ArchiveCodes(p.ds, p.awips)) {
+      files = await listL3Archive(site, code, timeline.loopStart - 10 * 60e3, timeline.loopEnd);
+      if (!current()) return;
+      if (files.length) { if (code !== p.awips) name = `${code} (archived successor of ${p.awips})`; break; }
+    }
     if (!current()) return; // site or product changed while listing
+    if (!files.length && archive) { this.freeFrames(); this.statusText = `${p.awips} at ${site}: ${NOT_AVAILABLE}`; this.setStatus('unavailable', NOT_AVAILABLE); this.publishTimeline(); return; }
     const max = settings.num('settings.nexradLevel3MaxFrameCount');
     const wanted = files.filter((f) => f.t >= timeline.loopStart - 10 * 60e3).slice(-max);
     if (this.mode !== key) { for (const f of this.l3) { f.tex?.tex.destroy(); f.raster?.tex.destroy(); } this.l3 = []; this.mode = key; }
@@ -483,10 +513,10 @@ export class NexradLayer extends MapLayer {
     await Promise.all([...this.l3].reverse().map((f) => this.loadL3(f, p)));
     if (!current()) return;
     const ready = this.shownL3();
-    this.statusText = ready.length ? `${p.awips}: ${ready.length}/${this.l3.length} frames` : wanted.length ? 'Awaiting new volume...' : `No ${p.awips} files at ${site}`;
+    this.statusText = ready.length ? `${name}: ${ready.length}/${this.l3.length} frames` : wanted.length ? 'Awaiting new volume...' : `No ${p.awips} files at ${site}`;
     const nv = ready[ready.length - 1];
     this.vcpText = `VCP: ${nv?.vcp ?? '--'}`;
-    this.nrtText = nv ? `NRT: ${Math.round((Date.now() - (nv.volumeTimeMs ?? nv.t)) / 60e3)} min` : 'NRT: ---';
+    this.nrtText = nv ? `NRT: ${Math.round((timeline.now() - (nv.volumeTimeMs ?? nv.t)) / 60e3)} min` : 'NRT: ---';
     this.setStatus(ready.length ? 'ready' : 'loading', this.withPtype(this.statusText), { frames: ready.length });
     this.publishTimeline();
   }
@@ -495,7 +525,7 @@ export class NexradLayer extends MapLayer {
     if (f.tex || f.raster || f.loading) return;
     f.loading = true;
     try {
-      const res = await pool.for(this.id).run('l3', { url: f.url, live: true });
+      const res = await pool.for(this.id).run('l3', { url: f.url, live: !f.url.startsWith(AWS_L3) });
       if (!this.l3.includes(f) || f.tex || f.raster) return; // replaced (site or product change) or already rebuilt
       f.vcp = res.vcp; f.volumeTimeMs = res.volumeTimeMs; f.volumeScan = res.volumeScan;
       if (res.volumeTimeMs) f.t = res.volumeTimeMs;
@@ -546,10 +576,13 @@ export class NexradLayer extends MapLayer {
     const gen = this.gen, current = () => gen === this.gen && this.currentSite() === site;
     const wantMotion = settings.num('layerState.NEXRADLevel2Product') === 7 && !settings.bool('settings.nexradStormMotionCustom');
     const dsList = [...this.overlayDs(), ...(wantMotion ? ['56rm0'] : [])];
-    const listed = await Promise.all(dsList.map((ds) => listL3(site, ds).catch(() => [])));
+    const archive = timeline.mode === 'archive';
+    const from = timeline.loopStart - 10 * 60e3, to = timeline.loopEnd + (archive ? 0 : LISTING_LAG_MAX_MS);
+    // Archive files are named by their volume time, TGFTP files are listed by their arrival time.
+    const list = (ds: string) => { const code = l3ArchiveCode(ds); return !archive ? listL3(site, ds) : code ? listL3Archive(site, code, from, to) : Promise.resolve([]); };
+    const listed = await Promise.all(dsList.map((ds) => list(ds).catch(() => [])));
     if (!current()) return; // another site was selected meanwhile
     const frames = this.enabled() ? (this.isL2() ? this.l2 : this.l3).map((f) => f.t) : [];
-    const from = timeline.loopStart - 10 * 60e3, to = timeline.loopEnd + LISTING_LAG_MAX_MS;
     const cap = frames.length ? Infinity : settings.num('settings.nexradLevel3MaxFrameCount');
     const jobs = dsList.flatMap((ds, i) => overlayFiles(listed[i], frames, from, to, cap).filter((f) => !this.stormRead.has(`${f.url}@${f.t}`)).map((f) => ({ ds, f })));
     jobs.sort((a, b) => b.f.t - a.f.t);
@@ -558,7 +591,7 @@ export class NexradLayer extends MapLayer {
       while (next < jobs.length && current()) {
         const { ds, f } = jobs[next++];
         let res: any;
-        try { res = await pool.for(this.id).run('l3', { url: f.url, live: true }); } catch { continue; } // read again next refresh
+        try { res = await pool.for(this.id).run('l3', { url: f.url, live: !archive }); } catch { continue; } // read again next refresh
         if (!current()) return;
         this.stormRead.set(`${f.url}@${f.t}`, f.t);
         if (!(res?.volumeTimeMs > 0)) continue; // never labelled with another time
@@ -570,6 +603,10 @@ export class NexradLayer extends MapLayer {
     };
     await Promise.all(Array.from({ length: 4 }, reader));
     if (!current()) return;
+    // Products the Level 3 archive does not hold for this period come from the IEM storm attributes.
+    const missing = archive ? dsList.filter((ds, i) => IEM_DS.includes(ds) && !listed[i].length) : [];
+    if (missing.length) await this.readIemAttributes(site, missing, frames.length ? frames : [timeline.loopEnd], current);
+    if (!current()) return;
     const oldest = timeline.loopStart - 30 * 60e3;
     for (const m of this.storm.values()) for (const t of m.keys()) if (t < oldest) m.delete(t);
     for (const [k, t] of this.stormRead) if (t < oldest) this.stormRead.delete(k);
@@ -577,10 +614,32 @@ export class NexradLayer extends MapLayer {
     if (wantMotion) {
       const newest = [...this.products('56rm0')].reduce((a, p) => (!a || p.volumeTimeMs > a.volumeTimeMs ? p : a), null);
       const m = motionOf(newest);
-      if (m && Date.now() - newest.volumeTimeMs <= AUTO_MOTION_MAX_AGE) this.setAutoMotion(m, newest.volumeTimeMs);
+      if (m && timeline.now() - newest.volumeTimeMs <= AUTO_MOTION_MAX_AGE) this.setAutoMotion(m, newest.volumeTimeMs);
       else this.clearAutoMotion();
       if (motionArrived && this.isL2() && this.product() === 7) this.reloadL2();
     }
+  }
+
+  /**
+   * Archive mode: IEM storm attributes for the radar frames, each request once. IEM answers with the volume nearest
+   * the asked time, so the products are stored under the volume time they report and matched like Level 3 files.
+   */
+  private async readIemAttributes(site: string, dsList: string[], frames: number[], current: () => boolean) {
+    const todo = frames.filter((t) => !this.stormRead.has(`iem@${t}`));
+    const reader = async () => {
+      for (let t = todo.pop(); t !== undefined && current(); t = todo.pop()) {
+        let gj: Parameters<typeof iemStormProducts>[0];
+        try { gj = await fetchJson(iemAttrUrl(t), { cache: archiveCache(t), timeoutMs: 60_000 }); } catch { continue; } // asked again next refresh
+        if (!current()) return;
+        this.stormRead.set(`iem@${t}`, t);
+        for (const set of iemStormProducts(gj, site)) for (const ds of dsList) {
+          const key = `${site}|${ds}`, p = set.get(ds)!;
+          if (!this.storm.has(key)) this.storm.set(key, new Map());
+          if (!this.storm.get(key)!.has(p.volumeTimeMs)) this.storm.get(key)!.set(p.volumeTimeMs, p);
+        }
+      }
+    };
+    await Promise.all(Array.from({ length: 3 }, reader));
   }
 
   /** Volume time of the overlay products' own newest volume at the timeline time (no radar frame drawn), or null. */

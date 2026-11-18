@@ -1,7 +1,7 @@
 // Basic → Warnings (TOR SVR SQW SMW FFW SWS EWW) and Severe Watches from the public NWS API
 // (api.weather.gov GeoJSON) and SPC watch outlines (ActiveWW.kmz). Polling replaces the vendor push feed.
 import type { DrawContext, Renderer } from '../render/renderer';
-import { MapLayer } from './base';
+import { MapLayer, NOT_AVAILABLE } from './base';
 import { timeline } from '../app/timeline';
 import { settings } from '../settings/store';
 import { fetchJson, fetchBytes } from '../data/net';
@@ -13,6 +13,7 @@ import { lonLatToXYZ } from '../render/camera';
 import earcut from 'earcut';
 import { PolySet, type PolyFill } from '../render/polys';
 import { passTable, polyFill, objectStyle, warningCustomStyles, hasTextStyle } from '../app/styles';
+import { loadArchiveWarnings } from './warnings-archive';
 
 export interface WarnType { code: string; event: string; layer: string; color: [number, number, number] }
 /** Colors: unknown in the original; NWS-conventional choices recorded in */
@@ -66,6 +67,7 @@ export function parseAlert(f: any): Alert {
 
 export class WarningsLayer extends MapLayer {
   readonly id = 'warnings';
+  readonly archive = 'resolver';
   readonly title = 'Warnings and watches';
   alerts: Alert[] = [];
   watches: Alert[] = [];
@@ -77,6 +79,8 @@ export class WarningsLayer extends MapLayer {
   private counties: { ids: string[]; rings: Map<string, number[][]> } | null = null;
   private avBoxes: { num: string; tor: boolean; coords: number[] }[] = [];
   private lastKey = '';
+  /** Timeline key (mode, archive time) and, in archive mode, the loop period the alerts were loaded for. */
+  private loaded = '';
   selected: Alert | null = null;
   private fills: PolySet;
   constructor(r: Renderer, atlas: GlyphAtlas) { super(r); this.lines = new LineSet(r); this.text = new TextSet(r, atlas); this.watchLines = new LineSet(r); this.fills = new PolySet(r); }
@@ -86,6 +90,9 @@ export class WarningsLayer extends MapLayer {
 
   async refresh() {
     if (!this.enabled()) { this.setStatus('off', ''); return; }
+    const epoch = timeline.epoch;
+    if (!this.loaded.startsWith(`${timeline.key}|`)) { this.alerts = []; this.watches = []; this.avBoxes = []; this.selected = null; this.loaded = `${timeline.key}|`; this.lastKey = ''; }
+    if (timeline.mode === 'archive') { await this.refreshArchive(epoch); return; }
     const start = new Date(timeline.loopStart - 3 * 3600e3).toISOString().replace(/\.\d+Z$/, 'Z');
     const events = [...WARN_TYPES.map((w) => w.event), ...WATCH_EVENTS];
     try {
@@ -99,6 +106,7 @@ export class WarningsLayer extends MapLayer {
       const active: any = await fetchJson(`${API}/alerts/active?event=${encodeURIComponent(events.join(','))}`);
       const byId = new Map<string, any>();
       for (const f of [...out, ...active.features]) byId.set(f.properties.id, f);
+      if (epoch !== timeline.epoch) return; // archive mode was entered meanwhile
       const all = [...byId.values()].map(parseAlert);
       // A later message referencing an earlier one supersedes it from its send time.
       const superseded = new Map<string, number>();
@@ -111,9 +119,27 @@ export class WarningsLayer extends MapLayer {
       this.seen = new Set([...(this.seen ?? []), ...all.map((a) => a.id)]);
       if (fresh.length && settings.bool('settings.severeWarningsShowPushNotification')) this.onNew(fresh);
       this.setStatus('ready', `NWS alerts: ${this.alerts.length} warnings, ${this.watches.length} watch messages`);
-    } catch (e) { this.setStatus('error', `NWS API: ${(e as Error).message}`); }
-    if (settings.bool('layerState.SevereWatchesOn')) { await this.loadCounties(); await this.loadAviationBoxes(); }
+    } catch (e) { if (epoch === timeline.epoch) this.setStatus('error', `NWS API: ${(e as Error).message}`); }
+    if (settings.bool('layerState.SevereWatchesOn')) { await this.loadCounties(); await this.loadAviationBoxes(epoch); }
     this.lastKey = '';
+  }
+
+  /**
+   * Archive mode: warning polygons and SPC watch outlines of the loop period from IEM, each drawn only while it was in
+   * effect. Nothing is announced as new, and Special Weather Statements are not archived.
+   */
+  private async refreshArchive(epoch: number) {
+    const from = timeline.loopStart, to = timeline.loopEnd, watches = settings.bool('layerState.SevereWatchesOn');
+    const key = `${timeline.key}|${from}|${watches}`;
+    if (key === this.loaded) return;
+    this.setStatus('loading', 'Archived warnings (IEM)');
+    try {
+      const res = await loadArchiveWarnings(from, to, watches);
+      if (epoch !== timeline.epoch) return; // the mode or archive time changed while loading
+      this.alerts = res.alerts; this.watches = res.watches; this.loaded = key; this.lastKey = '';
+      const sws = settings.bool('layerState.SWSWarningsOn') ? `; Special Weather Statements ${NOT_AVAILABLE}` : '';
+      this.setStatus('ready', `IEM archive: ${this.alerts.length} warning polygons, ${this.watches.length} watches${sws}`);
+    } catch (e) { if (epoch === timeline.epoch) this.setStatus('error', `IEM warnings: ${(e as Error).message}`); }
   }
 
   private async loadCounties() {
@@ -131,9 +157,10 @@ export class WarningsLayer extends MapLayer {
     } catch { /* GIS assets missing: watches draw no outline */ }
   }
 
-  private async loadAviationBoxes() {
+  private async loadAviationBoxes(epoch: number) {
     try {
       const files = await unzip(await fetchBytes('https://www.spc.noaa.gov/products/watch/ActiveWW.kmz'), (n) => n.endsWith('.kml'));
+      if (epoch !== timeline.epoch) return;
       const kml = new TextDecoder().decode([...files.values()][0] ?? new Uint8Array());
       this.avBoxes = [];
       for (const pm of kml.matchAll(/<Placemark>([\s\S]*?)<\/Placemark>/g)) {
@@ -144,7 +171,7 @@ export class WarningsLayer extends MapLayer {
         const coords = c.trim().split(/\s+/).flatMap((t) => t.split(',').slice(0, 2).map(Number));
         this.avBoxes.push({ num: name, tor: /tornado|TOR/i.test(name + body), coords });
       }
-    } catch { this.avBoxes = []; }
+    } catch { if (epoch === timeline.epoch) this.avBoxes = []; }
   }
 
   activeAt(t: number) { return this.alerts.filter((a) => a.sent <= t && t < a.ends && settings.bool(a.type!.layer)); }
@@ -202,7 +229,8 @@ export class WarningsLayer extends MapLayer {
     for (const w of this.watchesAt(t)) {
       const tor = w.event.startsWith('Tornado');
       const n = w.pds ? (tor ? 'TORPDSWatch' : 'SVRPDSWatch') : tor ? 'TORWatch' : 'SVRWatch';
-      for (const seg of this.unionOutline(w.zones)) for (const k of wt.idx(n)) wl.push({ coords: seg, style: k });
+      // Live watches are county unions; archived ones carry the issued outline.
+      for (const seg of w.zones.length ? this.unionOutline(w.zones) : w.rings) for (const k of wt.idx(n)) wl.push({ coords: seg, style: k });
     }
     if (settings.bool('layerState.SevereWatchesOn')) for (const b of this.avBoxes) {
       if ((b.tor && settings.bool('settings.severeTORAviationWatch')) || (!b.tor && settings.bool('settings.severeSVRAviationWatch'))) for (const k of wt.idx(b.tor ? 'TORAVWatch' : 'SVRAVWatch')) wl.push({ coords: b.coords, style: k });

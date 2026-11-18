@@ -3,7 +3,7 @@
 // SVG (public/assets/icons/tabler/bolt.svg, MIT) as a tinted sprite with a dark halo; glow mode adds a soft additive
 // backdrop under each bolt. 3D mode adds vertical strike lines above the bolts.
 import type { DrawContext, Renderer } from '../render/renderer';
-import { MapLayer } from './base';
+import { MapLayer, NOT_AVAILABLE } from './base';
 import { timeline } from '../app/timeline';
 import { settings } from '../settings/store';
 import { listS3 } from '../data/net';
@@ -12,8 +12,10 @@ import { PointSet, LineSet, SpriteAtlas, SpriteSet, SHAPE, type PointSpec, type 
 import { evalPalette } from '../render/palette';
 import { getPalette } from '../palettes/library';
 import { lonLatToXYZ } from '../render/camera';
+import { goesAt } from './satellite';
 
-const BUCKET = 'https://noaa-goes19.s3.amazonaws.com';
+/** GLM of the GOES-East satellite at `t`. */
+const bucketAt = (t: number) => `https://noaa-${goesAt('goes19', t)}.s3.amazonaws.com`;
 const BOLT_SVG = '/assets/icons/tabler/bolt.svg';
 /** Age buckets for bolt tints (one atlas sprite per bucket and variant). */
 const AGE_BUCKETS = 16;
@@ -37,6 +39,7 @@ interface Batch { key: string; lat: Float32Array; lon: Float32Array; energy: Flo
 
 export class LightningLayer extends MapLayer {
   readonly id = 'lightning';
+  readonly archive = 'window';
   readonly title = 'Lightning (GLM)';
   private pts: PointSet;
   private strikes: LineSet;
@@ -52,6 +55,8 @@ export class LightningLayer extends MapLayer {
   private loading = new Set<string>();
   private lastKey = '';
   newestMs = 0;
+  /** Timeline epoch (mode and archive time) the batches belong to. */
+  private epoch = timeline.epoch;
   visibleCount = 0;
   flashes: { lon: number; lat: number; t: number; e: number }[] = [];
   constructor(r: Renderer) {
@@ -66,7 +71,9 @@ export class LightningLayer extends MapLayer {
   async refresh() {
     if (!this.enabled()) { this.setStatus('off', ''); return; }
     const minutes = settings.num('settings.lightningRenderingMinutes');
-    const from = timeline.loopStart - minutes * 60e3, to = timeline.loopEnd;
+    const from = timeline.loopStart - minutes * 60e3, to = timeline.loopEnd, epoch = timeline.epoch;
+    if (epoch !== this.epoch) { this.epoch = epoch; this.batches.clear(); this.loading.clear(); this.newestMs = 0; this.lastKey = ''; }
+    const BUCKET = bucketAt(to);
     const hours: number[] = [];
     for (let t = Math.floor(from / 3600e3) * 3600e3; t <= to; t += 3600e3) hours.push(t);
     const files: { key: string; t: number }[] = [];
@@ -83,6 +90,8 @@ export class LightningLayer extends MapLayer {
         }
       }
     } catch (e) { this.setStatus('error', `GLM listing failed: ${(e as Error).message}`); return; }
+    if (epoch !== timeline.epoch) return; // listed for another mode or archive time
+    if (!files.length && timeline.mode === 'archive') { this.setStatus('unavailable', NOT_AVAILABLE); return; }
     files.sort((a, b) => b.t - a.t);
     const wanted = files.filter((f) => !this.batches.has(f.key) && !this.loading.has(f.key));
     // Newest first, in groups of 15 files per worker call.
@@ -90,16 +99,17 @@ export class LightningLayer extends MapLayer {
       const group = wanted.slice(i, i + 15);
       group.forEach((g) => this.loading.add(g.key));
       pool.for(this.id).run('glm', { urls: group.map((g) => g.key) }).then((res) => {
+        if (epoch !== timeline.epoch) return; // requested for another mode or archive time
         const key = group.map((g) => g.key).join('|');
         this.batches.set(key, { key, lat: res.lat, lon: res.lon, energy: res.energy, timeMs: res.timeMs });
         for (const g of group) { this.loading.delete(g.key); this.batches.set(g.key, { key: g.key, lat: new Float32Array(0), lon: new Float32Array(0), energy: new Float32Array(0), timeMs: new Float64Array(0) }); }
         this.newestMs = Math.max(this.newestMs, res.newestMs);
         this.lastKey = '';
         this.setStatus('ready', `GLM: ${this.loading.size ? `loading ${this.loading.size} files` : 'current'}`, { newestMs: this.newestMs });
-      }, (e) => { group.forEach((g) => this.loading.delete(g.key)); this.setStatus('error', `GLM: ${e.message}`); });
+      }, (e) => { if (epoch !== timeline.epoch) return; group.forEach((g) => this.loading.delete(g.key)); this.setStatus('error', `GLM: ${e.message}`); });
     }
-    // Drop batches older than the window.
-    for (const [k, b] of this.batches) if (b.timeMs.length && b.timeMs[b.timeMs.length - 1] < from - 600e3) this.batches.delete(k);
+    // Drop batches outside the window (older, or newer after the archive time moved back).
+    for (const [k, b] of this.batches) if (b.timeMs.length && (b.timeMs[b.timeMs.length - 1] < from - 600e3 || b.timeMs[0] > to + 600e3)) this.batches.delete(k);
     if (wanted.length) this.setStatus('loading', `GLM: loading ${wanted.length} files`);
   }
 

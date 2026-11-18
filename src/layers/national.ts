@@ -1,7 +1,7 @@
 // Basic → National Radar Reflectivity: MRMS CONUS mosaics from the public NOAA bucket, P-typed with
 // HRRR precipitation-type fields, temporal blending and smoothing.
 import type { DrawContext, Renderer } from '../render/renderer';
-import { MapLayer, type LegendSpec } from './base';
+import { MapLayer, NOT_AVAILABLE, type LegendSpec } from './base';
 import { FrameStore } from './frames';
 import { bracket, timeline } from '../app/timeline';
 import { settings } from '../settings/store';
@@ -35,6 +35,7 @@ export function pickMosaicFrames(keys: { t: number; key: string }[], end: number
 
 export class NationalRadarLayer extends MapLayer {
   readonly id = 'nationalRadar';
+  readonly archive = 'window';
   readonly title = 'National radar';
   private store: FrameStore<NrFrame>;
   private draw_: RasterDraw;
@@ -42,7 +43,8 @@ export class NationalRadarLayer extends MapLayer {
   private readonly onPtype = () => { this.draw_.invalidate(); this.updateStatus(); };
   /** P-type state of the frame drawn last (legend/status text). */
   private ptypeShown: PtypeState<PtypeTex> | null = null;
-  private productIdx = -1;
+  /** Product and timeline key (mode, archive time) the frames belong to. */
+  private loadedKey = '';
 
   constructor(r: Renderer) {
     super(r);
@@ -77,7 +79,8 @@ export class NationalRadarLayer extends MapLayer {
   async refresh() {
     if (!this.enabled()) { this.setStatus('off', ''); return; }
     const idx = settings.num('layerState.NationalRadarIdx');
-    if (idx !== this.productIdx) { this.store.clear(); this.productIdx = idx; }
+    const key = `${idx}|${timeline.key}`;
+    if (key !== this.loadedKey) { this.store.clear(); this.loadedKey = key; this.ptypeShown = null; }
     const prod = NR_PRODUCTS[idx];
     const days = new Set([timeline.loopStart, timeline.loopEnd].map((t) => new Date(t).toISOString().slice(0, 10).replace(/-/g, '')));
     const keys: { t: number; key: string }[] = [];
@@ -92,6 +95,8 @@ export class NationalRadarLayer extends MapLayer {
         }
       } catch (e) { this.setStatus('error', `MRMS listing failed: ${(e as Error).message}`); return; }
     }
+    if (key !== this.loadedKey) return; // the product, mode or archive time changed while listing
+    if (!keys.length && timeline.mode === 'archive') { this.setStatus('unavailable', NOT_AVAILABLE); return; }
     this.store.setWanted(pickMosaicFrames(keys, timeline.loopEnd, timeline.loopStart));
     this.updateStatus();
   }
