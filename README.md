@@ -25,7 +25,11 @@ npm run build && npm run serve    # production build, http://127.0.0.1:4173/
 GIS data is included. Run `npm run gis` only to rebuild it from the public sources.
 
 Both servers listen on loopback only and include a small proxy (`server/proxy.mjs`) for public hosts that send no
-CORS headers: GET/HEAD from 127.0.0.1 to a fixed HTTPS allowlist, with redirect, size and time limits.
+CORS headers: GET/HEAD from 127.0.0.1 to a fixed HTTPS allowlist, with redirect, size and stall limits.
+
+The hosted site runs on Cloudflare Pages (`npm run deploy`): `dist/` is served from the CDN and
+`functions/proxy/[[path]].ts` is the same proxy as a Pages Function (same-origin clients instead of loopback), with
+the rules shared through `server/proxy-rules.mjs`. Level 2 defaults to the AWS bucket, which browsers fetch directly.
 
 ## Using CWRV3
 
@@ -39,8 +43,9 @@ Probe reads the displayed value under the pointer.
   shrink only the General timeline. The end delay holds the newest frame. Timing changes apply to the frame in
   progress; the Play button's tooltip shows the loop, frame count and applied frame time. Skip to end pauses on the
   newest available frame and follows newer frames as they arrive.
-* Level 2 download volumes is how many of the newest volumes are fetched; max memory volumes is how many are kept as
-  new scans arrive (lowering it drops the oldest at once).
+* Level 2 max memory volumes is the loop length in volumes: the newest volume loads first, the older ones fill in
+  behind it, and each new scan drops the oldest (lowering it drops the oldest at once). Level 2 download volumes is
+  how many download at once, capped at 4 for TGFTP and custom servers, which go through the hosted proxy.
 * Storm attributes (storm tracks and the storm-cell table, TVS, hail, mesocyclone and melting-layer overlays) and the
   automatic storm motion are read per volume from the rotating TGFTP Level 3 files and drawn only over the radar
   volume they belong to: matched by volume start time (within 2 min; Level 3 SAILS/MRLE cuts by their volume scan
@@ -354,7 +359,7 @@ Exact parity with the original program is not claimed. Known differences:
   2026-11-17; the `noaa-nam-pds` bucket ends on 2026-11-03) and are reported as unavailable instead of being
   substituted. RRFS, which replaced them operationally, is listed as its own model.
 * The live sweep depends on the public real-time chunk bucket being current for the site; otherwise it falls back to
-  the TGFTP volume and says so.
+  the newest full volume (with the TGFTP source, the volume still being written) and says so.
 * Archive replay is a CWRV3 addition built on public archives, so it differs from live mode where those differ:
   warning tags and watch shapes (see Archive replay above), no Special Weather Statements, storm attributes partly
   from IEM's table instead of the Level 3 graphics (no past or forecast track positions for cells that come from it),
@@ -441,7 +446,7 @@ profiles from `api/1/nws/bufkit.json`, and for archive replay `api/1/vtec/sbw_in
 
 | Part | Lines |
 | --- | ---: |
-| TypeScript / JavaScript | 21,749 |
+| TypeScript / JavaScript | 21,779 |
 | WGSL shaders | 921 |
-| **Total functional** | **22,670** |
+| **Total functional** | **22,700** |
 | CSS (separate) | 178 |

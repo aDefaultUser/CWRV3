@@ -57,20 +57,21 @@ export async function listL2(site: string, source: 2 | 3 | 4, custom: string, si
 }
 
 /**
- * Level 2 volumes to hold: the download budget fetches the newest `download` index volumes; volumes already held
- * stay while they are still listed, so the loop grows as new scans arrive; the newest `memory` of both are kept
- * (the live partial volume, when given, is the newest and counts towards both).
+ * Level 2 volumes to hold: the newest `memory` listed volumes, so the loop fills to the memory count and the oldest
+ * drops as each new scan arrives. The live partial volume, when given, is the newest and counts towards `memory`.
  */
-export function l2Retention(index: L2File[], heldUrls: ReadonlySet<string>, download: number, memory: number, live: L2File | null = null): L2File[] {
-  const complete = index.filter((f) => !f.live);
-  const budget = Math.max(0, download - (live ? 1 : 0));
-  const fetch = budget ? complete.slice(-budget) : [];
-  const want = new Map<string, L2File>();
-  for (const f of complete) if (heldUrls.has(f.url)) want.set(f.url, f);
-  for (const f of fetch) want.set(f.url, f);
-  const list = [...want.values()].sort((a, b) => a.t - b.t);
+export function l2Retention(index: L2File[], memory: number, live: L2File | null = null): L2File[] {
+  const list = index.filter((f) => !f.live);
   if (live) list.push(live);
   return list.slice(-Math.max(1, memory));
+}
+
+/** TGFTP and custom servers go through the hosted proxy, whose link is slow and request slots few. */
+export const PROXIED_L2_PARALLEL = 4;
+
+/** Level 2 volumes downloaded at once: the download setting, capped for sources reached through the proxy. */
+export function l2Parallel(source: 2 | 3 | 4, download: number): number {
+  return Math.max(1, source === 3 ? download : Math.min(download, PROXIED_L2_PARALLEL));
 }
 
 export interface L3File { t: number; url: string; name: string }

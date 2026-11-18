@@ -2,6 +2,7 @@ import { defineConfig, type Plugin } from 'vite';
 // @ts-expect-error plain ESM module without types
 import { handleProxy } from './server/proxy.mjs';
 
+
 const proxyPlugin = (): Plugin => ({
   name: 'cwrv3-local-proxy',
   configureServer(server) {

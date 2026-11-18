@@ -9,6 +9,7 @@
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview --host 127.0.0.1",
     "serve": "node server/serve.mjs",
+    "deploy": "npm run build && npx wrangler@4 pages deploy dist --project-name cwrv3 --branch main",
     "test": "vitest run",
     "check": "tsc --noEmit && vitest run && vite build",
     "loc": "node tools/loc.mjs",

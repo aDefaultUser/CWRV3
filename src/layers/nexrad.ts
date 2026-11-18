@@ -14,7 +14,7 @@ import { evalPalette } from '../render/palette';
 import { PolySet, type PolyFill, type FillStyle } from '../render/polys';
 import { LineSet, PointSet, TextSet, GlyphAtlas, SHAPE, type Polyline, type PointSpec, type Label } from '../render/prims';
 import { RADAR_SITES } from '../generated/radar-sites';
-import { listL2, listL3, l2Retention, effectiveSource, L2, L3, l3Range, l3PaletteKey, L2_PALETTE_KEYS, l2Moment, type L2File, type L3Entry } from '../radar/sources';
+import { listL2, listL3, l2Parallel, l2Retention, effectiveSource, L2, L3, l3Range, l3PaletteKey, L2_PALETTE_KEYS, l2Moment, type L2File, type L3Entry } from '../radar/sources';
 import type { L2Meta, L2SweepMeta } from '../workers/decode.worker';
 import { algorithmKey, columnNote, usesIsotherms, type L2BuildParams, type VolumeMoment } from '../radar/l2products';
 import { VolumeStore, type GpuPack, type PackRequest } from '../render/volume';
@@ -30,6 +30,7 @@ import { archiveCache } from '../data/iem';
 import { CrossSection } from './cross-section';
 import { RadarTrail } from './radar-trail';
 import { Volume3D } from './radar-volume3d';
+import { eachLimit } from './frames';
 
 export interface TiltTab { key: string; label: string; angle: number; sweepIndices: number[] }
 
@@ -80,6 +81,8 @@ const motionOf = (p: { p?: number[] } | null): { speedKt: number; fromDeg: numbe
   return sp >= 0 && sp < 150 && dir >= 0 && dir <= 360 ? { speedKt: sp, fromDeg: dir } : null;
 };
 const utcHm = (t: number) => new Date(t).toISOString().slice(11, 16);
+/** Volume/file loads in flight per refresh, newest first. */
+const FRAME_LOADS = 4;
 const kmToLonLat = (lon0: number, lat0: number, x: number, y: number): [number, number] => [lon0 + x / (111.2 * Math.cos((lat0 * Math.PI) / 180)), lat0 + y / 111.2];
 
 /** Storm motion per cell id (direction from, deg; speed, kt) from the STI product's text pages. */
@@ -450,18 +453,44 @@ export class NexradLayer extends MapLayer {
     if (!files.length) { if (main()) { this.statusText = 'Server returned empty file index for active site. No action taken.'; this.setStatus('error', this.statusText); } return; }
     const newest = files[files.length - 1];
     if (main() && !this.fixture && !archive && Date.now() - newest.t > 30 * 60e3) this.statusText = `Site down. Last volume ${new Date(newest.t).toUTCString().slice(17, 22)}Z`;
-    const download = settings.num('settings.nexradLevel2MaxVolumeDownloadCount');
     const memory = settings.num('settings.nexradLevel2VolumeCountMemory');
-    const held = new Set(this.l2.filter((f) => !f.file.live).map((f) => f.file.url));
-    const wanted = l2Retention(files, held, download, memory, this.liveScan && newest.live ? newest : null);
+    const wanted = l2Retention(files, memory, this.liveScan && newest.live ? newest : null);
     const keep = new Map(this.l2.map((f) => [f.file.url, f]));
     const next: L2Frame[] = wanted.map((f) => keep.get(f.url) ?? { t: f.t, file: f });
     for (const f of this.l2) if (!next.includes(f)) for (const s of slots(f)) s.sweep?.tex.destroy();
     this.l2 = next;
     this.trimPanes();
     if (this.liveScan) { const lf = this.l2.find((f) => f.file.live); if (lf) { for (const s of slots(lf)) s.key = undefined; lf.file = { ...newest, live: true }; } }
-    await Promise.all([...this.l2].reverse().map((f) => this.loadL2(f)));
-    if (gen === this.gen) this.updateL2Status();
+    // The refresh waits only for the newest volume, so the current scan shows at once and live polls keep their
+    // cadence; the older volumes fill in behind it.
+    await this.loadL2(this.l2[this.l2.length - 1]);
+    if (gen !== this.gen) return;
+    void this.backfillL2(l2Parallel(src, settings.num('settings.nexradLevel2MaxVolumeDownloadCount')));
+    this.updateL2Status();
+  }
+
+  /** Generation of the running backfill, or -1. A site change (new generation) starts its own runner at once. */
+  private backfillGen = -1;
+  /**
+   * Builds the held volumes other than the newest (each refresh loads that one itself), newest first, `parallel` at a
+   * time, without holding up refreshes. One runner per generation: every pick re-reads `this.l2` and the display
+   * identity, so volumes and selection changes from later refreshes are picked up. It ends once every volume has been
+   * tried for the current identity (failures are retried by the next refresh) or the site changes.
+   */
+  private async backfillL2(parallel: number) {
+    if (this.backfillGen === this.gen) return;
+    const gen = this.backfillGen = this.gen;
+    const tried = new Map<L2Frame, string>();
+    const next = () => {
+      // loadL2 builds a volume for every pane, so a volume is done once every pane's identity was tried.
+      const id = this.l2Panes().map((pane) => this.l2Identity(pane)).join('/');
+      const f = this.l2.slice(0, -1).reverse().find((x) => tried.get(x) !== id);
+      if (f) tried.set(f, id);
+      return f;
+    };
+    const worker = async () => { for (let f = next(); f && gen === this.gen; f = next()) await this.loadL2(f); };
+    try { await Promise.all(Array.from({ length: parallel }, worker)); }
+    finally { if (this.backfillGen === gen) { this.backfillGen = -1; this.updateL2Status(); } }
   }
 
   sweepFor(meta: L2Meta, product: number, angle = this.tiltAngle): number | null {
@@ -638,7 +667,9 @@ export class NexradLayer extends MapLayer {
       this.statusText = `${newest?.file.live ? 'Live sweep active' : 'Awaiting next scan'} · ${how}`;
     }
     else this.statusText = ready.length ? `${ready.length}/${this.loopL2().length} volumes (keeps ≤${panes.count > 1 ? Math.min(PANE_VOLUMES, settings.num('settings.nexradLevel2VolumeCountMemory')) : settings.num('settings.nexradLevel2VolumeCountMemory')})` : this.l2.some((f) => f.error) ? (this.l2.find((f) => f.error)!.error ?? 'error') : 'Awaiting new volume...';
-    this.setStatus(ready.length ? 'ready' : 'loading', this.withPtype(this.statusText), { frames: ready.length, newestMs: newest?.t });
+    // Still 'loading' while older volumes fill in, so the status bar (and the benchmark) see the loop as incomplete.
+    const filling = this.backfillGen === this.gen;
+    this.setStatus(ready.length && !filling ? 'ready' : 'loading', this.withPtype(this.statusText), { frames: ready.length, newestMs: newest?.t });
     this.publishTimeline();
   }
 
@@ -675,7 +706,7 @@ export class NexradLayer extends MapLayer {
     const next: L3Frame[] = wanted.map((w) => keep.get(`${w.url}@${w.t}`) ?? { t: w.t, url: w.url, id: key });
     for (const f of v.l3) if (!next.includes(f)) { f.tex?.tex.destroy(); f.raster?.tex.destroy(); }
     v.l3 = next;
-    await Promise.all([...v.l3].reverse().map((f) => this.loadL3(f, p, v)));
+    await eachLimit([...v.l3].reverse(), FRAME_LOADS, (f) => this.loadL3(f, p, v));
     if (!current() || !main) return;
     const ready = this.shownL3();
     this.statusText = ready.length ? `${name}: ${ready.length}/${this.l3.length} frames` : wanted.length ? 'Awaiting new volume...' : `No ${p.awips} files at ${site}`;
