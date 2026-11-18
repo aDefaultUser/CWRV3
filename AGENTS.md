@@ -32,6 +32,10 @@ WebGPU needs a hardware adapter: on Linux `chromium --enable-unsafe-webgpu --ena
 - Radar volumes: `src/radar/volume-pack.ts` (every tilt of one moment on a fixed azimuth frame, worker task
   `l2.volume`), `src/radar/volume-sample.ts` (reference sampler: azimuth, ground range, height → value) and
   `src/render/volume.ts` (`VolumeStore`, the WGSL mirror `volumeWgsl`, `VolumeSection`); `NexradLayer.volumePack`.
+  3D view: `src/layers/radar-volume3d.ts` (settings, pack of the shown frame), `src/render/volume-view.ts` (march
+  target, composite), `src/render/volume-ray.ts` (reference ray math); packs carry an occupancy grid for skipping.
+  3D view: `src/layers/radar-volume3d.ts` (settings, pack of the shown frame), `src/render/volume-view.ts` (march
+  target, composite), `src/render/volume-ray.ts` (reference ray math); packs carry an occupancy grid for skipping.
 - `src/decode/`, `src/workers/` — decoders (Archive II, Level 3, GRIB2, NetCDF/HDF5 via h5wasm) run in the worker
   pool; callers name the owner: `pool.for(layerId).run(task, args)`. `l2-volumes.ts` holds the Level 2 volume cache
   (live chunk volumes update incrementally; `tests/helpers/archive2-writer.ts` writes synthetic volumes for tests).

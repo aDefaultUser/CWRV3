@@ -3,7 +3,7 @@
 // vertical section with it (the model for cross-section and volume passes run from a layer's prepass).
 import type { Renderer, PrepassContext } from './renderer';
 import { pool } from '../workers/pool';
-import { PACK_ROWS, PACK_MAX_TILTS, type VolumePack, type PackTilt } from '../radar/volume-pack';
+import { PACK_ROWS, PACK_MAX_TILTS, OCC_N, OCC_IMAGES, type VolumePack, type PackTilt } from '../radar/volume-pack';
 import { BEAM_DEG, KE_KM, BEAM_CURVE_KM } from '../radar/volume-sample';
 import { AZ_BIN0, type VolumeMoment } from '../radar/l2products';
 import type { L2VolumeArgs } from '../workers/l2-volumes';
@@ -36,8 +36,14 @@ export interface GpuPack {
   ubuf: GPUBuffer;
   /** Bind group on `renderer.layouts.volume` (binding 0 the uniform, binding 1 the texture). */
   bindGroup: GPUBindGroup;
+  /**
+   * r8unorm 2D-array texture of the pack's occupancy grid (VolumePack.occupancy), OCC_N × OCC_N per layer;
+   * `occKm` is the side of a cell (km).
+   */
+  occ: GPUTexture; occKm: number;
   /** Earliest radial time of the pack (epoch ms); the uniform's scan times are seconds after it. */
   timeMs: number;
+  /** Bytes of both textures. */
   bytes: number;
 }
 
@@ -103,13 +109,17 @@ export class VolumeStore {
   private begin(e: Entry, pack: VolumePack, q: PackRequest) {
     const g = this.r.gpu, d = g.device, layers = pack.tilts.length;
     const tex = d.createTexture({ label: `volume ${e.key}`, size: [pack.width, PACK_ROWS, layers], format: 'r8unorm', usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
-    const bytes = pack.width * PACK_ROWS * layers;
-    g.trackTexture(tex, bytes, this.owner);
+    const bytes = pack.width * PACK_ROWS * layers + pack.occupancy.length;
+    g.trackTexture(tex, pack.width * PACK_ROWS * layers, this.owner);
     const timeMs = Math.min(...pack.tilts.map((t) => t.startMs));
     const ubuf = d.createBuffer({ size: UNIFORM_FLOATS * 4, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     d.queue.writeBuffer(ubuf, 0, writeHead(pack, q, timeMs));
     const bindGroup = d.createBindGroup({ layout: this.r.layouts.volume, entries: [{ binding: 0, resource: { buffer: ubuf } }, { binding: 1, resource: tex.createView({ dimension: '2d-array' }) }] });
-    e.gpu = { key: e.key, moment: pack.moment, width: pack.width, tilts: pack.tilts, tex, ubuf, bindGroup, timeMs, bytes };
+    const occ = d.createTexture({ label: `occupancy ${e.key}`, size: [OCC_N, OCC_N, OCC_IMAGES], format: 'r8unorm', usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
+    g.trackTexture(occ, pack.occupancy.length, this.owner);
+    d.queue.writeTexture({ texture: occ }, pack.occupancy as BufferSource, { bytesPerRow: OCC_N, rowsPerImage: OCC_N }, [OCC_N, OCC_N, OCC_IMAGES]);
+    g.recordUpload(this.owner, pack.occupancy.length, 0);
+    e.gpu = { key: e.key, moment: pack.moment, width: pack.width, tilts: pack.tilts, tex, ubuf, bindGroup, occ, occKm: pack.occKm, timeMs, bytes };
     e.pending = pack; e.uploaded = 0;
     this.uploading.push(e);
     this.evict();
@@ -143,7 +153,7 @@ export class VolumeStore {
   get bytes() { let n = 0; for (const e of this.entries.values()) n += e.gpu?.bytes ?? 0; return n; }
 
   private drop(e: Entry) {
-    e.gpu?.tex.destroy(); e.gpu?.ubuf.destroy();
+    e.gpu?.tex.destroy(); e.gpu?.occ.destroy(); e.gpu?.ubuf.destroy();
     this.entries.delete(e.key);
     this.uploading = this.uploading.filter((x) => x !== e);
   }
@@ -233,13 +243,12 @@ fn volumeSample(az: f32, s: f32, h: f32) -> f32 {
   let n = i32(VOL.site.w);
   if (n == 0 || !(s > 0.0)) { return 0.0; }
   let uw = volBeam(volArc(s), h); let beam = VOL.grid.z; let half = beam * 0.5;
+  // The first tilt at or above the beam, by the sign of volAbove alone; the two angles are then evaluated once.
   var hi = 0; var below = 1e9; var above = 1e9;
-  while (hi < n) {
-    let d = volAbove(hi, uw);
-    if (d <= 0.0) { above = -d; break; }
-    below = d; hi++;
-  }
+  while (hi < n && uw.y * VOL.tilts[hi].dir.x > uw.x * VOL.tilts[hi].dir.y) { hi++; }
   let lo = hi - 1;
+  if (lo >= 0) { below = volAbove(lo, uw); }
+  if (hi < n) { above = -volAbove(hi, uw); }
   if (min(below, above) <= half) { return volValid(volTiltCode(select(hi, lo, below <= above), az, s)); }
   if (lo < 0 || hi >= n || below + above > 2.0 * beam) { return 0.0; }
   let w = (below - half) / (below + above - beam);

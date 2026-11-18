@@ -13,9 +13,22 @@ import { sampleVolume, stormRelativeCode } from '../radar/volume-sample';
 import type { VolumePack } from '../radar/volume-pack';
 import type { VolumeMoment } from '../radar/l2products';
 import type { Drawable } from '../render/renderer';
+import { VolumeView, type ViewParams } from '../render/volume-view';
+import { firstCrossing, polarOf, rayBounds, raySegment, siteFrame, viewRays, type RayBounds, type V3 } from '../render/volume-ray';
+import { Lut } from '../render/raster';
+import { getPalette } from '../palettes/library';
+import { L2_PALETTE_KEYS } from '../radar/sources';
+import { OCC_N, OCC_LAYERS } from '../radar/volume-pack';
+import { VOLUME_MOMENTS } from '../radar/l2products';
+import { VIEW3D } from '../layers/radar-volume3d';
+import { destination } from '../gis/geodesy';
 
 /** `fps`: FPS limit for the run (0 = unlimited); omitted = the user's settings. */
-export interface BenchOptions { scenario: 'idle' | 'panzoom' | 'l2loop' | 'l3probe' | 'stress'; seconds?: number; fps?: number; label?: string; raw?: boolean }
+/**
+ * `l2volume` and `l2iso` orbit the camera around the selected radar with the 3D volume view on (volume rendering or
+ * isosurfaces) while the Level 2 loop plays.
+ */
+export interface BenchOptions { scenario: 'idle' | 'panzoom' | 'l2loop' | 'l3probe' | 'stress' | 'l2volume' | 'l2iso'; seconds?: number; fps?: number; label?: string; raw?: boolean }
 
 /** Summary of display cadence: RAF deltas and how many rendered frames spanned more than one display period. */
 function cadence(raf: number[], frames: FrameSample[], capMs: number) {
@@ -74,10 +87,13 @@ export function installBench(app: App) {
     const cam = app.renderer.camera;
     const start0 = { ...cam.target }; // copy: setView mutates target in place
     app.fpsOverride = o.fps ?? null;
-    if (o.scenario === 'l2loop') { settings.set('layerState.NEXRADOn', true); settings.set('layerState.NEXRADLevel2', true); app.activeTab = 'NEXRADPro'; }
+    const view3d = o.scenario === 'l2volume' ? 1 : o.scenario === 'l2iso' ? 2 : 0, view3dBefore = settings.num(VIEW3D(''));
+    if (o.scenario === 'l2loop' || view3d) { settings.set('layerState.NEXRADOn', true); settings.set('layerState.NEXRADLevel2', true); app.activeTab = 'NEXRADPro'; }
+    if (view3d) settings.set(VIEW3D(''), view3d);
     if (o.scenario === 'l3probe') { settings.set('layerState.NEXRADOn', true); settings.set('layerState.NEXRADLevel2', false); settings.set('config.generalMapMode', 2); }
     await waitReady(90_000);
-    if (o.scenario === 'l2loop' || o.scenario === 'l3probe' || o.scenario === 'stress') timeline.play(true);
+    if (o.scenario === 'l2loop' || o.scenario === 'l3probe' || o.scenario === 'stress' || view3d) timeline.play(true);
+    const prepass: number[] = [], site = app.nexrad.siteInfo();
     app.meter.recording = [];
     app.meter.rafRecording = [];
     const lt0 = longTasks.length;
@@ -90,6 +106,8 @@ export function installBench(app: App) {
           cam.setView({ lon: start0.lon + Math.sin(t * 0.6) * 6, lat: start0.lat + Math.sin(t * 0.4) * 3, z: start0.z * (0.55 + 0.45 * Math.cos(t * 0.5)) }, true);
           app.poke();
         }
+        if (view3d && site) { cam.setView({ lon: site.lon, lat: site.lat, z: 14, tilt: 60, swivel: (t * 20) % 360 }, true); app.poke(); }
+        prepass.push(app.renderer.gpuPrepassMs);
         if (o.scenario === 'l3probe') { const r = c.getBoundingClientRect(); app.renderer.probeRequest = { x: r.width / 2 + Math.cos(t * 2) * r.width / 4, y: r.height / 2 + Math.sin(t * 2) * r.height / 4 }; app.poke(); }
         if (t < seconds) requestAnimationFrame(step); else resolve();
       };
@@ -100,6 +118,10 @@ export function installBench(app: App) {
     app.meter.recording = null; app.meter.rafRecording = null;
     timeline.play(false);
     cam.setView(start0, true);
+    const view = app.nexrad.view3d.view, sorted = [...prepass].sort((a, b) => a - b);
+    const prepassStats = { meanMs: sorted.reduce((a, b) => a + b, 0) / Math.max(1, sorted.length), p95Ms: sorted[Math.floor(sorted.length * 0.95)] ?? 0, maxMs: sorted[sorted.length - 1] ?? 0 };
+    const volumeView = view3d ? { status: app.nexrad.view3d.status, target: view ? [view.width, view.height, view.divisor] : null } : undefined;
+    if (view3d) settings.set(VIEW3D(''), view3dBefore);
     const fps = app.fpsOverride ?? settings.num('config.generalActiveFPS');
     const capMs = fps > 0 ? 1000 / fps : 0;
     app.fpsOverride = null;
@@ -110,6 +132,8 @@ export function installBench(app: App) {
       fixture: app.nexrad.fixture ? app.nexrad.fixture.files.map((f) => f.name) : null,
       adapter: g.info, backbuffer: { width: g.width, height: g.height, dpr: g.dpr, devicePixelRatio, cssWidth: c.clientWidth, cssHeight: c.clientHeight, msaa: g.sampleCount },
       userAgent: navigator.userAgent, stats: FrameMeter.stats(frames), cadence: cadence(raf, frames, capMs),
+      // GPU time of the layers' prepasses (part of the GPU time in `stats`), sampled once per display refresh.
+      prepass: prepassStats, volumeView,
       longTasks: longTasks.slice(lt0).map((l) => ({ startMs: +(l.start - t0).toFixed(1), durationMs: +l.duration.toFixed(1) })),
       jsHeapMB: mem ? +(mem.usedJSHeapSize / 1e6).toFixed(1) : null,
       layers: [...app.layers.values()].filter((l) => 'status' in l).map((l) => ({ id: l.id, enabled: (l as { enabled: () => boolean }).enabled(), status: (l as { status: unknown }).status })),
@@ -180,11 +204,92 @@ export function installBench(app: App) {
     return { results: out, gpuPrepassMs: prepassMs, gpuMs: r.gpuMs, packBytes: nx.volumes.bytes };
   }
 
+  /**
+   * Checks the isosurface march against the TypeScript sampler on the Level 2 volume drawn now. The view looks at the
+   * strongest reflectivity column from three sides; the march writes the distance of its first crossing of the
+   * `dbz` surface for every target pixel, and every `every`-th ray in each direction is compared with sampleVolume:
+   *  - `agree`: the reference's first crossing (0.1 km steps, bisected) lies within the march's bisection interval;
+   *  - `other`: the march stopped at another real crossing: within `slack` km of its hit the reference reaches the
+   *    threshold, and it is below it within one march step before (a feature thinner than a march step came first);
+   *  - `invalid`: the march hit where the reference has no such crossing;
+   *  - `missed`: the march found nothing although the reference stays at or above the threshold for more than two
+   *    march steps (`thin`: for less); `empty`: neither found a crossing.
+   */
+  async function isoCheck(dbz = 50, every = 12, slack = 0.03) {
+    const nx = app.nexrad, r = app.renderer, q = nx.volumeRequest('REF');
+    if (!q) return { error: 'no Level 2 volume drawn' };
+    const cpu = (await pool.for('bench').run<{ pack: VolumePack | null }>('l2.volume', { url: q.url, live: q.live, chunks: q.chunks, moment: 'REF', latest: q.latest, qualityDealiasing: q.qualityDealiasing }, q.url)).pack;
+    if (!cpu) return { error: 'no reflectivity in this volume' };
+    const m = VOLUME_MOMENTS.REF, code = (dbz - m.offset) / m.scale, steps = 256;
+    const lut = new Lut(r, getPalette(settings.str(L2_PALETTE_KEYS[0])), { low: 0, high: 1 }), view = new VolumeView(r, 'bench');
+    const params: ViewParams = { mode: 3, steps, vscale: 1, velocity: false, emptyCode: code, thresholdCode: code, fullCode: 255, opacity: 1, lut, iso: [code, 0], colors: [[1, 1, 1, 1], [0, 0, 0, 0]] };
+    // The strongest column of the pack's occupancy grid.
+    const all = cpu.occupancy.subarray(OCC_LAYERS * OCC_N * OCC_N, (OCC_LAYERS + 1) * OCC_N * OCC_N), top = all.indexOf(Math.max(...all));
+    const east = ((top % OCC_N) + 0.5 - OCC_N / 2) * cpu.occKm, north = (Math.floor(top / OCC_N) + 0.5 - OCC_N / 2) * cpu.occKm;
+    const [lon, lat] = destination(q.lon, q.lat, (Math.atan2(east, north) * 180) / Math.PI, Math.hypot(east, north));
+    const frame = siteFrame(q.lon, q.lat), cam = r.camera, start = { ...cam.target };
+    let shot: { rays: ReturnType<typeof viewRays>; b: RayBounds } | null = null, wanted = false;
+    const probe: Drawable = {
+      id: 'iso-check', draw() {},
+      prepass(ctx) {
+        const pack = wanted ? nx.volumePack('REF') : null;
+        if (!pack) return;
+        const rays = viewRays(cam, frame);
+        view.encode(ctx, pack, q, params);
+        shot = { rays, b: rayBounds(rays.eye, q.heightKm, 1, (pack.occKm * OCC_N) / 2) };
+        wanted = false;
+      },
+    };
+    r.layers.push(probe);
+    const nextFrame = () => new Promise((res) => { app.poke(); requestAnimationFrame(res); });
+    const out: Record<string, unknown>[] = [];
+    try {
+      for (const v of [{ z: 5, tilt: 62, swivel: -30 }, { z: 4, tilt: 0, swivel: 0 }, { z: 6, tilt: 76, swivel: 140 }]) {
+        cam.setView({ lon, lat, ...v }, true);
+        await nextFrame();
+        shot = null; wanted = true;
+        for (const t0 = performance.now(); !shot && performance.now() - t0 < 60_000;) await nextFrame();
+        if (!shot) throw new Error(`volume pack REF: ${nx.volumes.state(q)}`);
+        const { rays, b } = shot as { rays: ReturnType<typeof viewRays>; b: RayBounds }, W = view.width, H = view.height, gpu = await view.read();
+        const n = { rays: 0, agree: 0, other: 0, invalid: 0, missed: 0, thin: 0, empty: 0 }, worst: unknown[] = [];
+        for (let y = every >> 1; y < H; y += every) for (let x = every >> 1; x < W; x += every) {
+          const nxc = ((x + 0.5) / W) * 2 - 1, nyc = 1 - ((y + 0.5) / H) * 2;
+          const dv = [0, 1, 2].map((i) => rays.d0[i] + nxc * rays.dx[i] + nyc * rays.dy[i]), dl = Math.hypot(dv[0], dv[1], dv[2]);
+          const d = dv.map((c) => c / dl) as V3, o = rays.eye, at = (t: number): V3 => [o[0] + d[0] * t, o[1] + d[1] * t, o[2] + d[2] * t];
+          const value = (t: number) => { const p = polarOf(at(t), b); return sampleVolume(cpu, p.az, p.s, p.h); };
+          const seg = raySegment(o, d, b), i = (y * W + x) * 4, hit = gpu[i + 3] > 0.5 ? gpu[i] + gpu[i + 1] : null;
+          const ref = seg ? firstCrossing(value, seg[0], seg[1], 0.1, code, 5) : null;
+          n.rays++;
+          if (hit === null && ref === null) { n.empty++; continue; }
+          const length = seg ? seg[1] - seg[0] : 0, stepAt = (t: number) => { const p = at(t); return view.stepAt(t, length, Math.hypot(p[0], p[1]), steps); };
+          if (hit === null) {
+            let end = ref!;
+            while (end < seg![1] && value(end + 0.05) >= code) end += 0.05;
+            if (end - ref! > 2 * stepAt(ref!)) { n.missed++; if (worst.length < 5) worst.push({ x, y, ref, run: end - ref! }); } else n.thin++;
+            continue;
+          }
+          const step = stepAt(hit);
+          if (ref !== null && Math.abs(hit - ref) <= step / 16 + slack) { n.agree++; continue; }
+          let inside = false, outside = false;
+          for (let t = hit - slack; t <= hit + slack; t += 0.005) if (value(t) >= code - 0.02) inside = true;
+          for (let t = hit - step - slack; t <= hit; t += 0.01) if (value(t) < code) outside = true;
+          if (inside && (outside || hit - step - slack <= seg![0])) n.other++; else { n.invalid++; if (worst.length < 5) worst.push({ x, y, hit, ref, step }); }
+        }
+        out.push({ view: v, target: [W, H], ...n, worst });
+      }
+    } finally {
+      r.layers.splice(r.layers.indexOf(probe), 1);
+      view.destroy(); lut.destroy();
+      cam.setView(start, true);
+    }
+    return { volume: q.url.split('/').pop(), dbz, lookAt: [lon, lat], results: out };
+  }
+
   function download(obj: unknown, name = `cwrv3-bench-${Date.now()}.json`) {
     const a = document.createElement('a');
     a.href = URL.createObjectURL(new Blob([JSON.stringify(obj, null, 1)], { type: 'application/json' }));
     a.download = name; a.click();
   }
 
-  (window as unknown as { cwrv3bench: unknown }).cwrv3bench = { run, download, useL2Fixture, volumeCheck, app, settings, timeline };
+  (window as unknown as { cwrv3bench: unknown }).cwrv3bench = { run, download, useL2Fixture, volumeCheck, isoCheck, app, settings, timeline };
 }

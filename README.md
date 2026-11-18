@@ -122,6 +122,21 @@ Probe reads the displayed value under the pointer.
     pressure-weighted means). The panel names the station, position, run and valid time that were returned. The
     formulations follow MetPy 1.7 (Ambaum saturation pressure, Romps LCL, virtual-temperature CAPE/CIN,
     pressure-weighted Bunkers motion); the unit tests compare them with MetPy's documented values.
+  * 3D volume view (the right-hand group of the dialog) of the Level 2 volume shown at the timeline time, drawn
+    over the map with the ordinary camera (Ctrl+drag tilts and swivels): **Volume** renders the volume
+    semi-transparently with the moment's palette (transparent below "Volume: from", denser toward the top of the
+    scale, times the opacity), **Isosurfaces** draws one or two lit surfaces where the moment reaches a value, each
+    with its own colour and opacity. Moments: reflectivity, velocity, storm-relative velocity (the volume's own storm
+    motion, as for the storm-relative product), ZDR, CC and KDP; each keeps its own thresholds. For the velocities the
+    thresholds are speeds: surface 1 is outbound and surface 2 inbound, and the volume threshold applies to both.
+    Heights are stretched by Radar Control → Tilt exaggeration (factor 1 + value / 25, as the 3D tilt, never below
+    0.2); the height scale at the radar marks every 5 km (10 kft with imperial units) up to the top of the view, 20 km
+    above the radar. "Samples per ray" sets the quality: 160 samples at most along a ray, with steps of 0.2 km near
+    the radar that widen with range as the beams do, and proportionally finer or coarser for other values. The view
+    is drawn at half the map's resolution; when its GPU time (F8) stays above 4 ms it is drawn at a third or a quarter
+    until a finer size fits again (the dialog shows the size in use). It follows the loop: each frame shows its own
+    volume, and nothing is drawn for a frame whose volume is still loading. It needs Level 2 data and is drawn over
+    the product's sweep, not sorted in depth with it or with other layers.
 * F8 (or CWRV3 → Advanced → Performance panel) shows the global frame rate and times, GPU time of the main pass and
   of the layers' offscreen prepasses where the adapter supports timestamp queries, total tracked texture memory and the JS heap (N/A where the browser does not report
   it), and one row per layer or owner with its decode jobs, texture uploads, live texture memory and status. Each layer's decode time excludes network, queueing and transfer, shown beside
@@ -145,9 +160,14 @@ npm run loc      # functional lines of code (method in tools/loc.mjs)
 npm run bench -- <label> <fixed4k|dpr1|dpr15|dpr2> --out <dir> [--fps 60|0] [--headful] [--runs 3]
 ```
 
-`APP_URL` selects the server the benchmark opens (default `http://127.0.0.1:4173/`). In the browser console,
+`APP_URL` selects the server the benchmark opens (default `http://127.0.0.1:4173/`). `--scenarios` also accepts
+`l2volume` and `l2iso` (not in the default list): the 3D volume view in volume or isosurface mode while the camera
+orbits the radar and the Level 2 loop plays; their results add the GPU time of the prepass. In the browser console,
 `cwrv3bench.volumeCheck()` renders vertical sections of the drawn Level 2 volume with the GPU volume sampler and
-compares them pixel by pixel with the TypeScript reference.
+compares them pixel by pixel with the TypeScript reference, and `cwrv3bench.isoCheck()` reads back where the
+isosurface march first meets the 50 dBZ surface from three camera positions and checks every twelfth ray against
+the TypeScript sampler (a hit must lie on a real crossing; a ray without a hit must have no echo thicker than two
+march steps).
 
 The benchmark (`tools/perf/run-bench.mjs`) drives an isolated Chromium (temporary profile, DevTools port 9333) against
 the production build; Level 2 runs use the fixed KTLX archive volumes listed in `public/perf-fixtures.json`.
@@ -216,6 +236,12 @@ Exact parity with the original program is not claimed. Known differences:
   each is a maximum over beam centres above an isotherm height, without vertical interpolation between tilts, so
   far from the radar few beams qualify. KDP is this program's own estimate and is noisy at high tilts; the 20 dBZ
   and CC 0.80 gates are this implementation's choice.
+* The 3D volume view is not in the original. It samples the tilts directly (nearest gate and azimuth bin, linear
+  between neighbouring tilts, nothing below the lowest beam or between tilts more than two beamwidths apart), so far
+  from the radar it shows the beams as slabs. March steps follow the data's resolution, not the screen's: an echo
+  thinner than a step along the ray can be missed. Isosurface normals come from differences 0.6 km apart. The
+  volume is not depth-sorted with the map's other layers, and a velocity pack carries one storm motion, so two
+  views of the same volume cannot show ground-relative and storm-relative velocity at once.
 * NAM-family and HiresW model feeds were unavailable from the public servers when last checked (HTTP 404 on
   2026-11-17; the `noaa-nam-pds` bucket ends on 2026-11-03) and are reported as unavailable instead of being
   substituted. RRFS, which replaced them operationally, is listed as its own model.
@@ -235,10 +261,22 @@ production build, FPS target 60. Frame times are `requestAnimationFrame` interva
 | Headless, fixed 3840×2160, 60 Hz, 1 × 20 s smoke | pan/zoom, target 60 | 60.0 fps, p99 16.8 ms, 0/1201 frames > 20 ms, GPU 1.6 ms mean |
 | | pan/zoom, unlimited | 60.0 fps (bounded by the 60 Hz headless refresh), p99 16.8 ms, 0/1201 frames > 20 ms |
 | | Level 2 loop (8 KTLX volumes), target 60, 1 × 60 s | 60.0 fps, p99 16.8 ms, 0/3601 frames > 20 ms, CPU 2.1 ms mean, GPU 1.3 ms mean |
+| | 3D volume view, volume rendering (`l2volume`: orbit around KTLX, loop playing), target 60, 2 × 40 s | 2/2 runs 60.0 fps, p99 16.8 ms, 0/2401 frames > 20 ms, CPU 2.7 ms mean, GPU 2.1 ms mean, of which the 1920×1080 march 0.62 ms mean, 0.70 ms p95, 0.77 ms max |
+| | 3D volume view, isosurfaces 50 and 30 dBZ (`l2iso`), target 60, 2 × 40 s | 2/2 runs 60.0 fps, p99 16.8 ms, 0/2401 frames > 20 ms, CPU 2.7 ms mean, GPU 2.4 ms mean, of which the march 0.97 ms mean, 1.4 ms p95, 1.6 ms max |
 
-Mean CPU time per frame was about 2 ms and GPU time about 0.6–1.6 ms in every run, so the frame rate is set by
-the FPS target or the display refresh, not by rendering cost. The 4K runs are short smoke checks, not full
-measurements.
+Mean CPU time per frame was about 2 ms and GPU time about 0.6–1.6 ms in every run without the 3D volume view, so the
+frame rate is set by the FPS target or the display refresh, not by rendering cost. The 4K runs are short smoke
+checks, not full measurements.
+
+The march of the 3D volume view costs what the echo on screen costs. Measured by hand at 3840×2160 (a 1920×1080
+target, 160 samples per ray) with the fixture's storms filling the view, 150–250 km from the radar: 2.2–2.4 ms for
+the default reflectivity isosurfaces (0.7 ms with one opaque surface) and 1.8–2.1 ms for volume rendering; a view
+with no echo above the threshold costs 0.1 ms. Noisy moments exceed the 4 ms budget at half resolution
+(storm-relative velocity and CC isosurfaces, ZDR volume): the target then drops to 1280×720 or 960×540 and the march
+stays at 1.3–3.1 ms, at 60 fps in every case. A reflectivity close-up from 88 km with echo over the whole screen
+measured 2.4–3.0 ms on a 918×489 target; it was not measured at 4K, where by pixel count it would run at a third or
+a quarter of the map's resolution. Building a pack's occupancy grid takes 25–90 ms per volume and moment (timed in
+Node on a 14-tilt, 1832-gate pack; in the app it runs in a decode worker) and the grid is 2.2 MB of texture memory.
 
 ## Data sources
 
@@ -276,7 +314,7 @@ profiles from `api/1/nws/bufkit.json`), NASA GIBS imagery and AWS Terrain Tiles.
 
 | Part | Lines |
 | --- | ---: |
-| TypeScript / JavaScript | 19,460 |
-| WGSL shaders | 753 |
-| **Total functional** | **20,213** |
+| TypeScript / JavaScript | 19,997 |
+| WGSL shaders | 886 |
+| **Total functional** | **20,883** |
 | CSS (separate) | 174 |
