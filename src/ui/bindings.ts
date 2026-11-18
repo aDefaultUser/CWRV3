@@ -18,6 +18,7 @@ import { rgbRecipes } from '../app/stores';
 import { parseRecipeText } from '../render/recipes';
 import { warningCustomStyles, saveWarningCustomStyles, setObjectStyle, textStyle, setTextStyle } from '../app/styles';
 import { ROAD_STYLES } from '../layers/gis';
+import { radarStatus, radarStatusShort, radarStatusDetail } from '../radar/status';
 
 const bool = (id: string, invert = false): Binding => ({ kind: 'bool', id, invert });
 const radio = (id: string, value: unknown): Binding => ({ kind: 'radio', id, value });
@@ -104,7 +105,7 @@ export function buildBindings(app: App): Record<string, BindingMap> {
     'TRadarUIFrame.sRadioButton1': custom(() => !settings.bool('layerState.NEXRADOn'), () => settings.set('layerState.NEXRADOn', false)),
     'TRadarUIFrame.rSiteHeader': status(() => { const s = nx().siteInfo(); return s ? `${s.id} ${s.type}` : settings.str('settings.nexradSiteICAO'); }),
     'TRadarUIFrame.rSiteCaption': status(() => { const s = nx().siteInfo(); return s ? `${titleCase(s.name)}, ${s.st} / Elev ${Math.round(s.elevFt)}'` : 'Unknown site'; }),
-    'TRadarUIFrame.sBadgeBtn1': act(() => { const s = nx().siteInfo(); app.toast(s ? `${s.id} ${s.type} ${s.lat.toFixed(3)}, ${s.lon.toFixed(3)} (site table index ${RADAR_SITES.indexOf(s)}; derived nexradSiteIdx ${settings.num('settings.nexradSiteIdx')})` : 'Unknown site'); }),
+    'TRadarUIFrame.sBadgeBtn1': { ...act(() => { const s = nx().siteInfo(); app.toast(s ? `${s.id} ${s.type} ${s.lat.toFixed(3)}, ${s.lon.toFixed(3)} (site table index ${RADAR_SITES.indexOf(s)}; derived nexradSiteIdx ${settings.num('settings.nexradSiteIdx')})\n${radarStatusDetail(radarStatus.get(s.id))}` : 'Unknown site'); }), title: () => radarStatusDetail(radarStatus.get(settings.str('settings.nexradSiteICAO'))) },
     'TRadarUIFrame.sSpeedButton5': act((el) => app.l2ProductMenu(el), undefined, () => (settings.bool('layerState.NEXRADLevel2') ? (nx().liveComposite ? 'Live Composite' : PRODUCTS.level2[settings.num('layerState.NEXRADLevel2Product')].name) : L3[l3Index()].name)),
     'TRadarUIFrame.L3ProductSelector': custom(() => 0, () => {}, undefined, () => settings.bool('layerState.NEXRADLevel2')),
     'TRadarUIFrame.L3CategorySelector': custom(() => PRODUCTS.level3Categories.indexOf(l3Cat()), (i: number) => {
@@ -122,7 +123,7 @@ export function buildBindings(app: App): Record<string, BindingMap> {
     'TRadarUIFrame.mapMode0': act(() => app.setLiveScan(!nx().liveScan), () => nx().liveScan, () => (nx().liveScan ? 'Live Sweep\nActive' : 'Activate\nLive Sweep')),
     'TRadarUIFrame.sCheckBox4': bool('settings.nexradLiveBeam'),
     'TRadarUIFrame.sLabelFX10': status(() => nx().liveSweepText),
-    'TRadarUIFrame.sLabelFX12': status(() => `Status: ${nx().statusText}`),
+    'TRadarUIFrame.sLabelFX12': status(() => `Status: ${nx().statusText} · RDA ${radarStatusShort(radarStatus.get(settings.str('settings.nexradSiteICAO')))}`),
     'TRadarUIFrame.sLabelFX6': status(() => nx().vcpText),
     'TRadarUIFrame.sLabelFX13': status(() => nx().nrtText),
     'TRadarUIFrame.sLabel1': status(() => (nx().flags.avset ? 'AVSET ●' : 'AVSET')),

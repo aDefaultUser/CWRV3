@@ -705,6 +705,402 @@ export const XPRODUCTS = {
    "s3": "https://noaa-mrms-pds.s3.amazonaws.com/CONUS/VIL_Density_00.50/{YYYYMMDD}/MRMS_VIL_Density_00.50_{YYYYMMDD}-{HHMMSS}.grib2.gz",
    "ncep": "https://mrms.ncep.noaa.gov/2D/VIL_Density/",
    "prefix": "MRMS_VIL_Density_00.50_"
+  },
+  {
+   "index": 32,
+   "label": "Reflectivity at -10°C",
+   "category": "Reflectivity",
+   "categoryIndex": 0,
+   "refreshMin": 2,
+   "flag2": 0,
+   "unit": "dBz",
+   "rawRange": [
+    0,
+    100
+   ],
+   "multiplier": 1,
+   "displayRange": [
+    0,
+    100
+   ],
+   "palette": "settings.mrmsReflectivityPalette",
+   "s3": "https://noaa-mrms-pds.s3.amazonaws.com/CONUS/Reflectivity_-10C_00.50/{YYYYMMDD}/MRMS_Reflectivity_-10C_00.50_{YYYYMMDD}-{HHMMSS}.grib2.gz",
+   "ncep": "https://mrms.ncep.noaa.gov/2D/Reflectivity_-10C/",
+   "prefix": "MRMS_Reflectivity_-10C_00.50_"
+  },
+  {
+   "index": 33,
+   "label": "Reflectivity at -20°C",
+   "category": "Reflectivity",
+   "categoryIndex": 0,
+   "refreshMin": 2,
+   "flag2": 0,
+   "unit": "dBz",
+   "rawRange": [
+    0,
+    100
+   ],
+   "multiplier": 1,
+   "displayRange": [
+    0,
+    100
+   ],
+   "palette": "settings.mrmsReflectivityPalette",
+   "s3": "https://noaa-mrms-pds.s3.amazonaws.com/CONUS/Reflectivity_-20C_00.50/{YYYYMMDD}/MRMS_Reflectivity_-20C_00.50_{YYYYMMDD}-{HHMMSS}.grib2.gz",
+   "ncep": "https://mrms.ncep.noaa.gov/2D/Reflectivity_-20C/",
+   "prefix": "MRMS_Reflectivity_-20C_00.50_"
+  },
+  {
+   "index": 34,
+   "label": "H50 Above 0°C",
+   "category": "Hail",
+   "categoryIndex": 2,
+   "refreshMin": 2,
+   "flag2": 0,
+   "unit": "kft",
+   "rawRange": [
+    0,
+    12
+   ],
+   "multiplier": 3.28084,
+   "displayRange": [
+    0,
+    39.37008
+   ],
+   "palette": "ext.settings.mrmsHailDepthPalette",
+   "s3": "https://noaa-mrms-pds.s3.amazonaws.com/CONUS/H50_Above_0C_00.50/{YYYYMMDD}/MRMS_H50_Above_0C_00.50_{YYYYMMDD}-{HHMMSS}.grib2.gz",
+   "ncep": "https://mrms.ncep.noaa.gov/2D/H50_Above_0C/",
+   "prefix": "MRMS_H50_Above_0C_00.50_"
+  },
+  {
+   "index": 35,
+   "label": "H50 Above -20°C",
+   "category": "Hail",
+   "categoryIndex": 2,
+   "refreshMin": 2,
+   "flag2": 0,
+   "unit": "kft",
+   "rawRange": [
+    0,
+    12
+   ],
+   "multiplier": 3.28084,
+   "displayRange": [
+    0,
+    39.37008
+   ],
+   "palette": "ext.settings.mrmsHailDepthPalette",
+   "s3": "https://noaa-mrms-pds.s3.amazonaws.com/CONUS/H50_Above_-20C_00.50/{YYYYMMDD}/MRMS_H50_Above_-20C_00.50_{YYYYMMDD}-{HHMMSS}.grib2.gz",
+   "ncep": "https://mrms.ncep.noaa.gov/2D/H50_Above_-20C/",
+   "prefix": "MRMS_H50_Above_-20C_00.50_"
+  },
+  {
+   "index": 36,
+   "label": "H60 Above 0°C",
+   "category": "Hail",
+   "categoryIndex": 2,
+   "refreshMin": 2,
+   "flag2": 0,
+   "unit": "kft",
+   "rawRange": [
+    0,
+    12
+   ],
+   "multiplier": 3.28084,
+   "displayRange": [
+    0,
+    39.37008
+   ],
+   "palette": "ext.settings.mrmsHailDepthPalette",
+   "s3": "https://noaa-mrms-pds.s3.amazonaws.com/CONUS/H60_Above_0C_00.50/{YYYYMMDD}/MRMS_H60_Above_0C_00.50_{YYYYMMDD}-{HHMMSS}.grib2.gz",
+   "ncep": "https://mrms.ncep.noaa.gov/2D/H60_Above_0C/",
+   "prefix": "MRMS_H60_Above_0C_00.50_"
+  },
+  {
+   "index": 37,
+   "label": "H60 Above -20°C",
+   "category": "Hail",
+   "categoryIndex": 2,
+   "refreshMin": 2,
+   "flag2": 0,
+   "unit": "kft",
+   "rawRange": [
+    0,
+    12
+   ],
+   "multiplier": 3.28084,
+   "displayRange": [
+    0,
+    39.37008
+   ],
+   "palette": "ext.settings.mrmsHailDepthPalette",
+   "s3": "https://noaa-mrms-pds.s3.amazonaws.com/CONUS/H60_Above_-20C_00.50/{YYYYMMDD}/MRMS_H60_Above_-20C_00.50_{YYYYMMDD}-{HHMMSS}.grib2.gz",
+   "ncep": "https://mrms.ncep.noaa.gov/2D/H60_Above_-20C/",
+   "prefix": "MRMS_H60_Above_-20C_00.50_"
+  },
+  {
+   "index": 38,
+   "label": "Echo Tops 50 dBZ",
+   "category": "Convective",
+   "categoryIndex": 5,
+   "refreshMin": 2,
+   "flag2": 0,
+   "unit": "kft",
+   "rawRange": [
+    0,
+    20
+   ],
+   "multiplier": 3.28084,
+   "displayRange": [
+    0,
+    65.6168
+   ],
+   "palette": "settings.mrmsETPalette",
+   "s3": "https://noaa-mrms-pds.s3.amazonaws.com/CONUS/EchoTop_50_00.50/{YYYYMMDD}/MRMS_EchoTop_50_00.50_{YYYYMMDD}-{HHMMSS}.grib2.gz",
+   "ncep": "https://mrms.ncep.noaa.gov/2D/EchoTop_50/",
+   "prefix": "MRMS_EchoTop_50_00.50_"
+  },
+  {
+   "index": 39,
+   "label": "Echo Tops 60 dBZ",
+   "category": "Convective",
+   "categoryIndex": 5,
+   "refreshMin": 2,
+   "flag2": 0,
+   "unit": "kft",
+   "rawRange": [
+    0,
+    20
+   ],
+   "multiplier": 3.28084,
+   "displayRange": [
+    0,
+    65.6168
+   ],
+   "palette": "settings.mrmsETPalette",
+   "s3": "https://noaa-mrms-pds.s3.amazonaws.com/CONUS/EchoTop_60_00.50/{YYYYMMDD}/MRMS_EchoTop_60_00.50_{YYYYMMDD}-{HHMMSS}.grib2.gz",
+   "ncep": "https://mrms.ncep.noaa.gov/2D/EchoTop_60/",
+   "prefix": "MRMS_EchoTop_60_00.50_"
+  },
+  {
+   "index": 40,
+   "label": "48 Hour QPE (Multi-Sensor)",
+   "category": "Precipitation Amount",
+   "categoryIndex": 1,
+   "refreshMin": 60,
+   "flag2": 0,
+   "unit": "in",
+   "rawRange": [
+    0,
+    508
+   ],
+   "multiplier": 0.0393701,
+   "displayRange": [
+    0,
+    20.000011
+   ],
+   "palette": "settings.mrms24HrPrecipPalette",
+   "s3": "https://noaa-mrms-pds.s3.amazonaws.com/CONUS/MultiSensor_QPE_48H_Pass2_00.00/{YYYYMMDD}/MRMS_MultiSensor_QPE_48H_Pass2_00.00_{YYYYMMDD}-{HHMMSS}.grib2.gz",
+   "ncep": "https://mrms.ncep.noaa.gov/2D/MultiSensor_QPE_48H_Pass2/",
+   "prefix": "MRMS_MultiSensor_QPE_48H_Pass2_00.00_"
+  },
+  {
+   "index": 41,
+   "label": "72 Hour QPE (Multi-Sensor)",
+   "category": "Precipitation Amount",
+   "categoryIndex": 1,
+   "refreshMin": 60,
+   "flag2": 0,
+   "unit": "in",
+   "rawRange": [
+    0,
+    508
+   ],
+   "multiplier": 0.0393701,
+   "displayRange": [
+    0,
+    20.000011
+   ],
+   "palette": "settings.mrms24HrPrecipPalette",
+   "s3": "https://noaa-mrms-pds.s3.amazonaws.com/CONUS/MultiSensor_QPE_72H_Pass2_00.00/{YYYYMMDD}/MRMS_MultiSensor_QPE_72H_Pass2_00.00_{YYYYMMDD}-{HHMMSS}.grib2.gz",
+   "ncep": "https://mrms.ncep.noaa.gov/2D/MultiSensor_QPE_72H_Pass2/",
+   "prefix": "MRMS_MultiSensor_QPE_72H_Pass2_00.00_"
+  },
+  {
+   "index": 42,
+   "label": "Next 60min Lightning Prob",
+   "category": "Lightning",
+   "categoryIndex": 3,
+   "refreshMin": 2,
+   "flag2": 0,
+   "unit": "%",
+   "rawRange": [
+    0,
+    100
+   ],
+   "multiplier": 1,
+   "displayRange": [
+    0,
+    100
+   ],
+   "palette": "settings.mrmsLightningProbPalette",
+   "s3": "https://noaa-mrms-pds.s3.amazonaws.com/CONUS/LightningProbabilityNext60minGrid_scale_1/{YYYYMMDD}/MRMS_LightningProbabilityNext60minGrid_scale_1_{YYYYMMDD}-{HHMMSS}.grib2.gz",
+   "ncep": "https://mrms.ncep.noaa.gov/2D/LightningProbabilityNext60min/",
+   "prefix": "MRMS_LightningProbabilityNext60minGrid_scale_1_"
+  },
+  {
+   "index": 43,
+   "label": "Rotation Tracks (LL) 24hr",
+   "category": "Shear/Rotation",
+   "categoryIndex": 4,
+   "refreshMin": 30,
+   "flag2": 0,
+   "unit": "0.001/s",
+   "rawRange": [
+    0,
+    100
+   ],
+   "multiplier": 1,
+   "displayRange": [
+    0,
+    100
+   ],
+   "palette": "settings.mrmsROTTracksPalette",
+   "s3": "https://noaa-mrms-pds.s3.amazonaws.com/CONUS/RotationTrack1440min_00.50/{YYYYMMDD}/MRMS_RotationTrack1440min_00.50_{YYYYMMDD}-{HHMMSS}.grib2.gz",
+   "ncep": "https://mrms.ncep.noaa.gov/2D/RotationTrack1440min/",
+   "prefix": "MRMS_RotationTrack1440min_00.50_"
+  },
+  {
+   "index": 44,
+   "label": "Rotation Tracks (ML) 24hr",
+   "category": "Shear/Rotation",
+   "categoryIndex": 4,
+   "refreshMin": 30,
+   "flag2": 0,
+   "unit": "0.001/s",
+   "rawRange": [
+    0,
+    100
+   ],
+   "multiplier": 1,
+   "displayRange": [
+    0,
+    100
+   ],
+   "palette": "settings.mrmsROTTracksPalette",
+   "s3": "https://noaa-mrms-pds.s3.amazonaws.com/CONUS/RotationTrackML1440min_00.50/{YYYYMMDD}/MRMS_RotationTrackML1440min_00.50_{YYYYMMDD}-{HHMMSS}.grib2.gz",
+   "ncep": "https://mrms.ncep.noaa.gov/2D/RotationTrackML1440min/",
+   "prefix": "MRMS_RotationTrackML1440min_00.50_"
+  },
+  {
+   "index": 45,
+   "label": "CREST Max Unit Streamflow",
+   "category": "Flash Flood (FLASH)",
+   "categoryIndex": 6,
+   "refreshMin": 10,
+   "flag2": 0,
+   "unit": "m³/s/km²",
+   "rawRange": [
+    0,
+    30
+   ],
+   "multiplier": 1,
+   "displayRange": [
+    0,
+    30
+   ],
+   "palette": "ext.settings.mrmsFlashStreamflowPalette",
+   "s3": "https://noaa-mrms-pds.s3.amazonaws.com/CONUS/FLASH_CREST_MAXUNITSTREAMFLOW_00.00/{YYYYMMDD}/MRMS_FLASH_CREST_MAXUNITSTREAMFLOW_00.00_{YYYYMMDD}-{HHMMSS}.grib2.gz",
+   "ncep": "https://mrms.ncep.noaa.gov/2D/FLASH/CREST_MAXUNITSTREAMFLOW/",
+   "prefix": "MRMS_FLASH_CREST_MAXUNITSTREAMFLOW_00.00_"
+  },
+  {
+   "index": 46,
+   "label": "QPE-to-FFG Ratio (max 1/3/6 hr)",
+   "category": "Flash Flood (FLASH)",
+   "categoryIndex": 6,
+   "refreshMin": 2,
+   "flag2": 0,
+   "unit": "%",
+   "rawRange": [
+    0,
+    250
+   ],
+   "multiplier": 1,
+   "displayRange": [
+    0,
+    250
+   ],
+   "palette": "ext.settings.mrmsFlashFFGRatioPalette",
+   "s3": "https://noaa-mrms-pds.s3.amazonaws.com/CONUS/FLASH_QPE_FFGMAX_00.00/{YYYYMMDD}/MRMS_FLASH_QPE_FFGMAX_00.00_{YYYYMMDD}-{HHMMSS}.grib2.gz",
+   "ncep": "https://mrms.ncep.noaa.gov/2D/FLASH/QPE_FFGMAX/",
+   "prefix": "MRMS_FLASH_QPE_FFGMAX_00.00_"
+  },
+  {
+   "index": 47,
+   "label": "QPE Recurrence Interval (max)",
+   "category": "Flash Flood (FLASH)",
+   "categoryIndex": 6,
+   "refreshMin": 2,
+   "flag2": 0,
+   "unit": "yr",
+   "rawRange": [
+    0,
+    200
+   ],
+   "multiplier": 1,
+   "displayRange": [
+    0,
+    200
+   ],
+   "palette": "ext.settings.mrmsFlashARIPalette",
+   "s3": "https://noaa-mrms-pds.s3.amazonaws.com/CONUS/FLASH_QPE_ARIMAX_00.00/{YYYYMMDD}/MRMS_FLASH_QPE_ARIMAX_00.00_{YYYYMMDD}-{HHMMSS}.grib2.gz",
+   "ncep": "https://mrms.ncep.noaa.gov/2D/FLASH/QPE_ARIMAX/",
+   "prefix": "MRMS_FLASH_QPE_ARIMAX_00.00_"
+  },
+  {
+   "index": 48,
+   "label": "Freezing Level (0°C Height MSL)",
+   "category": "Environment (Model)",
+   "categoryIndex": 7,
+   "refreshMin": 60,
+   "flag2": 0,
+   "unit": "ft",
+   "rawRange": [
+    0,
+    5500
+   ],
+   "multiplier": 3.28084,
+   "displayRange": [
+    0,
+    18044.62
+   ],
+   "palette": "ext.settings.mrmsFreezingLevelPalette",
+   "s3": "https://noaa-mrms-pds.s3.amazonaws.com/CONUS/Model_0degC_Height_00.50/{YYYYMMDD}/MRMS_Model_0degC_Height_00.50_{YYYYMMDD}-{HHMMSS}.grib2.gz",
+   "ncep": "https://mrms.ncep.noaa.gov/2D/Model_0degC_Height/",
+   "prefix": "MRMS_Model_0degC_Height_00.50_"
+  },
+  {
+   "index": 49,
+   "label": "Surface Wet-Bulb Temperature",
+   "category": "Environment (Model)",
+   "categoryIndex": 7,
+   "refreshMin": 60,
+   "flag2": 0,
+   "unit": "°C",
+   "rawRange": [
+    -30,
+    30
+   ],
+   "multiplier": 1,
+   "displayRange": [
+    -30,
+    30
+   ],
+   "palette": "ext.settings.mrmsWetBulbPalette",
+   "s3": "https://noaa-mrms-pds.s3.amazonaws.com/CONUS/Model_WetBulbTemp_00.50/{YYYYMMDD}/MRMS_Model_WetBulbTemp_00.50_{YYYYMMDD}-{HHMMSS}.grib2.gz",
+   "ncep": "https://mrms.ncep.noaa.gov/2D/Model_WetBulbTemp/",
+   "prefix": "MRMS_Model_WetBulbTemp_00.50_"
   }
  ],
  "mrmsCategories": [
@@ -713,7 +1109,9 @@ export const XPRODUCTS = {
   "Hail",
   "Lightning",
   "Shear/Rotation",
-  "Convective"
+  "Convective",
+  "Flash Flood (FLASH)",
+  "Environment (Model)"
  ],
  "meso": [
   {
@@ -2412,6 +2810,9 @@ export const XPRODUCTS = {
   "NBM",
   "RAP",
   "RAP51Hr",
+  "RRFS",
+  "RRFS84Hr",
+  "RRFSPressure",
   "CUSTOMGRIB (CUSTOMGRIB.dat)"
  ]
 } as const;

@@ -1,0 +1,457 @@
+{
+ "type": "FeatureCollection",
+ "features": [
+  {
+   "id": "https://api.weather.gov/radar/stations/ROCO2",
+   "type": "Feature",
+   "geometry": {
+    "type": "Point",
+    "coordinates": [
+     -97.45,
+     35.23
+    ]
+   },
+   "properties": {
+    "@id": "https://api.weather.gov/radar/stations/ROCO2",
+    "@type": "wx:RadarStation",
+    "id": "ROCO2",
+    "name": "Norman",
+    "stationType": "Profiler",
+    "elevation": {
+     "unitCode": "wmoUnit:m",
+     "value": 363.3
+    },
+    "timeZone": "GMT",
+    "latency": {
+     "current": null,
+     "average": null,
+     "max": null,
+     "levelTwoLastReceivedTime": null,
+     "maxLatencyTime": null,
+     "reportingHost": null,
+     "host": null
+    },
+    "rda": null
+   }
+  },
+  {
+   "id": "https://api.weather.gov/radar/stations/TMKE",
+   "type": "Feature",
+   "geometry": {
+    "type": "Point",
+    "coordinates": [
+     -88.046,
+     42.819
+    ]
+   },
+   "properties": {
+    "@id": "https://api.weather.gov/radar/stations/TMKE",
+    "@type": "wx:RadarStation",
+    "id": "TMKE",
+    "name": "Milwaukee",
+    "stationType": "TDWR",
+    "elevation": {
+     "unitCode": "wmoUnit:m",
+     "value": 284.37838
+    },
+    "timeZone": "GMT",
+    "latency": {
+     "current": {
+      "unitCode": "nwsUnit:s",
+      "value": 0.064659
+     },
+     "average": {
+      "unitCode": "nwsUnit:s",
+      "value": 0.1
+     },
+     "max": {
+      "unitCode": "nwsUnit:s",
+      "value": 0
+     },
+     "levelTwoLastReceivedTime": "2026-11-18T01:25:01+00:00",
+     "maxLatencyTime": "2026-11-18T01:03:56+00:00",
+     "reportingHost": "tdss",
+     "host": "ldm4"
+    },
+    "rda": {
+     "timestamp": "2026-11-18T01:22:04+00:00",
+     "reportingHost": "tdss",
+     "properties": {
+      "resolutionVersion": null,
+      "nl2Path": "Default",
+      "volumeCoveragePattern": "L90",
+      "buildNumber": 2,
+      "alarmSummary": "No Alarms",
+      "operabilityStatus": "RDA - On-line",
+      "status": "Operate",
+      "controlStatus": "Local Only",
+      "mode": "Operational"
+     }
+    }
+   }
+  },
+  {
+   "id": "https://api.weather.gov/radar/stations/KBOX",
+   "type": "Feature",
+   "geometry": {
+    "type": "Point",
+    "coordinates": [
+     -71.13686,
+     41.95577
+    ]
+   },
+   "properties": {
+    "@id": "https://api.weather.gov/radar/stations/KBOX",
+    "@type": "wx:RadarStation",
+    "id": "KBOX",
+    "name": "Boston",
+    "stationType": "WSR-88D",
+    "elevation": {
+     "unitCode": "wmoUnit:m",
+     "value": 35.97
+    },
+    "timeZone": "GMT",
+    "latency": {
+     "current": {
+      "unitCode": "nwsUnit:s",
+      "value": 0.142618
+     },
+     "average": {
+      "unitCode": "nwsUnit:s",
+      "value": 0.18
+     },
+     "max": {
+      "unitCode": "nwsUnit:s",
+      "value": 12
+     },
+     "levelTwoLastReceivedTime": "2026-11-18T01:24:58+00:00",
+     "maxLatencyTime": "2026-11-18T01:05:34+00:00",
+     "reportingHost": "tdss",
+     "host": "ldm4"
+    },
+    "rda": {
+     "timestamp": "2026-11-18T01:20:07+00:00",
+     "reportingHost": "tdss",
+     "properties": {
+      "resolutionVersion": 6,
+      "nl2Path": "Default",
+      "volumeCoveragePattern": "R35",
+      "controlStatus": "RPG (Remote) Only",
+      "buildNumber": 24.2,
+      "alarmSummary": "No Alarms",
+      "mode": "Operational",
+      "generatorState": "Utility PWR Available",
+      "superResolutionStatus": "Enabled",
+      "operabilityStatus": "RDA - On-line",
+      "status": "Operate",
+      "averageTransmitterPower": {
+       "unitCode": "wmoUnit:W",
+       "value": 1024
+      },
+      "reflectivityCalibrationCorrection": {
+       "unitCode": "wmoUnit:dB",
+       "value": -0.04
+      }
+     }
+    }
+   }
+  },
+  {
+   "id": "https://api.weather.gov/radar/stations/KTLX",
+   "type": "Feature",
+   "geometry": {
+    "type": "Point",
+    "coordinates": [
+     -97.27775,
+     35.33305
+    ]
+   },
+   "properties": {
+    "@id": "https://api.weather.gov/radar/stations/KTLX",
+    "@type": "wx:RadarStation",
+    "id": "KTLX",
+    "name": "Norman",
+    "stationType": "WSR-88D",
+    "elevation": {
+     "unitCode": "wmoUnit:m",
+     "value": 369.72
+    },
+    "timeZone": "GMT",
+    "latency": {
+     "current": {
+      "unitCode": "nwsUnit:s",
+      "value": 0.188984
+     },
+     "average": {
+      "unitCode": "nwsUnit:s",
+      "value": 0.17
+     },
+     "max": {
+      "unitCode": "nwsUnit:s",
+      "value": 7
+     },
+     "levelTwoLastReceivedTime": "2026-11-18T01:24:53+00:00",
+     "maxLatencyTime": "2026-11-18T01:07:51+00:00",
+     "reportingHost": "tdss",
+     "host": "ldm4"
+    },
+    "rda": {
+     "timestamp": "2026-11-18T01:24:15+00:00",
+     "reportingHost": "tdss",
+     "properties": {
+      "resolutionVersion": 6,
+      "nl2Path": "Default",
+      "volumeCoveragePattern": "R35",
+      "controlStatus": "RPG (Remote) Only",
+      "buildNumber": 24.2,
+      "alarmSummary": "No Alarms",
+      "mode": "Operational",
+      "generatorState": "Utility PWR Available",
+      "superResolutionStatus": "Enabled",
+      "operabilityStatus": "RDA - On-line",
+      "status": "Operate",
+      "averageTransmitterPower": {
+       "unitCode": "wmoUnit:W",
+       "value": 941
+      },
+      "reflectivityCalibrationCorrection": {
+       "unitCode": "wmoUnit:dB",
+       "value": -0.14
+      }
+     }
+    }
+   }
+  },
+  {
+   "id": "https://api.weather.gov/radar/stations/KSRX",
+   "type": "Feature",
+   "geometry": {
+    "type": "Point",
+    "coordinates": [
+     -94.36188,
+     35.29041
+    ]
+   },
+   "properties": {
+    "@id": "https://api.weather.gov/radar/stations/KSRX",
+    "@type": "wx:RadarStation",
+    "id": "KSRX",
+    "name": "Western Arkansas",
+    "stationType": "WSR-88D",
+    "elevation": {
+     "unitCode": "wmoUnit:m",
+     "value": 200
+    },
+    "timeZone": "GMT",
+    "latency": {
+     "current": {
+      "unitCode": "nwsUnit:s",
+      "value": 0.165413
+     },
+     "average": {
+      "unitCode": "nwsUnit:s",
+      "value": 0.33
+     },
+     "max": {
+      "unitCode": "nwsUnit:s",
+      "value": 11
+     },
+     "levelTwoLastReceivedTime": "2026-11-18T01:24:55+00:00",
+     "maxLatencyTime": "2026-11-18T01:07:54+00:00",
+     "reportingHost": "tdss",
+     "host": "ldm4"
+    },
+    "rda": {
+     "timestamp": "2026-11-18T01:23:42+00:00",
+     "reportingHost": "tdss",
+     "properties": {
+      "resolutionVersion": 6,
+      "nl2Path": "Default",
+      "volumeCoveragePattern": "R35",
+      "controlStatus": "RPG (Remote) Only",
+      "buildNumber": 24.2,
+      "alarmSummary": "No Alarms",
+      "mode": "Operational",
+      "generatorState": "Utility PWR Available",
+      "superResolutionStatus": "Enabled",
+      "operabilityStatus": "RDA - On-line",
+      "status": "Operate",
+      "averageTransmitterPower": {
+       "unitCode": "wmoUnit:W",
+       "value": 924
+      },
+      "reflectivityCalibrationCorrection": {
+       "unitCode": "wmoUnit:dB",
+       "value": 0.09
+      }
+     }
+    }
+   }
+  },
+  {
+   "id": "https://api.weather.gov/radar/stations/RODN",
+   "type": "Feature",
+   "geometry": {
+    "type": "Point",
+    "coordinates": [
+     127.90972,
+     26.30194
+    ]
+   },
+   "properties": {
+    "@id": "https://api.weather.gov/radar/stations/RODN",
+    "@type": "wx:RadarStation",
+    "id": "RODN",
+    "name": "Kadena AB",
+    "stationType": "WSR-88D",
+    "elevation": {
+     "unitCode": "wmoUnit:m",
+     "value": 91
+    },
+    "timeZone": "GMT",
+    "latency": {
+     "current": null,
+     "average": null,
+     "max": null,
+     "levelTwoLastReceivedTime": null,
+     "maxLatencyTime": null,
+     "reportingHost": null,
+     "host": null
+    },
+    "rda": null
+   }
+  },
+  {
+   "id": "https://api.weather.gov/radar/stations/KMXX",
+   "type": "Feature",
+   "geometry": {
+    "type": "Point",
+    "coordinates": [
+     -85.78975,
+     32.53664
+    ]
+   },
+   "properties": {
+    "@id": "https://api.weather.gov/radar/stations/KMXX",
+    "@type": "wx:RadarStation",
+    "id": "KMXX",
+    "name": "Maxwell AFB",
+    "stationType": "WSR-88D",
+    "elevation": {
+     "unitCode": "wmoUnit:m",
+     "value": 136
+    },
+    "timeZone": "GMT",
+    "latency": {
+     "current": {
+      "unitCode": "nwsUnit:s",
+      "value": 0.885655
+     },
+     "average": {
+      "unitCode": "nwsUnit:s",
+      "value": 0.83
+     },
+     "max": {
+      "unitCode": "nwsUnit:s",
+      "value": 13
+     },
+     "levelTwoLastReceivedTime": "2026-11-16T20:13:28+00:00",
+     "maxLatencyTime": "2026-11-16T20:02:23+00:00",
+     "reportingHost": "tdss",
+     "host": "ldm4"
+    },
+    "rda": {
+     "timestamp": "2026-11-16T20:13:26+00:00",
+     "reportingHost": "tdss",
+     "properties": {
+      "resolutionVersion": 6,
+      "nl2Path": "Default",
+      "volumeCoveragePattern": "R35",
+      "controlStatus": "Either",
+      "buildNumber": 24.2,
+      "alarmSummary": "Pedestal",
+      "mode": "Operational",
+      "generatorState": "Utility PWR Available",
+      "superResolutionStatus": "Enabled",
+      "operabilityStatus": "RDA - Inoperable",
+      "status": "Start-Up",
+      "averageTransmitterPower": {
+       "unitCode": "wmoUnit:W",
+       "value": 1013
+      },
+      "reflectivityCalibrationCorrection": {
+       "unitCode": "wmoUnit:dB",
+       "value": -0.19
+      }
+     }
+    }
+   }
+  },
+  {
+   "id": "https://api.weather.gov/radar/stations/KPUX",
+   "type": "Feature",
+   "geometry": {
+    "type": "Point",
+    "coordinates": [
+     -104.18138,
+     38.45944
+    ]
+   },
+   "properties": {
+    "@id": "https://api.weather.gov/radar/stations/KPUX",
+    "@type": "wx:RadarStation",
+    "id": "KPUX",
+    "name": "Pueblo",
+    "stationType": "WSR-88D",
+    "elevation": {
+     "unitCode": "wmoUnit:m",
+     "value": 1615
+    },
+    "timeZone": "GMT",
+    "latency": {
+     "current": {
+      "unitCode": "nwsUnit:s",
+      "value": 0.14165
+     },
+     "average": {
+      "unitCode": "nwsUnit:s",
+      "value": 0.18
+     },
+     "max": {
+      "unitCode": "nwsUnit:s",
+      "value": 0
+     },
+     "levelTwoLastReceivedTime": "2026-11-18T01:24:50+00:00",
+     "maxLatencyTime": "2026-11-18T01:07:05+00:00",
+     "reportingHost": "tdss",
+     "host": "ldm4"
+    },
+    "rda": {
+     "timestamp": "2026-11-18T01:22:35+00:00",
+     "reportingHost": "tdss",
+     "properties": {
+      "resolutionVersion": 6,
+      "nl2Path": "Default",
+      "volumeCoveragePattern": "R35",
+      "controlStatus": "RPG (Remote) Only",
+      "buildNumber": 24.1,
+      "alarmSummary": "Tower/Utilities|Receiver",
+      "mode": "Operational",
+      "generatorState": "Utility PWR Available",
+      "superResolutionStatus": "Enabled",
+      "operabilityStatus": "RDA - Maintenance Action Mandatory",
+      "status": "Operate",
+      "averageTransmitterPower": {
+       "unitCode": "wmoUnit:W",
+       "value": 801
+      },
+      "reflectivityCalibrationCorrection": {
+       "unitCode": "wmoUnit:dB",
+       "value": 0.52
+      }
+     }
+    }
+   }
+  }
+ ]
+}

@@ -51,6 +51,7 @@ import { XSECTIONS } from '../generated/products-expanded';
 import { FramePacer, fpsLimit } from './pacer';
 import { pref, prefObject, loadPref, savePref, isArray, isBool, onSaveFailure, describeStorageError, DATA_CACHE, storeUserFile, userFileUrl } from './persist';
 import { anisotropyOf } from '../render/mips';
+import { radarStatus, radarStatusDetail } from '../radar/status';
 
 type Tool = null | 'line' | 'path' | 'radial' | 'motion' | 'manualTrack' | 'light' | 'telestrate' | 'annotate' | 'labelPlace';
 
@@ -1187,7 +1188,7 @@ export class App {
     let text = '';
     const a = this.warnings.enabled() ? this.warnings.hit(x, y, timeline.t) : null;
     if (a) text = `${a.event}\nExpires ${new Date(a.ends).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}${a.motion ? '\n' + a.motion : ''}`;
-    if (!text && settings.bool('settings.nexradSitesOn')) { const id = this.sites.hit(x, y); if (id) { const s = RADAR_SITES.find((q) => q.id === id)!; text = `${s.id} ${titleCase(s.name)}, ${s.st} (${s.type})`; } }
+    if (!text && settings.bool('settings.nexradSitesOn')) { const id = this.sites.hit(x, y); if (id) { const s = RADAR_SITES.find((q) => q.id === id)!; text = `${s.id} ${titleCase(s.name)}, ${s.st} (${s.type})\n${radarStatusDetail(radarStatus.get(id))}`; } }
     if (!text) { const info = this.objectInfo(x, y); if (info) text = info.slice(0, 4).join('\n'); }
     const ll = this.renderer.camera.pick(x, y);
     if (ll) {
