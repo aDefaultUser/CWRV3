@@ -24,7 +24,9 @@ WebGPU needs a hardware adapter: on Linux `chromium --enable-unsafe-webgpu --ena
 - `src/settings/` — `store.ts` (one localStorage record per setting, coercion, dialog edit/Cancel), `exclusions.ts`
   (settings shown disabled with a reason).
 - `src/ui/` — `form.ts` renders the original form geometry (`src/generated/ui-forms.ts`) with explicit bindings
-  from `bindings.ts`; controls without a binding fall back to the catalog's single-setting binding.
+  from `bindings.ts`; controls without a binding fall back to the catalog's single-setting binding. `ui-forms.ts` is
+  one JSON line: add new dialogs in their own form files (`ui-forms-analysis.ts`, `ui-forms-archive.ts`,
+  `ui-forms-panes.ts`), which `form.ts` also looks up.
 - `src/layers/`, `src/sections/` — map layers (`MapLayer`: `refresh`, `draw`, `legends`, `probeKind`/`probeText`,
   `probeAt`); `nexrad.ts` is NEXRAD Level 2/3, `goes-l2.ts` the GOES L2+ products.
 - `src/render/` — WebGPU renderer, shaders, raster/radar draws, basemap tiles (`tiles.ts`) and GPU mips. A layer's
@@ -32,8 +34,6 @@ WebGPU needs a hardware adapter: on Linux `chromium --enable-unsafe-webgpu --ena
 - Radar volumes: `src/radar/volume-pack.ts` (every tilt of one moment on a fixed azimuth frame, worker task
   `l2.volume`), `src/radar/volume-sample.ts` (reference sampler: azimuth, ground range, height → value) and
   `src/render/volume.ts` (`VolumeStore`, the WGSL mirror `volumeWgsl`, `VolumeSection`); `NexradLayer.volumePack`.
-  3D view: `src/layers/radar-volume3d.ts` (settings, pack of the shown frame), `src/render/volume-view.ts` (march
-  target, composite), `src/render/volume-ray.ts` (reference ray math); packs carry an occupancy grid for skipping.
   3D view: `src/layers/radar-volume3d.ts` (settings, pack of the shown frame), `src/render/volume-view.ts` (march
   target, composite), `src/render/volume-ray.ts` (reference ray math); packs carry an occupancy grid for skipping.
 - Linked panes: `src/render/panes.ts` (grid geometry, pane-relative points), `src/app/panes.ts` (layout, views of
