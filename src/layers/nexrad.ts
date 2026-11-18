@@ -1,6 +1,6 @@
 // NEXRAD Pro (30): Level 2 volumes (all 17 products, tilts with split-cut/SAILS/MRLE handling, scan transitions,
 // live sweep, live composite) and Level 3 products/overlays, with probe value mapping.
-import type { DrawContext, Renderer } from '../render/renderer';
+import type { DrawContext, PrepassContext, Renderer } from '../render/renderer';
 import { MapLayer, NOT_AVAILABLE, type LegendSpec } from './base';
 import { bracket, timeline } from '../app/timeline';
 import { settings } from '../settings/store';
@@ -27,6 +27,8 @@ import { RadarTools } from './radar-tools';
 import { AWS_L3, IEM_DS, iemAttrUrl, iemStormProducts, l3ArchiveCode, l3ArchiveCodes, listL3Archive } from '../radar/archive';
 import { fetchJson } from '../data/net';
 import { archiveCache } from '../data/iem';
+import { CrossSection } from './cross-section';
+import { RadarTrail } from './radar-trail';
 
 export interface TiltTab { key: string; label: string; angle: number; sweepIndices: number[] }
 
@@ -34,7 +36,7 @@ export interface TiltTab { key: string; label: string; angle: number; sweepIndic
  * A Level 2 volume. `sweep.id` is the display identity the sweep was built for (NexradLayer.l2Identity), `key` the
  * exact request it came from, `req` the newest request in flight and `metaReq` the newest metadata read.
  */
-interface L2Frame { t: number; file: L2File; meta?: L2Meta; sweep?: SweepTex & { elevation: number; startMs: number; endMs: number; complete: boolean; progress: number; id: string; motion: string }; key?: string; req?: string; metaReq?: number; error?: string }
+interface L2Frame { t: number; file: L2File; meta?: L2Meta; sweep?: SweepTex & { elevation: number; startMs: number; endMs: number; complete: boolean; progress: number; id: string; motion: string; rolling?: { liveTilts: number; prevTilts: number } }; key?: string; req?: string; metaReq?: number; error?: string }
 /** A Level 3 file; `id` is the site and product it belongs to (NexradLayer.l3Identity). */
 interface L3Frame { t: number; url: string; id: string; tex?: SweepTex; raster?: { tex: GPUTexture; bounds: [number, number, number, number]; nx: number; ny: number }; vcp?: number; volumeTimeMs?: number; volumeScan?: number; loading?: boolean; error?: string; elevation?: number }
 
@@ -161,7 +163,10 @@ export class NexradLayer extends MapLayer {
    * Call it every frame the pack is wanted: a pack nobody asks for is dropped.
    */
   volumePack(moment: VolumeMoment): GpuPack | null { const q = this.volumeRequest(moment); return q && this.volumes.get(q); }
-  prepass() { this.volumes.pump(); }
+  prepass(ctx: PrepassContext) { this.volumes.pump(); this.section.prepass(ctx); this.trail.prepass(ctx); }
+  /** The vertical cross-section / RHI tool and the max-value trail. */
+  readonly section: CrossSection;
+  readonly trail: RadarTrail;
 
   constructor(r: Renderer, atlas: GlyphAtlas) {
     super(r);
@@ -170,6 +175,8 @@ export class NexradLayer extends MapLayer {
     this.ageText = new TextSet(r, atlas);
     this.tools = new RadarTools(r, atlas, this);
     this.volumes = new VolumeStore(r, this.id);
+    this.section = new CrossSection(r, atlas, this);
+    this.trail = new RadarTrail(r, this);
     onIsotherms(this.isothermsArrived);
   }
 
@@ -192,8 +199,10 @@ export class NexradLayer extends MapLayer {
     const p = this.product(), tilt = this.liveComposite || p >= 11 ? '' : this.tiltAngle;
     // Automatic storm motion is per volume (each sweep records the vector it was built with; see fits).
     const auto = !settings.bool('settings.nexradStormMotionCustom');
-    return `${this.currentSite()}|${p}|${this.liveComposite}|${tilt}|${algorithmKey(p, this.algorithmParams(), auto)}`;
+    return `${this.currentSite()}|${p}|${this.liveComposite}|${tilt}|${algorithmKey(p, this.algorithmParams(), auto)}${this.rolling() ? '|rolling' : ''}`;
   }
+  /** Rolling mode of the live volume's volume products (11–19): tilts not yet rescanned come from the previous volume. */
+  rolling() { return settings.bool('ext.settings.nexradLevel2Rolling') && !this.liveComposite && this.product() >= 11; }
   l3Identity(): string { return `${this.currentSite()}|${this.l3Entry().ds}`; }
   private shownL2(): L2Frame[] { const id = this.l2Identity(); return this.l2.filter((f) => this.fits(f, id)); }
   /** A sweep fits its identity; storm-relative velocity also only while built with its volume's current storm motion. */
@@ -366,7 +375,7 @@ export class NexradLayer extends MapLayer {
     if (gen === this.gen) this.updateL2Status();
   }
 
-  private sweepFor(meta: L2Meta, product: number): number | null {
+  sweepFor(meta: L2Meta, product: number): number | null {
     if (product >= 11) return 0;
     const need = l2Moment(product);
     const showSplit = settings.bool('settings.nexradLevel2ShowSplitCuts');
@@ -409,14 +418,17 @@ export class NexradLayer extends MapLayer {
       if (this.l2Identity() !== id) return; // the selection changed meanwhile; its own request follows
       const sweepIdx = composite ? -1 : this.sweepFor(meta, product);
       const params = this.buildParams(f.t);
-      key = `${id}|${sweepIdx}|${JSON.stringify(params)}|${meta.sweeps.length}|${meta.sweeps[meta.sweeps.length - 1]?.radials}`;
+      // Rolling: a live volume's product also reads the previous complete volume (its own identity, see l2Identity).
+      const prev = this.rolling() && f.file.live ? this.l2.filter((x) => !x.file.live && x.t < f.t).pop() : undefined;
+      const rolling = prev && { url: prev.file.url, chunks: prev.file.chunks };
+      key = `${id}|${sweepIdx}|${JSON.stringify(params)}|${meta.sweeps.length}|${meta.sweeps[meta.sweeps.length - 1]?.radials}|${rolling?.url ?? ''}`;
       if (f.key === key) { f.req = undefined; return; } // already built (or known unavailable); an older request in flight is superseded
       if (f.req === key) return;
       if (sweepIdx === null) { f.error = 'product not in this volume'; this.dropSweep(f); f.key = key; f.req = undefined; this.updateL2Status(); return; }
       f.req = key;
       const res = composite
         ? await pool.for(this.id).run('l2.composite', { url: f.file.url, live: f.file.live, chunks: f.file.chunks, base: settings.num('settings.nexradLevel2LiveCompositeCAPPIBase'), top: settings.num('settings.nexradLevel2LiveCompositeCAPPITop'), selectiveMax: settings.bool('settings.nexradLevel2LiveCompositeSelectiveMaximum') }, f.file.url)
-        : await pool.for(this.id).run('l2.product', { url: f.file.url, live: f.file.live, chunks: f.file.chunks, sweep: sweepIdx, product, params }, f.file.url);
+        : await pool.for(this.id).run('l2.product', { url: f.file.url, live: f.file.live, chunks: f.file.chunks, sweep: sweepIdx, product, params, rolling }, f.file.url);
       if (f.req !== key) return; // a newer request for this volume replaced this one
       f.req = undefined;
       if (!current() || this.l2Identity() !== id) return;
@@ -425,7 +437,7 @@ export class NexradLayer extends MapLayer {
       const old = f.sweep;
       const tex = uploadSweep(this.r, s, this.id);
       const expected = s.half ? 720 : 360;
-      f.sweep = { ...tex, elevation: s.elevation, startMs: s.startMs, endMs: s.endMs, complete: s.complete, progress: Math.min(1, s.radials / expected), id, motion: JSON.stringify(params.stormMotion) };
+      f.sweep = { ...tex, elevation: s.elevation, startMs: s.startMs, endMs: s.endMs, complete: s.complete, progress: Math.min(1, s.radials / expected), id, motion: JSON.stringify(params.stormMotion), rolling: s.rolling };
       if (old?.id === id && f.file.live) { this.wipeStart = performance.now(); this.wipeFromKey = f.key ?? ''; }
       // Live-composite update effect: flash when the newest composite changes (not on the first load).
       if (composite && f === this.l2[this.l2.length - 1]) {
@@ -861,9 +873,17 @@ export class NexradLayer extends MapLayer {
   }
 
   legends(): LegendSpec[] {
+    const trail = this.trail.legend(), own = this.productLegends();
+    return trail && own.length ? [...own, trail] : own;
+  }
+  private productLegends(): LegendSpec[] {
     if (!this.enabled() || !settings.bool('settings.nexradMapLegend')) return [];
     const d = this.displayRange();
-    const note = this.typed() && this.ptypeShown ? ptypeLabel(this.ptypeShown) : this.isL2() ? columnNote(this.product(), () => this.buildParams(this.lastDrawn?.t)) : undefined;
+    const rolled = this.isL2() && this.lastDrawn?.sweep?.rolling?.prevTilts ? this.lastDrawn.sweep : null;
+    const r = rolled?.rolling;
+    const rolling = rolled && r && `Rolling volume: ${r.prevTilts} of ${r.liveTilts + r.prevTilts} tilts from the previous volume · data ${utcHm(rolled.startMs)}–${utcHm(rolled.endMs)}Z`;
+    const column = this.isL2() ? columnNote(this.product(), () => this.buildParams(this.lastDrawn?.t)) : undefined;
+    const note = this.typed() && this.ptypeShown ? ptypeLabel(this.ptypeShown) : [rolling, column].filter(Boolean).join(' · ') || undefined;
     if (this.typed() && this.ptypeShown?.status === 'ready') {
       const L = (k: string) => ({ palette: getPalette(settings.str(k)), lut: this.lut(settings.str(k), d.low, d.high, d.reserve, d.top) });
       const extra: NonNullable<LegendSpec['extra']> = [];
@@ -1027,6 +1047,7 @@ export class NexradLayer extends MapLayer {
         }
       }
     }
+    if (info && this.enabled()) this.trail.draw(ctx, info);
     // Live beam (settings.nexradLiveBeam): a line from the radar along the newest radial of an incomplete live sweep.
     if (!ctx.probe && info && this.enabled() && this.isL2() && this.liveAz !== null && settings.bool('settings.nexradLiveBeam')) {
       this.beam ??= new LineSet(this.r);
@@ -1043,6 +1064,7 @@ export class NexradLayer extends MapLayer {
     if (!ctx.probe) this.syncOverlays(radarT, radarScan);
     if (!ctx.probe) { this.overlayFill.draw(ctx); this.overlayLines.draw(ctx); this.overlayPts.draw(ctx); this.overlayText.draw(ctx); }
     if (!ctx.probe && info) this.tools.draw(ctx, info);
+    this.section.draw(ctx);
     if (!ctx.probe && this.dataAge && settings.bool('settings.nexradLiveScanDataAgeIndicator') && !settings.bool('settings.nexradLiveScanDataAgeIndicatorLegacy')) this.ageText.draw(ctx);
   }
 

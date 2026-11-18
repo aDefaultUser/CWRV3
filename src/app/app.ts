@@ -60,7 +60,7 @@ import { archiveBadge } from './archive';
 import { NOT_AVAILABLE } from '../layers/base';
 import { openSounding } from '../ui/sounding-panel';
 
-type Tool = null | 'line' | 'path' | 'radial' | 'motion' | 'manualTrack' | 'light' | 'telestrate' | 'annotate' | 'labelPlace' | 'vrShear' | 'sounding';
+type Tool = null | 'line' | 'path' | 'radial' | 'motion' | 'manualTrack' | 'light' | 'telestrate' | 'annotate' | 'labelPlace' | 'vrShear' | 'sounding' | 'section';
 
 export class App {
   renderer: Renderer;
@@ -157,6 +157,7 @@ export class App {
     this.annotations = new AnnotationLayer(r, this.atlas);
     this.annotations.cities = () => cities.list() as unknown as CityPt[];
     this.nexrad.trackingMode = () => this.cellTracking;
+    this.nexrad.section.onClear = () => { if (this.tool === 'section') { this.tool = null; this.canvas.style.cursor = ''; } };
     this.annotations.gpsFix = () => this.gps.fix;
     this.gps.onUpdate = () => {
       this.annotations.dirty = true;
@@ -317,6 +318,7 @@ export class App {
     on('settings.nexradQualityDealiasing', () => { this.nexrad.reloadProducts(); this.customRadar.reloadProducts(); });
     on('settings.nexradStormMotion', () => this.nexrad.reloadProducts());
     on('settings.nexradLevel2ShowSplitCuts', () => this.nexrad.reloadProducts());
+    on('ext.settings.nexradLevel2Rolling', () => this.nexrad.reloadProducts());
     on('settings.nexradL2', () => this.refreshLayer('nexrad'));
     on('settings.nexradSiteICAO', () => this.siteChanged());
     on('settings.nexradLevel2MaxVolumeDownloadCount', () => this.refreshLayer('nexrad'));
@@ -750,6 +752,7 @@ export class App {
     if (t === 'manualTrack' && this.tool) { this.annotations.manualTrack = null; this.toast('Manual track: click the storm, or several points along a line; right-click to finish.'); }
     if (t === 'vrShear' && this.tool) { const err = this.nexrad.tools.startShear(); if (err) { this.toast(err); this.tool = null; } }
     if (t === 'sounding' && this.tool) this.toast('Sounding: click a point on the map');
+    if (t === 'section') { this.nexrad.section.cancelPlacing(); if (this.tool) this.toast(`Cross-section${settings.bool('ext.settings.nexradSectionRhi') ? ' (RHI)' : ''}: drag from A to B, or click A then B · Esc cancels`); }
     if (t === 'motion' && this.centerForMotion) { const s = this.nexrad.siteInfo(); if (s) this.renderer.camera.flyTo({ lon: s.lon, lat: s.lat }, 800); }
     this.canvas.style.cursor = this.tool ? 'crosshair' : '';
     this.annotations.dirty = true;
@@ -1081,13 +1084,23 @@ export class App {
 
   private wireInput() {
     const cv = this.canvas, cam = this.renderer.camera;
-    let drag: null | { mode: 'pan' | 'tilt' | 'zoom' | 'box' | 'tele'; x: number; y: number; moved: boolean; button: number; ctrl: boolean } = null;
+    let drag: null | { mode: 'pan' | 'tilt' | 'zoom' | 'box' | 'tele' | 'section'; x: number; y: number; moved: boolean; button: number; ctrl: boolean } = null;
+    let sectionHandle: 'a' | 'b' | null = null;
     let boxEl: HTMLDivElement | null = null;
     cv.addEventListener('contextmenu', (e) => e.preventDefault());
     cv.addEventListener('mousedown', (e) => {
       this.poke();
       const ctrl = e.ctrlKey;
       if (this.tool === 'telestrate' && e.button === 0) { drag = { mode: 'tele', x: e.offsetX, y: e.offsetY, moved: false, button: 0, ctrl }; this.annotations.telestration.push([]); return; }
+      // Cross-section: the tool places A (drag to B, or click twice); an end point handle drags whatever tool is active.
+      const handle = e.button === 0 && !this.nexrad.section.placing ? this.nexrad.section.handleAt(e.offsetX, e.offsetY) : null;
+      if (handle || (this.tool === 'section' && e.button === 0)) {
+        const ll = cam.pick(e.offsetX, e.offsetY);
+        if (!handle && ll) this.nexrad.section.press(ll);
+        sectionHandle = handle;
+        drag = { mode: 'section', x: e.offsetX, y: e.offsetY, moved: false, button: 0, ctrl };
+        return;
+      }
       const mode = e.button === 0 ? (ctrl && !settings.bool('config.generalCameraDisableTiltSwivel') ? 'tilt' : 'pan') : e.button === 2 ? (ctrl ? 'box' : 'zoom') : 'pan';
       drag = { mode, x: e.offsetX, y: e.offsetY, moved: false, button: e.button, ctrl };
     });
@@ -1117,6 +1130,9 @@ export class App {
       } else if (drag.mode === 'tele') {
         const ll = cam.pick(x, y);
         if (ll) { this.annotations.telestration[this.annotations.telestration.length - 1].push(ll); this.annotations.dirty = true; }
+      } else if (drag.mode === 'section') {
+        const ll = cam.pick(x, y);
+        if (ll && drag.moved) { if (sectionHandle) this.nexrad.section.dragHandle(sectionHandle, ll); else this.nexrad.section.move(ll); }
       }
     });
     window.addEventListener('mouseup', (e) => {
@@ -1124,6 +1140,12 @@ export class App {
       const rect = cv.getBoundingClientRect();
       const x = e.clientX - rect.left, y = e.clientY - rect.top;
       const d = drag; drag = null;
+      if (d.mode === 'section') {
+        const ll = cam.pick(x, y);
+        if (!sectionHandle && ll && this.nexrad.section.release(ll, d.moved)) { this.tool = null; this.canvas.style.cursor = ''; }
+        sectionHandle = null;
+        return;
+      }
       if (d.mode === 'box') {
         boxEl?.remove(); boxEl = null;
         const ll = cam.pick((x + d.x) / 2, (y + d.y) / 2);
@@ -1157,6 +1179,7 @@ export class App {
       this.sites.mouse = this.mouse;
       if (settings.num('config.generalMapMode') === 2) { this.renderer.probeRequest = { x: e.offsetX, y: e.offsetY }; this.cpuProbe = this.objectInfo(e.offsetX, e.offsetY); }
       if (this.tool === 'radial' && this.annotations.radialOrigin) { const ll = cam.pick(e.offsetX, e.offsetY); if (ll) { this.annotations.radial = ll; this.annotations.dirty = true; } }
+      if (this.tool === 'section' && this.nexrad.section.placing?.clicked) { const ll = cam.pick(e.offsetX, e.offsetY); if (ll) this.nexrad.section.move(ll); }
       if (settings.num('config.generalMapMode') === 1) this.rollover(e.offsetX, e.offsetY);
       if (this.roadNaming && settings.num('config.roadLabelMode') !== 1) {
         const hit = this.roads.nameAt(e.offsetX, e.offsetY), tip = this.hud.roadTip;
@@ -1308,10 +1331,11 @@ export class App {
       } else if (e.altKey && k === 'd') { e.preventDefault(); this.startMeasure('path'); }
       else if (e.altKey && k === 'l') { e.preventDefault(); this.toggleRoadNaming(); }
       else if (e.altKey && (k === 'v' || k === 's')) { e.preventDefault(); this.startMeasure(k === 'v' ? 'vrShear' : 'sounding'); }
+      else if (e.altKey && k === 'x') { e.preventDefault(); this.startMeasure('section'); }
       else if (e.altKey && /^f(\d{1,2})$/.test(k)) { e.preventDefault(); this.applyScene(Number(k.slice(1)) - 1); }
       else if (!e.ctrlKey && !e.altKey && k === 'r') settings.set('settings.nexradSitesOn', !settings.bool('settings.nexradSitesOn'));
       else if (k === ' ' && !e.ctrlKey) { e.preventDefault(); this.clearTelestration(); }
-      else if (k === 'escape') { this.tool = null; this.canvas.style.cursor = ''; this.nexrad.tools.cancelShear(); }
+      else if (k === 'escape') { this.tool = null; this.canvas.style.cursor = ''; this.nexrad.tools.cancelShear(); this.nexrad.section.clear(); }
       else if (e.key === 'F8') { e.preventDefault(); this.perf.toggle(); }
       this.poke();
     });

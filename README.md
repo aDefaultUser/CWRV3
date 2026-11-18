@@ -122,6 +122,31 @@ Probe reads the displayed value under the pointer.
     pressure-weighted means). The panel names the station, position, run and valid time that were returned. The
     formulations follow MetPy 1.7 (Ambaum saturation pressure, Romps LCL, virtual-temperature CAPE/CIN,
     pressure-weighted Bunkers motion); the unit tests compare them with MetPy's documented values.
+  * Cross-section / RHI (Alt+X, or Draw line in the dialog) through the Level 2 volume drawn on the map: drag from A
+    to B, or click A then B. With RHI on, both ends lie on one radial from the radar (the azimuth of the point placed
+    or dragged; each end keeps its range). The end points stay draggable; Esc, Clear, the panel's close box or another
+    radar site removes the line. The panel (movable; drag its lower-right corner to resize, the plot size is saved)
+    renders the section on the GPU from every tilt of the volume (half a beamwidth around each tilt, reflectivity and
+    dual-pol blended between tilts up to two beamwidths apart, velocity from the nearer tilt) with the map's palette
+    for the moment: reflectivity, velocity (dealiased), storm-relative velocity (the shown volume's storm motion, as
+    the map), ZDR, CC or KDP. It shows heights from 0 to the maximum height (kft or km above the radar, per the
+    distance units), the distance from A (an RHI: the range from the radar), optional beam-centre lines of each tilt
+    and the 0/−10/−20 °C heights (HRRR at the radar, or the custom heights; "estimated" −10 °C as for the column
+    products), a legend and a header with the site, volume time and moment. It follows the volume drawn as the loop
+    plays (the previous section stays, labelled with its own volume time, while the next volume uploads). Moving the
+    pointer over the plot reads the value with the reference sampler, the height above radar level and sea level, the
+    ground and slant range and the nearest tilt. "Follow storm motion" moves the end points with the shown volume's
+    storm motion from the time the line was placed or last edited, like a manual storm track.
+  * Max-value trail: the per-gate maximum of a Level 2 product over the complete volumes of the loop (window 0), or
+    over the volumes within the last N minutes up to the volume shown, drawn over the radar at the chosen opacity:
+    hail core, ZDR column, KDP column, azimuthal shear, VIL, MEHS, POSH, VIL density, echo tops, gust potential or
+    reflectivity at the shown tilt. Each volume's product is built once for the trail (site, product, tilt and
+    algorithm inputs) and the maximum is blended on the GPU; the legend reads "max over HH:MM–HH:MMZ (N volumes)".
+    The live volume still being scanned is not included; another site, product or algorithm input starts over.
+  * Rolling live volume products: with Live Sweep on, the Level 2 volume products (11–19) of the live volume use its
+    tilts scanned so far and fill the tilts above them from the previous volume. The legend reads "Rolling volume: N
+    of M tilts from the previous volume · data HH:MM–HH:MMZ" (the span of the radials used); complete volumes are
+    unchanged.
 * Archive replay (CWRV3 menu → Archive replay…): enter a UTC date and time (and optionally a radar site) and choose
   Go to time. The loop then ends at that time instead of now: radar, warnings, storm reports, SPC products, MRMS and
   satellite are loaded for it, the status bar shows **ARCHIVE yyyy-mm-dd HH:MMZ** (click it to reopen the dialog) and
@@ -167,8 +192,9 @@ repository, [aDefaultUser/CWRV3](https://github.com/aDefaultUser/CWRV3).
 
 * Drag to pan; use the wheel to zoom. Ctrl+drag tilts and swivels.
 * R toggles radar site labels; Alt+D measures distance; Alt+L adds road labels; Alt+V starts a VR-shear measurement;
-  Alt+S picks a sounding point.
-* Ctrl+T starts telestration, Space clears it, and Esc cancels the active tool (and clears the VR-shear measurement).
+  Alt+S picks a sounding point; Alt+X draws a cross-section / RHI line.
+* Ctrl+T starts telestration, Space clears it, and Esc cancels the active tool (and clears the VR-shear measurement
+  and the cross-section line).
 
 ## Development
 
@@ -181,7 +207,8 @@ npm run bench -- <label> <fixed4k|dpr1|dpr15|dpr2> --out <dir> [--fps 60|0] [--h
 
 `APP_URL` selects the server the benchmark opens (default `http://127.0.0.1:4173/`). In the browser console,
 `cwrv3bench.volumeCheck()` renders vertical sections of the drawn Level 2 volume with the GPU volume sampler and
-compares them pixel by pixel with the TypeScript reference.
+compares them pixel by pixel with the TypeScript reference; `cwrv3bench.trailCheck()` reads back the max-value trail
+drawn now and compares it texel by texel with the TypeScript blend reference over the same volumes.
 
 The benchmark (`tools/perf/run-bench.mjs`) drives an isolated Chromium (temporary profile, DevTools port 9333) against
 the production build; Level 2 runs use the fixed KTLX archive volumes listed in `public/perf-fixtures.json`.
@@ -320,7 +347,7 @@ profiles from `api/1/nws/bufkit.json`, and for archive replay `api/1/vtec/sbw_in
 
 | Part | Lines |
 | --- | ---: |
-| TypeScript / JavaScript | 19,946 |
-| WGSL shaders | 753 |
-| **Total functional** | **20,699** |
+| TypeScript / JavaScript | 20,752 |
+| WGSL shaders | 788 |
+| **Total functional** | **21,540** |
 | CSS (separate) | 175 |

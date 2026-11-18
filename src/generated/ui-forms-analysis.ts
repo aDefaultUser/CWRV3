@@ -4,7 +4,7 @@ import type { FormDef } from '../ui/form-types';
 const F = 'TFrmRadarAnalysis';
 const c = (name: string, cls: string, parent: string, l: number, t: number, w: number, h: number, caption?: string, extra: object = {}) => ({ id: `ui.${F}.${name}`, name, cls, parent, l, t, w, h, caption, ...extra });
 
-/** Radar Analysis Tools: range rings, VR shear and the sounding tool. */
+/** Radar Analysis Tools: range rings, VR shear, soundings, the cross-section, the max-value trail and rolling volume products. */
 export const ANALYSIS_FORMS: readonly FormDef[] = [{
   form: F, scope: 'nexrad-pro', controls: [
     { id: `ui.${F}.FrmRadarAnalysis`, name: 'FrmRadarAnalysis', cls: F, parent: null, l: 0, t: 0, caption: 'Radar Analysis Tools' },
@@ -31,5 +31,34 @@ export const ANALYSIS_FORMS: readonly FormDef[] = [{
     c('gbSounding', 'TsGroupBox', 'FrmRadarAnalysis', 6, 258, 470, 58, 'Soundings and hodographs (Alt+S)'),
     c('btnSounding', 'TsBitBtn', 'gbSounding', 10, 22, 110, 26, 'Pick point'),
     c('lblSounding', 'TsLabel', 'gbSounding', 128, 26, 336, 18, 'Nearest RAOB or a model profile at the timeline time'),
+    c('gbSection', 'TsGroupBox', 'FrmRadarAnalysis', 6, 322, 470, 136, 'Cross-section / RHI of the Level 2 volume (Alt+X)'),
+    c('btnSection', 'TsBitBtn', 'gbSection', 10, 20, 110, 26, 'Draw line'),
+    c('btnSectionClear', 'TsBitBtn', 'gbSection', 126, 20, 70, 26, 'Clear'),
+    c('xsRhi', 'TsCheckBox', 'gbSection', 206, 23, 250, 20, 'RHI (along a radial from the radar)'),
+    c('lblMoment', 'TsLabel', 'gbSection', 10, 55, 52, 18, 'Moment:'),
+    c('xsMoment', 'TsComboBox', 'gbSection', 64, 51, 180, 22, undefined, { items: ['Reflectivity', 'Velocity (dealiased)', 'Storm-relative velocity', 'ZDR', 'Correlation coefficient', 'KDP'] }),
+    c('lblTop', 'TsLabel', 'gbSection', 256, 55, 72, 18, 'Max height:'),
+    c('xsTop', 'TsDecimalSpinEdit', 'gbSection', 330, 51, 56, 22, undefined, { inc: 1 }),
+    c('lblTopUnit', 'TsLabel', 'gbSection', 390, 55, 60, 18, 'km ARL'),
+    c('xsBeams', 'TsCheckBox', 'gbSection', 10, 81, 110, 20, 'Beam centres'),
+    c('xsIsotherms', 'TsCheckBox', 'gbSection', 124, 81, 170, 20, 'Isotherms (0/−10/−20 °C)'),
+    c('xsFollow', 'TsCheckBox', 'gbSection', 298, 81, 160, 20, 'Follow storm motion'),
+    c('lblSize', 'TsLabel', 'gbSection', 10, 109, 90, 18, 'Panel plot size:'),
+    c('xsWidth', 'TsSpinEdit', 'gbSection', 104, 105, 62, 22, undefined, { inc: 20 }),
+    c('lblBy', 'TsLabel', 'gbSection', 170, 109, 12, 18, '×'),
+    c('xsHeight', 'TsSpinEdit', 'gbSection', 184, 105, 62, 22, undefined, { inc: 20 }),
+    c('lblPx', 'TsLabel', 'gbSection', 250, 109, 20, 18, 'px'),
+    c('gbTrail', 'TsGroupBox', 'FrmRadarAnalysis', 6, 464, 470, 80, 'Max-value trail (Level 2 loop)'),
+    c('trOn', 'TsCheckBox', 'gbTrail', 10, 22, 100, 20, 'Show trail'),
+    c('lblProduct', 'TsLabel', 'gbTrail', 118, 24, 54, 18, 'Product:'),
+    c('trProduct', 'TsComboBox', 'gbTrail', 174, 20, 200, 22, undefined, { items: ['Hail core (19)', 'ZDR column (17)', 'KDP column (18)', 'Azimuthal shear (8)', 'VIL (13)', 'MEHS (11)', 'POSH (12)', 'VIL density (14)', 'Echo tops (15)', 'Gust potential (16)', 'Reflectivity, shown tilt (0)'] }),
+    c('lblWindow', 'TsLabel', 'gbTrail', 10, 52, 52, 18, 'Window:'),
+    c('trMinutes', 'TsSpinEdit', 'gbTrail', 64, 48, 56, 22, undefined, { inc: 10 }),
+    c('lblMinutes', 'TsLabel', 'gbTrail', 124, 52, 150, 18, 'min (0 = whole loop)'),
+    c('lblOpacity', 'TsLabel', 'gbTrail', 290, 52, 54, 18, 'Opacity:'),
+    c('trOpacity', 'TsSpinEdit', 'gbTrail', 346, 48, 56, 22, undefined, { inc: 5 }),
+    c('lblPct', 'TsLabel', 'gbTrail', 406, 52, 20, 18, '%'),
+    c('gbRolling', 'TsGroupBox', 'FrmRadarAnalysis', 6, 550, 470, 52, 'Rolling live volume products (Level 2 products 11–19)'),
+    c('rlOn', 'TsCheckBox', 'gbRolling', 10, 22, 450, 20, 'Fill tilts not yet rescanned in the live volume from the previous volume'),
   ],
 }];
