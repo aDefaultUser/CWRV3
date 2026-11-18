@@ -27,9 +27,14 @@ WebGPU needs a hardware adapter: on Linux `chromium --enable-unsafe-webgpu --ena
   from `bindings.ts`; controls without a binding fall back to the catalog's single-setting binding.
 - `src/layers/`, `src/sections/` — map layers (`MapLayer`: `refresh`, `draw`, `legends`, `probeKind`/`probeText`,
   `probeAt`); `nexrad.ts` is NEXRAD Level 2/3, `goes-l2.ts` the GOES L2+ products.
-- `src/render/` — WebGPU renderer, shaders, raster/radar draws, basemap tiles (`tiles.ts`) and GPU mips.
+- `src/render/` — WebGPU renderer, shaders, raster/radar draws, basemap tiles (`tiles.ts`) and GPU mips. A layer's
+  `prepass(ctx)` encodes its offscreen passes before the main pass (`ctx.timing()` adds them to `gpuMs`).
+- Radar volumes: `src/radar/volume-pack.ts` (every tilt of one moment on a fixed azimuth frame, worker task
+  `l2.volume`), `src/radar/volume-sample.ts` (reference sampler: azimuth, ground range, height → value) and
+  `src/render/volume.ts` (`VolumeStore`, the WGSL mirror `volumeWgsl`, `VolumeSection`); `NexradLayer.volumePack`.
 - `src/decode/`, `src/workers/` — decoders (Archive II, Level 3, GRIB2, NetCDF/HDF5 via h5wasm) run in the worker
-  pool; callers name the owner: `pool.for(layerId).run(task, args)`.
+  pool; callers name the owner: `pool.for(layerId).run(task, args)`. `l2-volumes.ts` holds the Level 2 volume cache
+  (live chunk volumes update incrementally; `tests/helpers/archive2-writer.ts` writes synthetic volumes for tests).
 - `src/perf/` — frame meter, benchmark, F8 performance panel.
 - `src/generated/` — hand-maintained catalogs (settings, forms, products); edit them directly.
 

@@ -119,9 +119,10 @@ export const L2_PALETTE_KEYS = [
   'settings.nexradLevel2StormRelativeVelocityPalette', 'settings.nexradLevel2ShearPalette', 'settings.nexradLevel2G2GShearPalette',
   'settings.nexradLevel2KDPPalette', 'settings.nexradLevel2MEHSPalette', 'settings.nexradLevel2POSHPalette', 'settings.nexradLevel2VILPalette',
   'settings.nexradLevel2VILDPalette', 'settings.nexradLevel2ETPalette', 'settings.nexradLevel2GUSTPalette',
+  'ext.settings.nexradLevel2ColumnZDRPalette', 'ext.settings.nexradLevel2ColumnKDPPalette', 'ext.settings.nexradLevel2HailCorePalette',
 ];
 
-/** Moment needed to pick the sweep for a Level 2 product. */
+/** Moment needed to pick the sweep for a Level 2 product (null for the volume products 11–19, which use every tilt). */
 export function l2Moment(product: number): 'REF' | 'VEL' | 'SW' | 'ZDR' | 'PHI' | 'RHO' | null {
   return ['REF', 'VEL', 'SW', 'ZDR', 'PHI', 'RHO', 'VEL', 'VEL', 'VEL', 'VEL', 'PHI'][product] as never ?? null;
 }

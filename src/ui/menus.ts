@@ -16,7 +16,7 @@ Map modes: Explore (no object interaction) · Interact (rollover, warnings, site
 
 About: CWRV3 — made by Cloud Nuke Software Collective.
 Original idea made by Paul Marv Software.`;
-export const L2_MENU_INDEX: Record<string, number> = { H1: 0, miOpenDialog1: 1, miSaveDialog1: 2, miOpenPictureDialog1: 3, miSavePictureDialog1: 4, miFontDialog1: 5, miAlphaColordialog1: 6, miSelectSkindialog1: 7, R1: 8, G1: 9, S1: 10, M1: 11, P1: 12, V1: 13, V2: 14, E2: 15, M2: 16 };
+export const L2_MENU_INDEX: Record<string, number> = { H1: 0, miOpenDialog1: 1, miSaveDialog1: 2, miOpenPictureDialog1: 3, miSavePictureDialog1: 4, miFontDialog1: 5, miAlphaColordialog1: 6, miSelectSkindialog1: 7, R1: 8, G1: 9, S1: 10, M1: 11, P1: 12, V1: 13, V2: 14, E2: 15, M2: 16, ColumnZDR: 17, ColumnKDP: 18, HailCore: 19 };
 export const ML_MENU_ORDER = ['mlt6', 'mlt5', 'mlt4', 'mlt3', 'mlt2', 'mlt1'];
 
 export function mainMenuActions(app: App): Record<string, MenuAction> {

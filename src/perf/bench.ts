@@ -7,6 +7,12 @@ import { FrameMeter, type FrameSample } from './meter';
 import { settings } from '../settings/store';
 import { timeline } from '../app/timeline';
 import type { L2File } from '../radar/sources';
+import { pool } from '../workers/pool';
+import { VolumeSection, sectionPoint, type SectionLine } from '../render/volume';
+import { sampleVolume, stormRelativeCode } from '../radar/volume-sample';
+import type { VolumePack } from '../radar/volume-pack';
+import type { VolumeMoment } from '../radar/l2products';
+import type { Drawable } from '../render/renderer';
 
 /** `fps`: FPS limit for the run (0 = unlimited); omitted = the user's settings. */
 export interface BenchOptions { scenario: 'idle' | 'panzoom' | 'l2loop' | 'l3probe' | 'stress'; seconds?: number; fps?: number; label?: string; raw?: boolean }
@@ -112,11 +118,73 @@ export function installBench(app: App) {
     };
   }
 
+  /**
+   * Compares the WGSL volume sampler with the TypeScript reference on the Level 2 volume drawn now: vertical sections
+   * (through the radar and across it) are rendered in a prepass, read back and checked pixel by pixel. A pixel that
+   * differs by more than 0.02 code is `unexplained` unless the GPU's value lies within the reference's values at
+   * points up to `slack` (km in range and height, and a hundredth of a degree in azimuth) away, i.e. the two sit on
+   * opposite sides of a gate, azimuth-bin or tilt-zone boundary in float32.
+   */
+  async function volumeCheck(moments: VolumeMoment[] = ['REF', 'VEL', 'ZDR', 'CC', 'KDP'], width = 512, height = 128, slack = 0.005) {
+    const nx = app.nexrad, r = app.renderer, section = new VolumeSection(r, width, height, 'bench');
+    const lines: SectionLine[] = [...[10.1, 77.3, 141.2, 200.25, 263.6, 334.9].map((az): SectionLine => ({ a: [0, 0], b: [230 * Math.sin((az * Math.PI) / 180), 230 * Math.cos((az * Math.PI) / 180)], topKm: 20 })),
+      { a: [-90, 35], b: [120, 80], topKm: 16 }, { a: [40, -150], b: [-25, 60], topKm: 12 }];
+    const motion = { speedKt: 30, fromDeg: 240 };
+    let job: { moment: VolumeMoment; line: SectionLine; done: boolean } | null = null, prepassMs = 0;
+    const probe: Drawable = {
+      id: 'volume-check', draw() {},
+      prepass(ctx) {
+        prepassMs = Math.max(prepassMs, r.gpuPrepassMs);
+        const pack = job && nx.volumePack(job.moment);
+        if (!job || !pack) return;
+        if (job.moment === 'VEL') nx.volumes.setMotion(pack, motion);
+        section.encode(ctx, pack, job.line);
+        job.done = true;
+      },
+    };
+    r.layers.push(probe);
+    const frame = () => new Promise((res) => { app.poke(); requestAnimationFrame(res); });
+    const out: Record<string, unknown>[] = [];
+    try {
+      for (const moment of moments) {
+        const q = nx.volumeRequest(moment);
+        if (!q) { out.push({ moment, error: 'no Level 2 volume drawn' }); continue; }
+        const cpu = (await pool.for('bench').run<{ pack: VolumePack | null }>('l2.volume', { url: q.url, live: q.live, chunks: q.chunks, moment, latest: q.latest, qualityDealiasing: q.qualityDealiasing }, q.url)).pack;
+        if (!cpu) { out.push({ moment, error: 'moment not in this volume' }); continue; }
+        const ref = (az: number, s: number, h: number) => { const c = sampleVolume(cpu, az, s, h); return moment === 'VEL' ? stormRelativeCode(c, az, motion.speedKt, motion.fromDeg) : c; };
+        let pixels = 0, data = 0, differ = 0, unexplained = 0, maxDiff = 0, frames = 0;
+        const worst: unknown[] = [];
+        for (const line of lines) {
+          job = { moment, line, done: false };
+          for (const t0 = performance.now(); !job.done && performance.now() - t0 < 60_000;) { await frame(); frames++; }
+          if (!job.done) throw new Error(`volume pack ${moment}: ${nx.volumes.state(q)}`);
+          const gpu = await section.read();
+          for (let y = 0; y < height; y++) for (let x = 0; x < width; x++) {
+            const p = sectionPoint(line, x, y, width, height), want = ref(p.az, p.s, p.h), got = gpu[y * width + x];
+            pixels++; if (want > 0) data++;
+            if (Math.abs(got - want) <= 0.02) { maxDiff = Math.max(maxDiff, Math.abs(got - want)); continue; }
+            differ++;
+            let lo = want, hi = want;
+            for (const ds of [-slack, 0, slack]) for (const dh of [-slack, 0, slack]) for (const da of [-0.01, 0, 0.01]) { const v = ref(p.az + da, p.s + ds, p.h + dh); lo = Math.min(lo, v); hi = Math.max(hi, v); }
+            if (got < lo - 0.02 || got > hi + 0.02) { unexplained++; if (worst.length < 5) worst.push({ ...p, got, want }); }
+          }
+        }
+        for (let i = 0; i < 6; i++) await frame(); // lets the timestamp of the last section pass arrive
+        job = null;
+        out.push({ moment, volume: q.url.split('/').pop(), tilts: cpu.tilts.map((t) => +t.elevation.toFixed(2)), width: cpu.width, textureMB: +((cpu.width * 722 * cpu.tilts.length) / 1048576).toFixed(1), uploadFrames: frames, sections: lines.length, pixels, data, differ, unexplained, maxDiff, worst });
+      }
+    } finally {
+      r.layers.splice(r.layers.indexOf(probe), 1);
+      section.destroy();
+    }
+    return { results: out, gpuPrepassMs: prepassMs, gpuMs: r.gpuMs, packBytes: nx.volumes.bytes };
+  }
+
   function download(obj: unknown, name = `cwrv3-bench-${Date.now()}.json`) {
     const a = document.createElement('a');
     a.href = URL.createObjectURL(new Blob([JSON.stringify(obj, null, 1)], { type: 'application/json' }));
     a.download = name; a.click();
   }
 
-  (window as unknown as { cwrv3bench: unknown }).cwrv3bench = { run, download, useL2Fixture, app, settings, timeline };
+  (window as unknown as { cwrv3bench: unknown }).cwrv3bench = { run, download, useL2Fixture, volumeCheck, app, settings, timeline };
 }

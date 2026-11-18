@@ -1,7 +1,8 @@
 // Debug / performance panel (F8, CWRV3 menu → Advanced): global frame rate, frame times, GPU pass time and memory,
 // and one row per owner (layer or shared resource) with its decode jobs, texture uploads, live texture memory and
 // layer status. Sampled twice a second only while open; nothing is sent anywhere. Values a browser or owner does
-// not provide are shown as "N/A", never as zero. GPU execution time is measured for the whole main pass only.
+// not provide are shown as "N/A", never as zero. GPU execution time is measured for the whole main pass plus the
+// layers' prepass passes (offscreen targets drawn before it).
 import type { OwnerStat } from '../workers/pool';
 import type { FrameMeter } from './meter';
 
@@ -9,8 +10,10 @@ export interface PerfSnapshot {
   frames: ReturnType<typeof FrameMeter.stats>;
   /** Rendered frames since start (FrameMeter). */
   totalFrames: number;
-  /** GPU time of the main render pass from timestamp queries, or null when the adapter has no timestamp-query. */
+  /** GPU time of the main pass plus the prepass passes from timestamp queries, or null without timestamp-query. */
   gpuMs: number | null;
+  /** The prepass share of `gpuMs` (0 when no layer has a prepass). */
+  gpuPrepassMs?: number;
   /** performance.memory (Chromium only), or null. */
   heap: { used: number; limit: number } | null;
   textureBytes: number;
@@ -33,7 +36,7 @@ export function perfRows(s: PerfSnapshot): [string, string, string][] {
   rows.push(['Frames (all layers)', 'Rendered frame rate (last 2 s)', f.frames ? `${f.fps.toFixed(1)} fps` : 'N/A']);
   rows.push(['Frames (all layers)', 'Frame interval p50 / p95 / max', f.frames ? `${ms(f.p50Ms)} / ${ms(f.p95Ms)} / ${ms(f.maxMs)}` : 'N/A']);
   rows.push(['Frames (all layers)', 'CPU per frame (update + encode + submit), mean / p95', f.frames ? `${ms(f.cpuMean)} / ${ms(f.cpuP95)}` : 'N/A']);
-  rows.push(['Frames (all layers)', 'GPU main pass (timestamp query)', s.gpuMs === null ? 'N/A (no timestamp-query feature)' : ms(s.gpuMs)]);
+  rows.push(['Frames (all layers)', 'GPU main pass + prepasses (timestamp query)', s.gpuMs === null ? 'N/A (no timestamp-query feature)' : s.gpuPrepassMs ? `${ms(s.gpuMs)} (prepasses ${ms(s.gpuPrepassMs)})` : ms(s.gpuMs)]);
   rows.push(['Frames (all layers)', 'Frames rendered since start / > 20 ms in window', `${s.totalFrames} / ${f.dropped20ms}`]);
   rows.push(['Timeline', 'Loop', s.timeline]);
   rows.push(['Memory', 'JS heap used / limit', s.heap ? `${mb(s.heap.used)} / ${mb(s.heap.limit)}` : 'N/A (performance.memory unavailable)']);

@@ -1,7 +1,5 @@
 /// <reference lib="webworker" />
 // Decode worker: all heavy format work (bzip2/Archive II, Level III, GRIB2, NetCDF/HDF5, shapefiles) runs here.
-import { Archive2Decoder, type L2Volume } from '../decode/archive2';
-import { bunzip2 } from '../decode/bzip2';
 import { decodeLevel3, type L3Product } from '../decode/level3';
 import { decodeGrib2, scanGribMessages, type GribField } from '../decode/grib2';
 import { gunzip, inflateZlib, unzip } from '../decode/zip';
@@ -10,9 +8,7 @@ import { readAbiCmi, readAbiL2, readGlmLcfa, examineAbi, type H5Like, type GoesP
 import { gridMap } from '../gis/gridproj';
 import { parseIdx, findIdx, HRRR_FIELDS, type HrrrField } from '../decode/hrrr';
 import { fetchBytes, fetchText, abortAll } from '../data/net';
-import { recodeVolume, buildProduct, liveComposite, type BuilderSweep, type L2BuildParams } from '../radar/l2products';
 import { gaussianBlur, isolines, lambertInverse } from '../gis/contour';
-import { padSweep } from '../radar/sweep-pad';
 import { fetchShapes, geojsonFeatures } from './shape-tasks';
 import { fetchGrib, encodeNormHalf, downsampleMax, downsampleGrid, geoOfGrid, contourLines, windSamples, unitConv } from './grid-tasks';
 import { paramName, levelName } from '../decode/grib-names';
@@ -22,129 +18,12 @@ import { gridSize } from '../decode/grib2';
 import type { LambertGrid } from '../decode/grib2';
 import { packPtype } from '../decode/ptype-pack';
 import { JobClock, runJob, type JobHandler } from './job-clock';
+import { L2_HANDLERS, configureL2 } from './l2-volumes';
+
+export type { L2Meta, L2SweepMeta } from './l2-volumes';
 
 type Req = { id: number; task: string; args: any };
 const scope = self as unknown as DedicatedWorkerGlobalScope;
-
-// ------------------------------------------------------------------------------------------- Level 2
-interface VolEntry { meta: L2Meta; sweeps: BuilderSweep[]; volume: L2Volume; products: Map<string, any>; bytes: number }
-export interface L2SweepMeta { index: number; elevationNumber: number; elevation: number; nominal: number | null; radials: number; moments: string[]; complete: boolean; label: string; split: 'CS' | 'CD' | null; supplemental: boolean; nyquist: number | null; startMs: number; endMs: number }
-export interface L2Meta { site: string; volumeTimeMs: number | null; lat: number | null; lon: number | null; heightM: number | null; vcp: number | null; avset: boolean | null; sails: number; mrle: number; baseTilts: number; sweeps: L2SweepMeta[]; bytes: number }
-const volumes = new Map<string, VolEntry>();
-/**
- * Decoded-volume cache. The count follows settings.nexradLevel2VolumeCountMemory (sent by the main thread via
- * 'config'); a byte budget per worker keeps memory bounded. Evicted volumes are re-decoded from the Cache API copy.
- */
-const cacheCfg = { volumes: 5, byteBudget: 768 * 1024 * 1024 };
-function sizeOf(v: unknown, seen = new Set<unknown>()): number {
-  if (!v || typeof v !== 'object' || seen.has(v)) return 0;
-  seen.add(v);
-  if (ArrayBuffer.isView(v)) return v.byteLength;
-  let n = 0;
-  for (const k of Object.keys(v as object)) n += sizeOf((v as Record<string, unknown>)[k], seen);
-  return n;
-}
-function evict() {
-  let total = 0;
-  for (const e of volumes.values()) total += e.bytes;
-  for (const [k, e] of volumes) {
-    if (volumes.size <= cacheCfg.volumes && total <= cacheCfg.byteBudget) break;
-    if (volumes.size <= 1) break;
-    volumes.delete(k); total -= e.bytes;
-  }
-}
-
-function describe(v: L2Volume, bytes: number): L2Meta {
-  const sweeps = v.sweeps.map((s, index): L2SweepMeta => {
-    const cut = s.cut;
-    const split = cut ? (cut.waveform === 1 ? 'CS' : cut.waveform === 2 || cut.waveform === 3 ? 'CD' : null) : null;
-    let label = `${(cut?.elevation ?? s.elevation).toFixed(1)}°`;
-    if (cut?.baseTilt) label += ' - Base Tilt Cut';
-    if (cut?.sails && cut.sailsSeq > 0) label += ` - SAILS #${cut.sailsSeq}`;
-    if (cut?.mrle && cut.mrleSeq > 0) label += ` - MRLE #${cut.mrleSeq}`;
-    return {
-      index, elevationNumber: s.elevationNumber, elevation: s.elevation, nominal: s.nominalElevation, radials: s.radialCount,
-      moments: Object.keys(s.moments), complete: s.complete, label, split, supplemental: !!cut && ((cut.sails && cut.sailsSeq > 0) || (cut.mrle && cut.mrleSeq > 0)),
-      nyquist: s.nyquist, startMs: s.timesMs[0] ?? 0, endMs: s.timesMs[s.timesMs.length - 1] ?? 0,
-    };
-  });
-  return {
-    site: v.site, volumeTimeMs: v.volumeTimeMs, lat: v.lat, lon: v.lon, heightM: v.heightM, vcp: v.vcpNumber,
-    avset: v.vcp?.avset ?? null, sails: v.vcp?.sails ? v.vcp.sailsCuts : 0, mrle: v.vcp?.mrle ? v.vcp.mrleCuts : 0,
-    baseTilts: v.vcp?.baseTilt ? v.vcp.baseTilts : 0, sweeps, bytes,
-  };
-}
-
-/** Real-time chunk volumes decoded incrementally: each call fetches only the chunks not fed yet. */
-const streams = new Map<string, { d: Archive2Decoder; fed: string[]; bytes: number }>();
-const streamLock = new Map<string, Promise<unknown>>();
-/** Serialises chunk feeding per volume (meta and product requests can overlap). */
-function loadChunks(url: string, chunks: string[], job: JobClock): Promise<VolEntry> {
-  const run = (streamLock.get(url) ?? Promise.resolve()).catch(() => undefined).then(() => feedChunks(url, chunks, job));
-  streamLock.set(url, run);
-  void run.finally(() => { if (streamLock.get(url) === run) streamLock.delete(url); }).catch(() => undefined);
-  return run;
-}
-async function feedChunks(url: string, chunks: string[], job: JobClock): Promise<VolEntry> {
-  let st = streams.get(url);
-  // A different chunk sequence (gap repaired, folder reused) restarts the decode.
-  if (!st || st.fed.some((c, i) => chunks[i] !== c)) { st = { d: new Archive2Decoder(), fed: [], bytes: 0 }; streams.set(url, st); }
-  const fresh = chunks.slice(st.fed.length);
-  const parts = await Promise.all(fresh.map((c) => fetchBytes(c, { cache: 'immutable' })));
-  const s = st;
-  job.time(() => { for (let i = 0; i < parts.length; i++) { s.d.feed(parts[i]); s.fed.push(fresh[i]); s.bytes += parts[i].length; } });
-  while (streams.size > 3) streams.delete(streams.keys().next().value!);
-  const hit = volumes.get(url);
-  if (hit && !fresh.length) return hit;
-  return job.time(() => cacheVolume(url, s.d.volume(), s.bytes));
-}
-
-/** Recodes a decoded volume for the product builders and caches it under its URL. */
-function cacheVolume(url: string, volume: L2Volume, fileBytes: number): VolEntry {
-  const sweeps = recodeVolume(volume);
-  const entry: VolEntry = { meta: describe(volume, fileBytes), sweeps, volume, products: new Map(), bytes: sizeOf(volume) + sizeOf(sweeps) };
-  volumes.delete(url);
-  volumes.set(url, entry);
-  evict();
-  return entry;
-}
-
-async function loadVolume(url: string, live: boolean, job: JobClock, chunks?: string[]): Promise<VolEntry> {
-  if (chunks?.length) return loadChunks(url, chunks, job);
-  const hit = volumes.get(url);
-  if (hit && !live) { volumes.delete(url); volumes.set(url, hit); return hit; }
-  const bytes = await fetchBytes(url, { cache: live ? 'none' : 'immutable' });
-  return job.time(() => {
-    let buf = bytes;
-    // tgftp serves whole volumes compressed with bzip2 when the name ends in .bz2 but the content is still
-    // an AR2V file with bzip2 records; a fully compressed file starts with "BZh".
-    if (buf[0] === 0x42 && buf[1] === 0x5a && buf[2] === 0x68) buf = bunzip2(buf);
-    const d = new Archive2Decoder();
-    d.feed(buf);
-    return cacheVolume(url, d.volume(), bytes.length);
-  });
-}
-
-function l2Product(v: VolEntry, a: { sweep: number; product: number; params: L2BuildParams }) {
-  const vol = a.product >= 11;
-  const key = `${a.product}:${vol ? 'vol' : a.sweep}:${JSON.stringify(a.params)}`;
-  let p = v.products.get(key);
-  if (!p) {
-    const s = v.sweeps[a.sweep];
-    p = s ? buildProduct(a.product, s, v.sweeps, a.params) : null;
-    v.products.set(key, p);
-    v.bytes += sizeOf(p);
-    // Bounded per-volume product cache (tilt × product × parameter combinations).
-    while (v.products.size > 24) { const [k0, p0] = v.products.entries().next().value!; v.products.delete(k0); v.bytes -= sizeOf(p0); }
-    evict();
-  }
-  if (!p) return { meta: v.meta, sweep: null };
-  const sw = v.volume.sweeps[a.sweep];
-  return {
-    meta: v.meta,
-    sweep: { ...p, codes: p.codes.slice(), azimuths: p.azimuths.slice(), startMs: sw?.timesMs[0] ?? 0, endMs: sw?.timesMs[sw.timesMs.length - 1] ?? 0 },
-  };
-}
 
 // ------------------------------------------------------------------------------------------- Level 3
 function l3Result(p: L3Product) {
@@ -353,13 +232,6 @@ async function surface(a: { url: string; mslp?: { interval: number; kernel: numb
   });
 }
 
-/** Adds the padded upload image to a sweep result so the main thread only copies it to the GPU. */
-function withUpload<T extends { sweep: any }>(r: T): T {
-  const s = r.sweep;
-  if (s) s.upload = padSweep(s.codes, s.radials, s.gates, s.complete, s.wordSize);
-  return r;
-}
-
 /** MRMS tab product: whole gzip GRIB2, unit conversion, max-downsampling, half-float range encoding. */
 async function gridMrms(a: { url: string; lo: number; hi: number; factor: number; conv: number }, job: JobClock) {
   const [[f]] = await fetchGrib(a.url, null, job, { gz: true, cache: 'immutable' });
@@ -553,33 +425,9 @@ const HANDLERS: Record<string, JobHandler> = {
     const text = a.gj ? null : await fetchText(a.url!);
     return job.time(() => geojsonFeatures(a.gj ?? JSON.parse(text!), a.tol ?? 0));
   },
-  'config': async (a: { volumes?: number; byteBudget?: number }) => {
-    if (a.volumes) cacheCfg.volumes = Math.max(1, Math.round(a.volumes));
-    if (a.byteBudget) cacheCfg.byteBudget = a.byteBudget;
-    evict();
-    return { ...cacheCfg, cached: volumes.size };
-  },
+  'config': async (a: { volumes?: number; byteBudget?: number }) => configureL2(a),
   'surface': surface,
-  'l2.meta': async (a, job) => (await loadVolume(a.url, a.live, job, a.chunks)).meta,
-  'l2.product': async (a, job) => {
-    const v = await loadVolume(a.url, a.live, job, a.chunks);
-    return job.time(() => {
-      const r = l2Product(v, a);
-      // 8-bit ZDR codes are inverted by the builder; the display maps them back.
-      if (a.product === 3 && r.sweep && r.sweep.wordSize === 8) { const c = r.sweep.codes; for (let i = 0; i < c.length; i++) c[i] = c[i] ? 255 - c[i] : 0; }
-      return withUpload(r);
-    });
-  },
-  'l2.composite': async (a: { url: string; live: boolean; chunks?: string[]; base: number; top: number; selectiveMax: boolean }, job) => {
-    const v = await loadVolume(a.url, a.live, job, a.chunks);
-    return job.time(() => {
-      const g = liveComposite(v.sweeps, a.base, a.top, a.selectiveMax);
-      if (!g) return { meta: v.meta, sweep: null };
-      const az = new Float32Array(720);
-      for (let i = 0; i < 720; i++) az[i] = (g.az0 + i * 0.5) % 360;
-      return withUpload({ meta: v.meta, sweep: { product: 0, radials: 720, gates: g.gates, firstKm: g.firstKm, gateKm: g.gateKm, azimuths: az, half: true, complete: true, elevation: 0, codes: g.codes, wordSize: 8 } });
-    });
-  },
+  ...L2_HANDLERS,
   'l3': async (a, job) => {
     const bytes = await fetchBytes(a.url, { cache: a.live ? 'none' : 'immutable' });
     return job.time(() => l3Result(decodeLevel3(bytes)));
@@ -607,7 +455,7 @@ const HANDLERS: Record<string, JobHandler> = {
  * processing time as unavailable rather than zero.
  */
 const TIMED = new Set(['grid.all', 'grid.model', 'grib.inventory', 'grid.meso', 'grid.severe', 'grid.diff', 'grid.mrms', 'shapes', 'geojson', 'surface',
-  'l2.meta', 'l2.product', 'l2.composite', 'l3', 'mrms', 'hrrr', 'hrrr.ptype', 'grib.point', 'goes', 'goes.l2', 'glm', 'zipLines', 'goes.examine']);
+  'l2.meta', 'l2.product', 'l2.composite', 'l2.volume', 'l3', 'mrms', 'hrrr', 'hrrr.ptype', 'grib.point', 'goes', 'goes.l2', 'glm', 'zipLines', 'goes.examine']);
 
 function transferables(v: any, out: Transferable[] = [], seen = new Set<any>()): Transferable[] {
   if (!v || typeof v !== 'object' || seen.has(v)) return out;

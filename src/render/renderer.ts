@@ -4,14 +4,30 @@ import { Camera, invert, mul } from './camera';
 import { SKY, TILES, RASTER, RADAR, LINES, POINTS, TEXT, SPRITES, POLYS } from './shaders';
 
 export interface DrawContext { r: Renderer; pass: GPURenderPassEncoder; probe: boolean }
+export interface PrepassContext {
+  r: Renderer; enc: GPUCommandEncoder;
+  /**
+   * Timestamp writes for one render or compute pass of a prepass, so that its GPU time is part of `gpuMs`. Undefined
+   * when timing is off this frame or more than TIMED_PREPASSES passes asked (the pass then runs untimed).
+   */
+  timing(): GPURenderPassTimestampWrites | undefined;
+}
 export interface Drawable {
   readonly id: string;
+  /**
+   * Encodes this layer's own offscreen passes (section images, volume targets) on the frame's encoder before the
+   * main pass begins. Called once per frame for visible layers in layer order; the main pass may sample the result.
+   */
+  prepass?(ctx: PrepassContext): void;
   /** Records draw calls. Called once per frame for visible layers in layer order. */
   draw(ctx: DrawContext): void;
   /** True when the layer can answer a probe (topmost such layer is probed). */
   probeKind?(): string | null;
 }
 
+/** Prepass passes per frame whose GPU time can be measured (the main pass uses its own pair of queries). */
+export const TIMED_PREPASSES = 7;
+const TS_QUERIES = 2 * (1 + TIMED_PREPASSES);
 const PREMUL: GPUBlendState = { color: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha' }, alpha: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha' } };
 
 export interface ProbeResult { kind: string; value: number; layer: string }
@@ -51,7 +67,9 @@ export class Renderer {
   private tsResolve: GPUBuffer | null = null;
   private tsRead: GPUBuffer | null = null;
   private tsBusy = false;
+  /** GPU time of the last measured frame: the main pass plus the timed prepass passes (`gpuPrepassMs` of it). */
   gpuMs = 0;
+  gpuPrepassMs = 0;
 
   constructor(canvas: HTMLCanvasElement) { this.gpu = new Gpu(canvas); }
 
@@ -84,6 +102,10 @@ export class Renderer {
       points: bgl(['s']),
       text: bgl(['s', 's', 't', 'smp']),
       sprites: bgl(['s', 't', 'smp']),
+      // Volume pack (render/volume.ts): its uniform and tilt texture array, also for compute passes.
+      volume: d.createBindGroupLayout({ entries: [
+        { binding: 0, visibility: VF | GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
+        { binding: 1, visibility: VF | GPUShaderStage.COMPUTE, texture: { sampleType: 'float', viewDimension: '2d-array' } }] }),
     };
     const mk = (name: string, code: string, opts: { probe?: boolean; layout?: string; fs?: string } = {}) => {
       const module = d.createShaderModule({ code, label: name });
@@ -114,9 +136,9 @@ export class Renderer {
     this.probeTex = d.createTexture({ size: [1, 1], format: 'rgba32float', usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC });
     this.probeRead = d.createBuffer({ size: 256, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
     if (this.gpu.timestamps) {
-      this.tsQuery = d.createQuerySet({ type: 'timestamp', count: 2 });
-      this.tsResolve = d.createBuffer({ size: 16, usage: GPUBufferUsage.QUERY_RESOLVE | GPUBufferUsage.COPY_SRC });
-      this.tsRead = d.createBuffer({ size: 16, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+      this.tsQuery = d.createQuerySet({ type: 'timestamp', count: TS_QUERIES });
+      this.tsResolve = d.createBuffer({ size: TS_QUERIES * 8, usage: GPUBufferUsage.QUERY_RESOLVE | GPUBufferUsage.COPY_SRC });
+      this.tsRead = d.createBuffer({ size: TS_QUERIES * 8, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
     }
     this.gpu.resize();
   }
@@ -177,12 +199,17 @@ export class Renderer {
     d.queue.writeBuffer(this.skyBuf, 0, sky);
 
     const enc = d.createCommandEncoder();
+    // Queries 0 and 1 time the main pass; each timed prepass pass takes the next pair.
+    const doTs = !!this.tsQuery && !this.tsBusy;
+    let timed = 1;
+    const timing = () => (doTs && timed <= TIMED_PREPASSES ? { querySet: this.tsQuery!, beginningOfPassWriteIndex: 2 * timed, endOfPassWriteIndex: 2 * timed++ + 1 } : undefined);
+    for (const l of this.layers) l.prepass?.({ r: this, enc, timing });
     const view = g.context.getCurrentTexture().createView();
     const pass = enc.beginRenderPass({
       colorAttachments: [g.msaa
         ? { view: g.msaa.createView(), resolveTarget: view, loadOp: 'clear', storeOp: 'discard', clearValue: { r: 0, g: 0, b: 0, a: 1 } }
         : { view, loadOp: 'clear', storeOp: 'store', clearValue: { r: 0, g: 0, b: 0, a: 1 } }],
-      timestampWrites: this.tsQuery && !this.tsBusy ? { querySet: this.tsQuery, beginningOfPassWriteIndex: 0, endOfPassWriteIndex: 1 } : undefined,
+      timestampWrites: doTs ? { querySet: this.tsQuery!, beginningOfPassWriteIndex: 0, endOfPassWriteIndex: 1 } : undefined,
     });
     pass.setBindGroup(0, this.frameBG);
     pass.setPipeline(this.pipes.sky);
@@ -210,16 +237,18 @@ export class Renderer {
         enc.copyTextureToBuffer({ texture: this.probeTex }, { buffer: this.probeRead, bytesPerRow: 256 }, [1, 1]);
       }
     }
-    const doTs = this.tsQuery && !this.tsBusy;
-    if (doTs) { enc.resolveQuerySet(this.tsQuery!, 0, 2, this.tsResolve!, 0); enc.copyBufferToBuffer(this.tsResolve!, 0, this.tsRead!, 0, 16); }
+    if (doTs) { enc.resolveQuerySet(this.tsQuery!, 0, 2 * timed, this.tsResolve!, 0); enc.copyBufferToBuffer(this.tsResolve!, 0, this.tsRead!, 0, 16 * timed); }
     d.queue.submit([enc.finish()]);
 
     if (doTs) {
       this.tsBusy = true;
-      this.tsRead!.mapAsync(GPUMapMode.READ).then(() => {
-        const t = new BigUint64Array(this.tsRead!.getMappedRange());
-        const ms = Number(t[1] - t[0]) / 1e6;
-        if (ms >= 0 && ms < 1000) this.gpuMs = ms;
+      this.tsRead!.mapAsync(GPUMapMode.READ, 0, 16 * timed).then(() => {
+        const t = new BigUint64Array(this.tsRead!.getMappedRange(0, 16 * timed));
+        const span = (i: number) => Number(t[2 * i + 1] - t[2 * i]) / 1e6;
+        let pre = 0;
+        for (let i = 1; i < timed; i++) pre += span(i);
+        const ms = span(0) + pre;
+        if (ms >= 0 && ms < 1000) { this.gpuMs = ms; this.gpuPrepassMs = pre; }
         this.tsRead!.unmap();
         this.tsBusy = false;
       }, () => { this.tsBusy = false; });

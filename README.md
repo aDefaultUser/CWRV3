@@ -47,6 +47,13 @@ Probe reads the displayed value under the pointer.
   number). A frame without them, such as the live volume still being scanned or an archived loop older than TGFTP
   keeps (about 250 files per product, 28–46 h at the busy sites checked), shows "No storm attributes for HH:MMZ" at
   the radar. Automatic storm-relative velocity uses each volume's own vector, or the manual one where it has none.
+* NEXRADPro → Level 2 product menu, three products built from every tilt of the volume: **ZDR Column** and
+  **KDP Column** (the largest ZDR / KDP among the beams at or above the −10 °C height, counting only gates with
+  reflectivity ≥ 20 dBZ and CC ≥ 0.80) and **Hail Core** (the largest reflectivity at or above the −20 °C height).
+  The heights are the HRRR analysis 0 °C, −10 °C and −20 °C isotherm heights at the radar, or the custom heights
+  when "Custom isotherm heights" is on in the Level 2 algorithm settings. With custom heights, or when the model has
+  no −10 °C height, the −10 °C height is taken midway between the other two and the legend says "Estimated". Each
+  product has its own palette (the palette button of the radar panel).
 * Extended GOES-R Data → Product "Level 2 Product": cloud-top height (`ABI-L2-ACHA`, CONUS / Full Disk /
   Mesoscale), cloud-top temperature (`ABI-L2-ACHT`, Full Disk / Mesoscale; not produced for CONUS) and fire/hot spot
   with fire radiative power (`ABI-L2-FDC`, CONUS / Full Disk / Mesoscale) from GOES-19 or GOES-18. Cloud-top values
@@ -115,8 +122,8 @@ Probe reads the displayed value under the pointer.
     pressure-weighted means). The panel names the station, position, run and valid time that were returned. The
     formulations follow MetPy 1.7 (Ambaum saturation pressure, Romps LCL, virtual-temperature CAPE/CIN,
     pressure-weighted Bunkers motion); the unit tests compare them with MetPy's documented values.
-* F8 (or CWRV3 → Advanced → Performance panel) shows the global frame rate and times, GPU pass time where the adapter
-  supports timestamp queries, total tracked texture memory and the JS heap (N/A where the browser does not report
+* F8 (or CWRV3 → Advanced → Performance panel) shows the global frame rate and times, GPU time of the main pass and
+  of the layers' offscreen prepasses where the adapter supports timestamp queries, total tracked texture memory and the JS heap (N/A where the browser does not report
   it), and one row per layer or owner with its decode jobs, texture uploads, live texture memory and status. Each layer's decode time excludes network, queueing and transfer, shown beside
   the worker's fetch + decode wall time. It samples only while open and sends nothing anywhere.
 
@@ -137,6 +144,10 @@ npm test         # unit tests only
 npm run loc      # functional lines of code (method in tools/loc.mjs)
 npm run bench -- <label> <fixed4k|dpr1|dpr15|dpr2> --out <dir> [--fps 60|0] [--headful] [--runs 3]
 ```
+
+`APP_URL` selects the server the benchmark opens (default `http://127.0.0.1:4173/`). In the browser console,
+`cwrv3bench.volumeCheck()` renders vertical sections of the drawn Level 2 volume with the GPU volume sampler and
+compares them pixel by pixel with the TypeScript reference.
 
 The benchmark (`tools/perf/run-bench.mjs`) drives an isolated Chromium (temporary profile, DevTools port 9333) against
 the production build; Level 2 runs use the fixed KTLX archive volumes listed in `public/perf-fixtures.json`.
@@ -198,7 +209,13 @@ Exact parity with the original program is not claimed. Known differences:
   mirrored/rotated variants for "Strike icon variety"; Glow adds a soft halo behind each bolt. Hail and freezing-rain symbols are procedural (no approved
   icon).
 * Some Level 2 derived products carry approximations (echo-top interpolation, VILD scaling, POSH for WT ≤ 0); the
-  Level 3 general status message product is not drawn.
+  Level 3 general status message product is not drawn. The volume products (MEHS to hail core) place every tilt on
+  one fixed half-degree azimuth frame by true azimuth (nearest radial, a 1° radial fills two bins, nothing is
+  averaged), so their values at echo edges differ slightly from builds before this frame existed.
+* The ZDR column, KDP column and hail core products are not in the original and are proxies, not column depths:
+  each is a maximum over beam centres above an isotherm height, without vertical interpolation between tilts, so
+  far from the radar few beams qualify. KDP is this program's own estimate and is noisy at high tilts; the 20 dBZ
+  and CC 0.80 gates are this implementation's choice.
 * NAM-family and HiresW model feeds were unavailable from the public servers when last checked (HTTP 404 on
   2026-11-17; the `noaa-nam-pds` bucket ends on 2026-11-03) and are reported as unavailable instead of being
   substituted. RRFS, which replaced them operationally, is listed as its own model.
@@ -217,6 +234,7 @@ production build, FPS target 60. Frame times are `requestAnimationFrame` interva
 | | Level 2 loop (8 KTLX volumes) | runs 1 and 3: 60.0 fps, p99 16.8 ms, 0 frames > 20 ms; run 2 excluded: the host stopped `requestAnimationFrame` for 484.6 s |
 | Headless, fixed 3840×2160, 60 Hz, 1 × 20 s smoke | pan/zoom, target 60 | 60.0 fps, p99 16.8 ms, 0/1201 frames > 20 ms, GPU 1.6 ms mean |
 | | pan/zoom, unlimited | 60.0 fps (bounded by the 60 Hz headless refresh), p99 16.8 ms, 0/1201 frames > 20 ms |
+| | Level 2 loop (8 KTLX volumes), target 60, 1 × 60 s | 60.0 fps, p99 16.8 ms, 0/3601 frames > 20 ms, CPU 2.1 ms mean, GPU 1.3 ms mean |
 
 Mean CPU time per frame was about 2 ms and GPU time about 0.6–1.6 ms in every run, so the frame rate is set by
 the FPS target or the display refresh, not by rendering cost. The 4K runs are short smoke checks, not full
@@ -258,7 +276,7 @@ profiles from `api/1/nws/bufkit.json`), NASA GIBS imagery and AWS Terrain Tiles.
 
 | Part | Lines |
 | --- | ---: |
-| TypeScript / JavaScript | 18,935 |
-| WGSL shaders | 689 |
-| **Total functional** | **19,624** |
+| TypeScript / JavaScript | 19,460 |
+| WGSL shaders | 753 |
+| **Total functional** | **20,213** |
 | CSS (separate) | 174 |
