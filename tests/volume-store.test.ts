@@ -9,20 +9,26 @@ vi.mock('../src/workers/pool', () => { const run = vi.fn((task: string, args: un
 
 import { VolumeStore, packKey, type PackRequest } from '../src/render/volume';
 import { Gpu } from '../src/render/gpu';
-import { PACK_ROWS, type VolumePack } from '../src/radar/volume-pack';
+import { PACK_ROWS, OCC_N, OCC_IMAGES, type VolumePack } from '../src/radar/volume-pack';
 import { NexradLayer } from '../src/layers/nexrad';
 import { settings } from '../src/settings/store';
 
 Object.assign(globalThis, { GPUTextureUsage: { TEXTURE_BINDING: 4, COPY_DST: 2, RENDER_ATTACHMENT: 16, COPY_SRC: 1 }, GPUBufferUsage: { UNIFORM: 64, COPY_DST: 8 } });
 
 function fakeRenderer() {
-  const log = { textures: [] as { size: number[]; destroyed: boolean }[], layerWrites: [] as number[], bufferWrites: [] as { offset: number; data: Float32Array }[] };
+  type Tex = { size: number[]; destroyed: boolean };
+  /** `textures` are the tilt textures and `layerWrites` their uploads; the occupancy grids are listed apart. */
+  const log = { textures: [] as Tex[], occupancy: [] as (Tex & { written: number })[], layerWrites: [] as number[], bufferWrites: [] as { offset: number; data: Float32Array }[] };
   const device = {
-    createTexture: (d: { size: number[] }) => { const t = { size: d.size, destroyed: false, destroy() { t.destroyed = true; }, createView: () => ({}) }; log.textures.push(t); return t; },
+    createTexture: (d: { size: number[]; label: string }) => {
+      const t = { size: d.size, destroyed: false, written: 0, destroy() { t.destroyed = true; }, createView: () => ({}) };
+      (d.label.startsWith('occupancy') ? log.occupancy : log.textures).push(t);
+      return t;
+    },
     createBuffer: () => ({ destroy() {} }),
     createBindGroup: () => ({}),
     queue: {
-      writeTexture: (dst: { origin: number[] }) => { log.layerWrites.push(dst.origin[2]); },
+      writeTexture: (dst: { texture: Tex & { written: number }; origin?: number[] }, data: Uint8Array) => { if (dst.origin) log.layerWrites.push(dst.origin[2]); else dst.texture.written += data.length; },
       writeBuffer: (_b: unknown, offset: number, data: Float32Array) => { log.bufferWrites.push({ offset, data }); },
     },
   };
@@ -31,10 +37,12 @@ function fakeRenderer() {
   return { r: { gpu, layouts: { volume: {} } } as never, gpu, log };
 }
 
+const OCC_BYTES = OCC_N * OCC_N * OCC_IMAGES;
 const pack = (tilts: number, width = 100): VolumePack => ({
   moment: 'REF', width,
   tilts: Array.from({ length: tilts }, (_, k) => ({ sweep: k, elevation: 0.5 + k, firstKm: 2.125, gateKm: 0.25, gates: width, radials: 720, startMs: 1000 + k * 20000, endMs: 15000 + k * 20000 })),
   layers: Array.from({ length: tilts }, () => new Uint8Array(PACK_ROWS * width)),
+  occupancy: new Uint8Array(OCC_BYTES), occKm: 0.4,
 });
 const req = (over: Partial<PackRequest> = {}): PackRequest => ({ site: 'KTLX', url: 'https://x/KTLX_1', live: false, moment: 'REF', latest: false, qualityDealiasing: true, lon: -97.28, lat: 35.33, heightKm: 0.37, ...over });
 const flush = async () => { for (let i = 0; i < 5; i++) await new Promise((r) => setTimeout(r, 0)); };
@@ -69,8 +77,11 @@ describe('VolumeStore', () => {
     expect(p.key).toBe(packKey(req()));
     expect(p.tilts).toHaveLength(5);
     expect(p.timeMs).toBe(1000);
-    expect(gpu.textureBytes.get('nexrad')).toBe(100 * PACK_ROWS * 5);
-    expect(gpu.uploads.get('nexrad')!.count).toBe(5);
+    // The occupancy grid is uploaded whole with the pack and counted with its textures.
+    expect(log.occupancy.map((t) => [t.size, t.written])).toEqual([[[OCC_N, OCC_N, OCC_IMAGES], OCC_BYTES]]);
+    expect([p.occ, p.occKm, p.bytes]).toEqual([log.occupancy[0], 0.4, 100 * PACK_ROWS * 5 + OCC_BYTES]);
+    expect(gpu.textureBytes.get('nexrad')).toBe(p.bytes);
+    expect(gpu.uploads.get('nexrad')!.count).toBe(6);
     // Uniform: site and grid head, then the tilt table with scan times relative to the pack time.
     const u = log.bufferWrites[0].data;
     expect(Array.from(u.subarray(0, 8))).toEqual([Math.fround(-97.28), Math.fround(35.33), Math.fround(0.37), 5, 100, PACK_ROWS, 1, 0]);
@@ -112,12 +123,12 @@ describe('VolumeStore', () => {
     expect(log.layerWrites).toHaveLength(2);
     for (let i = 0; i < 4; i++) store.pump(); // no get(): two more frames of uploads, then the pack is stale
     expect(log.layerWrites.length).toBeLessThan(8);
-    expect(log.textures[0].destroyed).toBe(true);
+    expect([log.textures[0].destroyed, log.occupancy[0].destroyed]).toEqual([true, true]);
     expect(gpu.textureBytes.get('nexrad')).toBe(0);
   });
 
   it('keeps packs least-recently-used within the VRAM budget', async () => {
-    const one = 100 * PACK_ROWS * 2;
+    const one = 100 * PACK_ROWS * 2 + OCC_BYTES;
     const { r, log } = fakeRenderer(), store = new VolumeStore(r, 'nexrad', 2.5 * one);
     const load = async (url: string) => { store.get(req({ url })); h.runs[h.runs.length - 1].resolve({ pack: pack(2) }); await flush(); store.pump(); expect(store.get(req({ url }))).not.toBeNull(); };
     await load('a'); await load('b');

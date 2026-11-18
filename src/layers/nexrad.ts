@@ -29,6 +29,7 @@ import { fetchJson } from '../data/net';
 import { archiveCache } from '../data/iem';
 import { CrossSection } from './cross-section';
 import { RadarTrail } from './radar-trail';
+import { Volume3D } from './radar-volume3d';
 
 export interface TiltTab { key: string; label: string; angle: number; sweepIndices: number[] }
 
@@ -151,6 +152,9 @@ export class NexradLayer extends MapLayer {
   volumeRequest(moment: VolumeMoment): PackRequest | null {
     const f = this.lastDrawn, info = this.siteInfo();
     if (!f || !info || !this.isL2() || !this.l2.includes(f)) return null;
+    return this.packRequest(f, moment, info);
+  }
+  private packRequest(f: L2Frame, moment: VolumeMoment, info: { lon: number; lat: number; elevFt: number }): PackRequest {
     const last = f.meta?.sweeps[f.meta.sweeps.length - 1];
     return {
       site: this.currentSite(), url: f.file.url, live: f.file.live, chunks: f.file.chunks, moment,
@@ -159,14 +163,27 @@ export class NexradLayer extends MapLayer {
     };
   }
   /**
+   * Pack requests of `moment` for the Level 2 volumes of the shown loop, oldest first, with their volume times, and
+   * the index of the one draw() shows at the timeline time (the earlier volume of a blend); -1 when it shows none.
+   */
+  volumeFrames(moment: VolumeMoment): { frames: { t: number; q: PackRequest }[]; shown: number } {
+    const info = this.siteInfo();
+    if (!info || !this.enabled() || !this.isL2()) return { frames: [], shown: -1 };
+    const shown = this.shownL2();
+    const { a } = bracket(shown.map((f) => ({ t: f.t, f })), timeline.t, settings.num('settings.nexradScanTransitionMode') >= 1, 15 * 60e3);
+    return { frames: shown.map((f) => ({ t: f.t, q: this.packRequest(f, moment, info) })), shown: a ? shown.indexOf(a.f) : -1 };
+  }
+  /**
    * The uploaded pack of volumeRequest(moment), requested on first use; null while it loads or when there is none.
    * Call it every frame the pack is wanted: a pack nobody asks for is dropped.
    */
   volumePack(moment: VolumeMoment): GpuPack | null { const q = this.volumeRequest(moment); return q && this.volumes.get(q); }
-  prepass(ctx: PrepassContext) { this.volumes.pump(); this.section.prepass(ctx); this.trail.prepass(ctx); }
+  prepass(ctx: PrepassContext) { this.volumes.pump(); this.section.prepass(ctx); this.trail.prepass(ctx); this.view3d.prepass(ctx); }
   /** The vertical cross-section / RHI tool and the max-value trail. */
   readonly section: CrossSection;
   readonly trail: RadarTrail;
+  /** 3D view of the shown Level 2 volume (volume rendering or isosurfaces). */
+  readonly view3d: Volume3D;
 
   constructor(r: Renderer, atlas: GlyphAtlas) {
     super(r);
@@ -177,6 +194,7 @@ export class NexradLayer extends MapLayer {
     this.volumes = new VolumeStore(r, this.id);
     this.section = new CrossSection(r, atlas, this);
     this.trail = new RadarTrail(r, this);
+    this.view3d = new Volume3D(r, atlas, this);
     onIsotherms(this.isothermsArrived);
   }
 
@@ -186,7 +204,7 @@ export class NexradLayer extends MapLayer {
   product() { return this.liveComposite ? 0 : settings.num('layerState.NEXRADLevel2Product'); }
   l3Entry(): L3Entry { return L3[settings.num('layerState.NEXRADLevel3Product')] ?? L3[0]; }
   siteInfo() { return RADAR_SITES.find((s) => s.id === settings.str('settings.nexradSiteICAO').toUpperCase()) ?? null; }
-  invalidate() { this.radar.invalidate(); this.shadow.invalidate(); this.oldSweep.invalidate(); this.l3raster.invalidate(); }
+  invalidate() { this.radar.invalidate(); this.shadow.invalidate(); this.oldSweep.invalidate(); this.l3raster.invalidate(); this.view3d.invalidate(); }
 
   /** Bumped by freeAll (site change): every request of an older generation is discarded when it completes. */
   private gen = 0;
@@ -1030,6 +1048,7 @@ export class NexradLayer extends MapLayer {
           const trailDeg = settings.bool('settings.nexradUpdateBeamFadeTrail') && (wipe >= 0 || live) && !ctx.probe ? settings.num('settings.nexradUpdateBeamFadeTrailWidthDegrees') : 0;
           this.radar.draw(ctx, { site, elevation: sw.elevation, a: sw, b: b?.f.sweep ?? null, w: b ? w : 0, wipe, progress: live ? sw.progress : 1, alpha, smoothing, tilt3D, exaggeration: exag, shadow: false, azOffset: 0, lut, ptype: pt, flash, trailDeg });
           this.updateDataAge(live ? sw : null, info);
+          this.view3d.draw(ctx, a.f.file.url, site);
         }
       } else {
         const frames = this.shownL3().map((f) => ({ t: f.t, f }));

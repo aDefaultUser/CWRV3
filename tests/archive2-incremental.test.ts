@@ -96,6 +96,8 @@ describe('worker volume cache', () => {
       for (const [task, args] of jobs) {
         const a = await run(task, { ...args, url: live, live: true, chunks: urls.slice(0, n) });
         const b = await run(task, { ...args, url: full, live: false });
+        // A pack's occupancy grid is megabytes: compared as bytes here, then left out of the element-wise comparison.
+        if (a.pack && b.pack) { expect(Buffer.compare(a.pack.occupancy, b.pack.occupancy), `${task} occupancy after ${n} chunks`).toBe(0); delete a.pack.occupancy; delete b.pack.occupancy; }
         expect(a, `${task} ${JSON.stringify(args)} after ${n} chunks`).toEqual(b);
       }
     }

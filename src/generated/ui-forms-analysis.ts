@@ -4,7 +4,40 @@ import type { FormDef } from '../ui/form-types';
 const F = 'TFrmRadarAnalysis';
 const c = (name: string, cls: string, parent: string, l: number, t: number, w: number, h: number, caption?: string, extra: object = {}) => ({ id: `ui.${F}.${name}`, name, cls, parent, l, t, w, h, caption, ...extra });
 
-/** Radar Analysis Tools: range rings, VR shear, soundings, the cross-section, the max-value trail and rolling volume products. */
+/** Spin increments of the per-moment threshold controls of the 3D volume view (v3Min/v3Iso1/v3Iso2 + moment). */
+const V3_INC: Record<string, number> = { REF: 1, VEL: 5, ZDR: 0.25, CC: 0.01, KDP: 0.25 };
+/** 3D volume view group, in a second column beside the other tools. One threshold control per moment shares each place. */
+const VIEW3D = [
+  c('gb3D', 'TsGroupBox', 'FrmRadarAnalysis', 482, 4, 352, 312, '3D volume view (Level 2 volume; Ctrl+drag tilts the map)'),
+  c('lblV3Mode', 'TsLabel', 'gb3D', 10, 24, 36, 18, 'View:'),
+  c('v3Mode', 'TsComboBox', 'gb3D', 48, 20, 104, 22, undefined, { items: ['Off', 'Volume', 'Isosurfaces'] }),
+  c('lblV3Moment', 'TsLabel', 'gb3D', 162, 24, 48, 18, 'Moment:'),
+  c('v3Moment', 'TsComboBox', 'gb3D', 212, 20, 130, 22, undefined, { items: ['Reflectivity', 'Velocity', 'Storm-relative vel.', 'ZDR', 'CC', 'KDP'] }),
+  c('v3Scale', 'TsCheckBox', 'gb3D', 10, 51, 130, 20, 'Height scale at radar'),
+  c('lblV3Quality', 'TsLabel', 'gb3D', 162, 54, 96, 18, 'Samples per ray:'),
+  c('v3Quality', 'TsSpinEdit', 'gb3D', 262, 51, 80, 22, undefined, { inc: 16 }),
+  c('lblV3Min', 'TsLabel', 'gb3D', 10, 85, 100, 18, 'Volume: from'),
+  c('v3Unit0', 'TsLabel', 'gb3D', 178, 85, 36, 18, 'dBZ'),
+  c('lblV3Opacity', 'TsLabel', 'gb3D', 220, 85, 50, 18, 'Opacity:'),
+  c('v3Opacity', 'TsDecimalSpinEdit', 'gb3D', 272, 82, 70, 22, undefined, { inc: 0.1 }),
+  c('v3Iso1Label', 'TsLabel', 'gb3D', 10, 117, 100, 18, 'Surface 1 from'),
+  c('v3Unit1', 'TsLabel', 'gb3D', 178, 117, 36, 18, 'dBZ'),
+  c('v3Iso1Color', 'TsColorSelect', 'gb3D', 220, 113, 46, 24),
+  c('v3Iso1Alpha', 'TsSpinEdit', 'gb3D', 272, 114, 56, 22, undefined, { min: 0, max: 100, inc: 5 }),
+  c('lblV3Pct1', 'TsLabel', 'gb3D', 331, 117, 14, 18, '%'),
+  c('v3Iso2On', 'TsCheckBox', 'gb3D', 10, 147, 18, 20, ''),
+  c('v3Iso2Label', 'TsLabel', 'gb3D', 30, 149, 80, 18, 'Surface 2 from'),
+  c('v3Unit2', 'TsLabel', 'gb3D', 178, 149, 36, 18, 'dBZ'),
+  c('v3Iso2Color', 'TsColorSelect', 'gb3D', 220, 145, 46, 24),
+  c('v3Iso2Alpha', 'TsSpinEdit', 'gb3D', 272, 146, 56, 22, undefined, { min: 0, max: 100, inc: 5 }),
+  c('lblV3Pct2', 'TsLabel', 'gb3D', 331, 149, 14, 18, '%'),
+  ...Object.entries(V3_INC).flatMap(([m, inc]) => ['Min', 'Iso1', 'Iso2'].map((k, row) => c(`v3${k}${m}`, 'TsDecimalSpinEdit', 'gb3D', 112, 82 + row * 32, 62, 22, undefined, { inc }))),
+  c('v3Status', 'TsMemo', 'gb3D', 10, 180, 332, 56),
+  c('lblV3Hint1', 'TsLabel', 'gb3D', 10, 244, 332, 18, 'Vertical scale: Radar Control → Tilt exaggeration.'),
+  c('lblV3Hint2', 'TsLabel', 'gb3D', 10, 264, 332, 18, 'Velocity surfaces: 1 outbound, 2 inbound (speeds).'),
+];
+
+/** Radar Analysis Tools: range rings, VR shear, soundings, the cross-section, the max-value trail, rolling volume products and the 3D volume view. */
 export const ANALYSIS_FORMS: readonly FormDef[] = [{
   form: F, scope: 'nexrad-pro', controls: [
     { id: `ui.${F}.FrmRadarAnalysis`, name: 'FrmRadarAnalysis', cls: F, parent: null, l: 0, t: 0, caption: 'Radar Analysis Tools' },
@@ -60,5 +93,6 @@ export const ANALYSIS_FORMS: readonly FormDef[] = [{
     c('lblPct', 'TsLabel', 'gbTrail', 406, 52, 20, 18, '%'),
     c('gbRolling', 'TsGroupBox', 'FrmRadarAnalysis', 6, 550, 470, 52, 'Rolling live volume products (Level 2 products 11–19)'),
     c('rlOn', 'TsCheckBox', 'gbRolling', 10, 22, 450, 20, 'Fill tilts not yet rescanned in the live volume from the previous volume'),
+    ...VIEW3D,
   ],
 }];

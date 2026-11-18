@@ -29,3 +29,14 @@ export function toHalf(src: Float32Array): Uint16Array {
   }
   return out;
 }
+
+/** Unpacks IEEE half floats (read-back of rgba16float targets). */
+export function fromHalf(src: Uint16Array): Float32Array {
+  const out = new Float32Array(src.length);
+  for (let i = 0; i < src.length; i++) {
+    const x = src[i], e = (x >> 10) & 31, m = x & 0x3ff;
+    const v = e === 0 ? m * 2 ** -24 : e === 31 ? (m ? NaN : Infinity) : (1 + m / 1024) * 2 ** (e - 15);
+    out[i] = x & 0x8000 ? -v : v;
+  }
+  return out;
+}
