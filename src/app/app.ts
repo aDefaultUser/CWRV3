@@ -54,8 +54,10 @@ import { anisotropyOf } from '../render/mips';
 import { AlertCenter, fetchActiveWarnings, nexradStorms } from './alerts';
 import type { ProbSevereLayer } from '../sections/probsevere';
 import { radarStatus, radarStatusDetail } from '../radar/status';
+import { analysisBindings, analysisMenu, analysisMenuActions, analysisPointMenu, analysisPointActions } from '../ui/analysis-forms';
+import { openSounding } from '../ui/sounding-panel';
 
-type Tool = null | 'line' | 'path' | 'radial' | 'motion' | 'manualTrack' | 'light' | 'telestrate' | 'annotate' | 'labelPlace';
+type Tool = null | 'line' | 'path' | 'radial' | 'motion' | 'manualTrack' | 'light' | 'telestrate' | 'annotate' | 'labelPlace' | 'vrShear' | 'sounding';
 
 export class App {
   renderer: Renderer;
@@ -181,6 +183,7 @@ export class App {
     for (const sec of this.sections) for (const [form, map] of Object.entries(sec.bindings(this))) this.bindings[form] = { ...(this.bindings[form] ?? {}), ...map };
     Object.assign(this.bindings, styleFormBindings(this));
     Object.assign(this.bindings, toolFormBindings(this));
+    Object.assign(this.bindings, analysisBindings(this));
     this.bindings.TFrmStringDisplay = stringDisplayBindings(() => this.viewerText, () => closeDialog('TFrmStringDisplay'));
     this.buildShell();
     // "Show exceptions" (Advanced menu): uncaught errors also appear as toasts (always logged to the console).
@@ -661,7 +664,8 @@ export class App {
   private menuNode(form: string, popup: string): MenuNode { return formMenus(form).get(popup)!; }
   mainMenu(anchor: HTMLElement) {
     const r = anchor.getBoundingClientRect();
-    showMenu(this.menuNode('TFrmMap', 'MainMenu'), r.left, r.bottom, mainMenuActions(this));
+    const node = this.menuNode('TFrmMap', 'MainMenu');
+    showMenu({ ...node, children: [...node.children, ...analysisMenu()] }, r.left, r.bottom, { ...mainMenuActions(this), ...analysisMenuActions(this) });
   }
   l2ProductMenu(anchor: HTMLElement) {
     if (!settings.bool('layerState.NEXRADLevel2')) return;
@@ -677,7 +681,8 @@ export class App {
     showMenu(this.menuNode('TRadarUIFrame', 'mlPopup'), r.left, r.bottom, mlMenuActions(this));
   }
   private ctrlRightMenu(x: number, y: number, ll: [number, number] | null) {
-    showMenu(this.menuNode('TFrmMap', 'CtrlRightClickMenu'), x, y, ctrlRightActions(this, ll));
+    const node = this.menuNode('TFrmMap', 'CtrlRightClickMenu');
+    showMenu({ ...node, children: [...node.children, ...analysisPointMenu()] }, x, y, { ...ctrlRightActions(this, ll), ...analysisPointActions(ll) });
   }
 
   // ------------------------------------------------------------------------------------------- actions
@@ -718,6 +723,8 @@ export class App {
     // Line/Path measurement: starting clears the previous measurement, toggling the tool off clears it too.
     if (t === 'line' || t === 'path') this.annotations.measure = [];
     if (t === 'manualTrack' && this.tool) { this.annotations.manualTrack = null; this.toast('Manual track: click the storm, or several points along a line; right-click to finish.'); }
+    if (t === 'vrShear' && this.tool) { const err = this.nexrad.tools.startShear(); if (err) { this.toast(err); this.tool = null; } }
+    if (t === 'sounding' && this.tool) this.toast('Sounding: click a point on the map');
     if (t === 'motion' && this.centerForMotion) { const s = this.nexrad.siteInfo(); if (s) this.renderer.camera.flyTo({ lon: s.lon, lat: s.lat }, 800); }
     this.canvas.style.cursor = this.tool ? 'crosshair' : '';
     this.annotations.dirty = true;
@@ -1145,6 +1152,11 @@ export class App {
       const hit = this.roads.nameAt(x, y);
       if (hit) { this.roads.labels.push({ lon: hit.lon, lat: hit.lat, name: hit.name, dx: 8, dy: -10 }); this.roads.saveLabels(); return; }
     }
+    if (ll && (this.tool === 'vrShear' || this.tool === 'sounding')) {
+      if (this.tool === 'sounding') { this.tool = null; openSounding(ll[0], ll[1]); } else if (this.nexrad.tools.shearClick(ll)) this.tool = null;
+      if (!this.tool) this.canvas.style.cursor = '';
+      return;
+    }
     if (this.tool && ll) {
       if (this.tool === 'line') { this.annotations.measure.push(ll); if (this.annotations.measure.length > 2) this.annotations.measure = [this.annotations.measure[1], ll]; }
       else if (this.tool === 'path') { if (button === 2) this.tool = null; else this.annotations.measure.push(ll); }
@@ -1248,11 +1260,12 @@ export class App {
 
   private showProbe(p: { kind: string; value: number; layer: string } | null) {
     const pr = this.hud.probe;
-    if ((!p && !this.cpuProbe) || !this.mouse || settings.num('config.generalMapMode') !== 2) { pr.style.display = 'none'; return; }
+    const beam = this.mouse ? this.nexrad.tools.beamProbe(this.mouse[0], this.mouse[1]) : [];
+    if ((!p && !this.cpuProbe && !beam.length) || !this.mouse || settings.num('config.generalMapMode') !== 2) { pr.style.display = 'none'; return; }
     const layer = p ? (this.layers.get(p.layer) as MapLayer | undefined) : undefined;
     const raster = p ? layer?.probeText(p.value) ?? p.value.toFixed(3) : '';
     pr.style.whiteSpace = 'pre';
-    pr.textContent = [this.cpuProbe?.join('\n'), raster].filter(Boolean).join('\n');
+    pr.textContent = [this.cpuProbe?.join('\n'), raster, ...beam].filter(Boolean).join('\n');
     pr.style.display = '';
     pr.style.left = `${this.mouse[0] + 14}px`; pr.style.top = `${this.mouse[1] - 26}px`;
   }
@@ -1269,10 +1282,11 @@ export class App {
         this.renderer.camera.flyTo({ lon: ll[0], lat: ll[1], z: settings.num('config.generalCtrlZZoomLevel') }, settings.num('config.generalCameraFlyDuration'), this.flyOpts());
       } else if (e.altKey && k === 'd') { e.preventDefault(); this.startMeasure('path'); }
       else if (e.altKey && k === 'l') { e.preventDefault(); this.toggleRoadNaming(); }
+      else if (e.altKey && (k === 'v' || k === 's')) { e.preventDefault(); this.startMeasure(k === 'v' ? 'vrShear' : 'sounding'); }
       else if (e.altKey && /^f(\d{1,2})$/.test(k)) { e.preventDefault(); this.applyScene(Number(k.slice(1)) - 1); }
       else if (!e.ctrlKey && !e.altKey && k === 'r') settings.set('settings.nexradSitesOn', !settings.bool('settings.nexradSitesOn'));
       else if (k === ' ' && !e.ctrlKey) { e.preventDefault(); this.clearTelestration(); }
-      else if (k === 'escape') { this.tool = null; this.canvas.style.cursor = ''; }
+      else if (k === 'escape') { this.tool = null; this.canvas.style.cursor = ''; this.nexrad.tools.cancelShear(); }
       else if (e.key === 'F8') { e.preventDefault(); this.perf.toggle(); }
       this.poke();
     });

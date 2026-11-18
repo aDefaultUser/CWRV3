@@ -44,6 +44,8 @@ export class Renderer {
   probeRequest: { x: number; y: number } | null = null;
   lastProbe: ProbeResult | null = null;
   onProbe: ((r: ProbeResult | null) => void) | null = null;
+  /** One-shot probes of a named layer at a CSS pixel (analysis tools); served before the pointer probe. */
+  probeOnce: { x: number; y: number; layer: string; done: (r: ProbeResult | null) => void }[] = [];
   // timing
   private tsQuery: GPUQuerySet | null = null;
   private tsResolve: GPUBuffer | null = null;
@@ -191,10 +193,12 @@ export class Renderer {
     pass.end();
 
     let probeLayer: Drawable | null = null;
-    if (this.probeRequest && !this.probeBusy) {
-      for (let i = this.layers.length - 1; i >= 0; i--) if (this.layers[i].probeKind?.()) { probeLayer = this.layers[i]; break; }
+    const once = this.probeBusy ? undefined : this.probeOnce.shift();
+    if (once || (this.probeRequest && !this.probeBusy)) {
+      if (once) probeLayer = this.layers.find((l) => l.id === once.layer && l.probeKind?.()) ?? null;
+      else for (let i = this.layers.length - 1; i >= 0; i--) if (this.layers[i].probeKind?.()) { probeLayer = this.layers[i]; break; }
       if (probeLayer) {
-        const { x, y } = this.probeRequest;
+        const { x, y } = once ?? this.probeRequest!;
         const W = g.width, H = g.height;
         const cx = ((x * g.dpr) / W) * 2 - 1, cy = 1 - ((y * g.dpr) / H) * 2;
         const M = new Float64Array([W, 0, 0, 0, 0, H, 0, 0, 0, 0, 1, 0, -cx * W, -cy * H, 0, 1]);
@@ -224,15 +228,18 @@ export class Renderer {
       this.probeBusy = true;
       const kind = probeLayer.probeKind!()!;
       const layer = probeLayer.id;
-      this.probeRequest = null;
+      if (!once) this.probeRequest = null;
       this.probeRead.mapAsync(GPUMapMode.READ).then(() => {
         const v = new Float32Array(this.probeRead.getMappedRange().slice(0, 16));
         this.probeRead.unmap();
         this.probeBusy = false;
-        this.lastProbe = v[1] > 0 ? { kind, value: v[0], layer } : null;
+        const r = v[1] > 0 ? { kind, value: v[0], layer } : null;
+        if (once) { once.done(r); return; }
+        this.lastProbe = r;
         this.onProbe?.(this.lastProbe);
-      }, () => { this.probeBusy = false; });
-    } else if (this.probeRequest && !this.probeBusy) {
+      }, () => { this.probeBusy = false; once?.done(null); });
+    } else if (once) once.done(null);
+    else if (this.probeRequest && !this.probeBusy) {
       this.probeRequest = null;
       this.lastProbe = null;
       this.onProbe?.(null);

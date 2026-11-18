@@ -89,6 +89,32 @@ Probe reads the displayed value under the pointer.
   on-line/operating); the site's "i" badge and the map rollover over a site show VCP, operability, state, Level 2
   latency, alarms and the check time. A site reported inoperable or shut down, or whose Level 2 data is more than 30
   minutes old, is drawn grey and dimmed. Missing fields read "unknown"; a table older than 15 minutes is not shown.
+* Radar analysis tools (CWRV3 menu → Radar analysis tools…):
+  * Range rings around the selected NEXRAD site, drawn with the NEXRAD layer: interval (in the distance units of
+    Spatial Tools → Imperial units, mi or km), count, colour, width, distance labels on the north side and optional
+    azimuth spokes every N degrees. They follow site changes.
+  * In Probe mode, single-tilt NEXRAD products (Level 2 base and per-tilt products, Level 3 products with a tilt) add
+    the ground and slant range and azimuth from the radar and the beam-centre height above radar level and sea level
+    (site elevation from the NCEI station table) for the tilt drawn, in mi/ft or km/m. Volume and multi-tilt products
+    (live composite, Level 2 VIL/echo tops/hail/gust, composite reflectivity, precipitation, Level 3 products without
+    a tilt) show none.
+  * VR shear (Alt+V) on a Level 2 velocity / storm-relative velocity or Level 3 velocity / SRM product: click the
+    maximum inbound and then the maximum outbound velocity. Both values are read through the NEXRAD probe (what Probe
+    shows, including smoothing and scan blending) from the scan drawn at the timeline time; the dialog shows Vin, Vout,
+    ΔV, Vr = (|Vin| + |Vout|)/2 (only for opposite signs), the distance, shear ΔV/d (s⁻¹), mean range and beam height.
+    Points must be on screen to be read; a new scan at the timeline time is read again, and a product, tilt or site
+    change clears the measurement. Esc cancels it.
+  * Sounding (Alt+S, or Ctrl+right-click → Sounding here…): click a point; the panel shows a skew-T log-p diagram
+    (temperature, dew point, surface-based and 100 hPa mixed-layer parcels, wind barbs), a hodograph coloured by
+    height band with the Bunkers right/left movers and 0–6 km mean wind, and SB/ML/MU CAPE and CIN, LCL/LFC/EL,
+    0–1/0–3 km helicity (Bunkers right mover), 0–1/0–6 km bulk shear, precipitable water and 700–500 hPa / 0–3 km
+    lapse rates. Sources: the nearest radiosonde (up to three stations within 800 km, 00/12 UTC launches at or before
+    the timeline time, newest first), a model profile (RAP, HRRR, GFS, NAM, RRFS; IEM's nearest BUFKIT site, valid at
+    the timeline time rounded to the hour), or the selected radar's VAD wind profile (Level 3 product 48, newest at or
+    before the timeline time; winds only, layers from its lowest level, standard-atmosphere pressures for the
+    pressure-weighted means). The panel names the station, position, run and valid time that were returned. The
+    formulations follow MetPy 1.7 (Ambaum saturation pressure, Romps LCL, virtual-temperature CAPE/CIN,
+    pressure-weighted Bunkers motion); the unit tests compare them with MetPy's documented values.
 * F8 (or CWRV3 → Advanced → Performance panel) shows the global frame rate and times, GPU pass time where the adapter
   supports timestamp queries, total tracked texture memory and the JS heap (N/A where the browser does not report
   it), and one row per layer or owner with its decode jobs, texture uploads, live texture memory and status. Each layer's decode time excludes network, queueing and transfer, shown beside
@@ -99,8 +125,9 @@ this browser automatically. Use settings export/import to move them to another b
 repository, [aDefaultUser/CWRV3](https://github.com/aDefaultUser/CWRV3).
 
 * Drag to pan; use the wheel to zoom. Ctrl+drag tilts and swivels.
-* R toggles radar site labels; Alt+D measures distance; Alt+L adds road labels.
-* Ctrl+T starts telestration, Space clears it, and Esc cancels the active tool.
+* R toggles radar site labels; Alt+D measures distance; Alt+L adds road labels; Alt+V starts a VR-shear measurement;
+  Alt+S picks a sounding point.
+* Ctrl+T starts telestration, Space clears it, and Esc cancels the active tool (and clears the VR-shear measurement).
 
 ## Development
 
@@ -202,7 +229,8 @@ fallback, HRRR, RRFS, RAP, GFS, NBM, GOES ABI/GLM including the ABI L2+ cloud-to
 temperature and fire/hot spot products, NEXRAD Level 2 archive and real-time chunks), NWS
 TGFTP (Level 2/3, NDFD, text products), api.weather.gov (alerts, zones, radar station status), Aviation Weather Center, SPC, WPC, CPC, NHC, NDBC, USGS
 earthquakes, NASA FIRMS, NOAA water data, the US Drought Monitor (University of Nebraska–Lincoln), Iowa Environmental
-Mesonet, NASA GIBS imagery and AWS Terrain Tiles. Bundled GIS layers come from Natural Earth and US Census TIGER.
+Mesonet (including radiosondes from `json/raob.py` with the station list `api/1/network/RAOB.json`, and BUFKIT model
+profiles from `api/1/nws/bufkit.json`), NASA GIBS imagery and AWS Terrain Tiles. Bundled GIS layers come from Natural Earth and US Census TIGER.
 
 ## Licences and third-party material
 
@@ -218,7 +246,8 @@ Mesonet, NASA GIBS imagery and AWS Terrain Tiles. Bundled GIS layers come from N
   whose use MUTCD 1D.06 limits — the Interstate shield (registered mark of AASHTO; M1-1, M1-1a, M1-2, M1-3, I2-4),
   the 511 travel-information pictograph (D12-5), the National Scenic Byway graphic (M10-1, M10-1aP) and the
   Eisenhower Interstate System graphic, which may be FHWA-owned (M1-10, M1-10a). The app does not draw these files.
-* NWS standard reflectivity/velocity tables via MetPy (BSD-3-Clause): `src/palettes/METPY-LICENSE.txt`.
+* NWS standard reflectivity/velocity tables via MetPy (BSD-3-Clause): `src/palettes/METPY-LICENSE.txt`. The test
+  fixture `tests/fixtures/sounding/ddc-2016052200.txt` is MetPy's `staticdata/may22_sounding.txt` (same licence).
 * npm dependencies: earcut (ISC), @cornerstonejs/codec-openjpeg (MIT), h5wasm (MIT).
 * The Cloud Nuke logo (`public/assets/branding/`) is the owner's artwork.
 
@@ -229,7 +258,7 @@ Mesonet, NASA GIBS imagery and AWS Terrain Tiles. Bundled GIS layers come from N
 
 | Part | Lines |
 | --- | ---: |
-| TypeScript / JavaScript | 18,096 |
+| TypeScript / JavaScript | 18,935 |
 | WGSL shaders | 689 |
-| **Total functional** | **18,785** |
+| **Total functional** | **19,624** |
 | CSS (separate) | 174 |

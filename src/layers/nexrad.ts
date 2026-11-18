@@ -22,6 +22,7 @@ import { perfMark } from '../perf/meter';
 import { ChunkFeed } from '../radar/chunks';
 import { loadPref, savePref, prefObject } from '../app/persist';
 import { matchVolume, overlayFiles, LISTING_LAG_MAX_MS } from '../radar/overlay-match';
+import { RadarTools } from './radar-tools';
 
 export interface TiltTab { key: string; label: string; angle: number; sweepIndices: number[] }
 
@@ -129,12 +130,15 @@ export class NexradLayer extends MapLayer {
   /** Fixed volume list (archive data) used instead of the live index; set by the benchmark and recorded references. */
   fixture: { site: string; files: L2File[] } | null = null;
   private lastDrawn: L2Frame | null = null;
+  /** Range rings and the VR-shear measurement around the selected site. */
+  readonly tools: RadarTools;
 
   constructor(r: Renderer, atlas: GlyphAtlas) {
     super(r);
     this.radar = new RadarDraw(r); this.shadow = new RadarDraw(r); this.oldSweep = new RadarDraw(r); this.l3raster = new RasterDraw(r);
     this.overlayLines = new LineSet(r); this.overlayPts = new PointSet(r); this.overlayText = new TextSet(r, atlas); this.overlayFill = new PolySet(r);
     this.ageText = new TextSet(r, atlas);
+    this.tools = new RadarTools(r, atlas, this);
     onIsotherms(this.isothermsArrived);
   }
 
@@ -811,6 +815,24 @@ export class NexradLayer extends MapLayer {
     return `${bound}${fmtProbe(v)} ${unit}`;
   }
 
+  /**
+   * The scan drawn at the timeline time: its key (display identity, scan times, blend weight) and the elevation of its
+   * single tilt, null for volume and multi-tilt products (live composite, Level 2 volumetric products, Level 3
+   * products without a tilt).
+   */
+  shownScan(): { key: string; t: number; elevation: number | null } | null {
+    if (!this.enabled()) return null;
+    const blendKey = (b: { t: number } | null, w: number) => (b ? `${b.t}|${w.toFixed(2)}` : '');
+    if (this.isL2()) {
+      const { a, b, w } = bracket(this.shownL2().map((f) => ({ t: f.t, f })), timeline.t, settings.num('settings.nexradScanTransitionMode') >= 1, 15 * 60e3);
+      if (!a?.f.sweep) return null;
+      return { key: `${this.l2Identity()}|${a.t}|${blendKey(b, w)}`, t: a.t, elevation: this.liveComposite || this.product() >= 11 ? null : a.f.sweep.elevation };
+    }
+    const { a, b, w } = bracket(this.shownL3().map((f) => ({ t: f.t, f })), timeline.t, settings.bool('layerState.RasterDataTemporalInterpolation') && settings.num('settings.nexradScanTransitionMode') >= 1, 15 * 60e3);
+    if (!a) return null;
+    return { key: `${this.l3Identity()}|${a.t}|${blendKey(b, w)}`, t: a.t, elevation: a.f.tex && this.l3Entry().tilt !== null ? a.f.elevation ?? null : null };
+  }
+
   tick(_t: number, now: number) {
     if (this.mesoPts.length && settings.bool('settings.nexradTracksPulsateMESO')) {
       const a = 0.55 + 0.45 * Math.sin(now / 160);
@@ -936,6 +958,7 @@ export class NexradLayer extends MapLayer {
     }
     if (!ctx.probe) this.syncOverlays(radarT, radarScan);
     if (!ctx.probe) { this.overlayFill.draw(ctx); this.overlayLines.draw(ctx); this.overlayPts.draw(ctx); this.overlayText.draw(ctx); }
+    if (!ctx.probe && info) this.tools.draw(ctx, info);
     if (!ctx.probe && this.dataAge && settings.bool('settings.nexradLiveScanDataAgeIndicator') && !settings.bool('settings.nexradLiveScanDataAgeIndicatorLegacy')) this.ageText.draw(ctx);
   }
 
