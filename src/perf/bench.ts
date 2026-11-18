@@ -9,6 +9,7 @@ import { timeline } from '../app/timeline';
 import type { L2File } from '../radar/sources';
 import { pool } from '../workers/pool';
 import { VolumeSection, sectionPoint, type SectionLine } from '../render/volume';
+import { trailReference, TRAIL_ROWS } from '../render/trail';
 import { sampleVolume, stormRelativeCode } from '../radar/volume-sample';
 import type { VolumePack } from '../radar/volume-pack';
 import type { VolumeMoment } from '../radar/l2products';
@@ -180,11 +181,37 @@ export function installBench(app: App) {
     return { results: out, gpuPrepassMs: prepassMs, gpuMs: r.gpuMs, packBytes: nx.volumes.bytes };
   }
 
+  /**
+   * Compares the max-value trail drawn now (GPU max blend) with trailReference over the same volumes' product images,
+   * requested again from the worker: texel by texel, the count of texels that differ (expected 0).
+   */
+  async function trailCheck() {
+    const t = app.nexrad.trail.target;
+    if (!t) return { error: 'no trail drawn (turn it on in Radar analysis tools with a Level 2 loop)' };
+    const d = app.renderer.gpu.device, { gates } = t.sweep, stride = Math.ceil(gates / 256) * 256;
+    const buf = d.createBuffer({ size: stride * TRAIL_ROWS, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+    const enc = d.createCommandEncoder();
+    enc.copyTextureToBuffer({ texture: t.tex }, { buffer: buf, bytesPerRow: stride }, [gates, TRAIL_ROWS]);
+    d.queue.submit([enc.finish()]);
+    await buf.mapAsync(GPUMapMode.READ);
+    const rows = new Uint8Array(buf.getMappedRange()), gpu = new Uint8Array(gates * TRAIL_ROWS);
+    for (let y = 0; y < TRAIL_ROWS; y++) gpu.set(rows.subarray(y * stride, y * stride + gates), y * gates);
+    buf.unmap(); buf.destroy();
+    const sources = await Promise.all(t.inputs.map(async ({ args, geom }) => {
+      const res = await pool.for('bench').run<{ sweep: { upload: Uint8Array } }>('l2.product', args, (args as { url: string }).url);
+      return { geom, image: res.sweep.upload };
+    }));
+    const ref = trailReference(t.sweep, sources);
+    let differ = 0, data = 0;
+    for (let i = 0; i < ref.length; i++) { if (ref[i]) data++; if (ref[i] !== gpu[i]) differ++; }
+    return { product: t.product, label: t.label, volumes: t.n, gates, texels: ref.length, data, differ };
+  }
+
   function download(obj: unknown, name = `cwrv3-bench-${Date.now()}.json`) {
     const a = document.createElement('a');
     a.href = URL.createObjectURL(new Blob([JSON.stringify(obj, null, 1)], { type: 'application/json' }));
     a.download = name; a.click();
   }
 
-  (window as unknown as { cwrv3bench: unknown }).cwrv3bench = { run, download, useL2Fixture, volumeCheck, app, settings, timeline };
+  (window as unknown as { cwrv3bench: unknown }).cwrv3bench = { run, download, useL2Fixture, volumeCheck, trailCheck, app, settings, timeline };
 }

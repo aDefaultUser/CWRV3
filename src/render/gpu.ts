@@ -106,6 +106,13 @@ export class Gpu {
     return t;
   }
 
+  /** A tracked texture the GPU renders into (render passes, blending) and that can be sampled and read back. */
+  renderTarget(w: number, h: number, format: GPUTextureFormat, bytesPerTexel: number, owner = 'unattributed'): GPUTexture {
+    const t = this.device.createTexture({ size: [w, h], format, usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_SRC });
+    this.trackTexture(t, w * h * bytesPerTexel, owner);
+    return t;
+  }
+
   write(t: GPUTexture, w: number, h: number, data: ArrayBufferView, bytesPerTexel: number, origin: [number, number, number] = [0, 0, 0], owner = 'unattributed') {
     const t0 = performance.now();
     this.device.queue.writeTexture({ texture: t, origin }, data as BufferSource, { bytesPerRow: w * bytesPerTexel, rowsPerImage: h }, [w, h, 1]);

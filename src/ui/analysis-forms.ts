@@ -1,10 +1,12 @@
 // Radar analysis tools dialog (CWRV3 addition; geometry in generated/ui-forms-analysis.ts): bindings and the menu
-// entries that open it. Range-ring controls bind through their settings catalog `ui` entries.
+// entries that open it. Range-ring, cross-section, trail and rolling controls bind through their settings catalog `ui`
+// entries; the two combo boxes bind here.
 import type { App } from '../app/app';
 import type { BindingMap, MenuNode } from './form';
 import type { MenuAction } from './dialogs';
 import { settings } from '../settings/store';
 import { openSounding } from './sounding-panel';
+import { TRAIL_PRODUCTS } from '../layers/radar-trail';
 
 const F = 'TFrmRadarAnalysis';
 
@@ -19,6 +21,10 @@ export function analysisBindings(app: App): Record<string, BindingMap> {
       [`${F}.btnShearClear`]: act(() => { app.nexrad.tools.cancelShear(); if (app.tool === 'vrShear') app.startMeasure('vrShear'); }),
       [`${F}.mmShear`]: { kind: 'status', text: () => app.nexrad.tools.shearText() },
       [`${F}.btnSounding`]: act(() => app.startMeasure('sounding'), () => app.tool === 'sounding'),
+      [`${F}.btnSection`]: act(() => app.startMeasure('section'), () => app.tool === 'section'),
+      [`${F}.btnSectionClear`]: act(() => app.nexrad.section.clear()),
+      [`${F}.xsMoment`]: { kind: 'combo', id: 'ext.settings.nexradSectionMoment' },
+      [`${F}.trProduct`]: { kind: 'combo', id: 'ext.settings.nexradTrailProduct', values: [...TRAIL_PRODUCTS] },
     },
   };
 }
@@ -26,12 +32,14 @@ export function analysisBindings(app: App): Record<string, BindingMap> {
 /** Main-menu entries appended after the catalog items. */
 export function analysisMenu(): MenuNode[] {
   return [{ id: 'ext.anSep', name: 'anSep', caption: '-', children: [] }, { id: 'ext.anTools', name: 'anTools', caption: 'Radar analysis tools…', children: [] },
-    { id: 'ext.anShear', name: 'anShear', caption: 'VR shear (Alt+V)', children: [] }, { id: 'ext.anSounding', name: 'anSounding', caption: 'Sounding at a point (Alt+S)', children: [] }];
+    { id: 'ext.anShear', name: 'anShear', caption: 'VR shear (Alt+V)', children: [] }, { id: 'ext.anSounding', name: 'anSounding', caption: 'Sounding at a point (Alt+S)', children: [] },
+    { id: 'ext.anSection', name: 'anSection', caption: 'Cross-section / RHI (Alt+X)', children: [] }];
 }
 export function analysisMenuActions(app: App): Record<string, MenuAction> {
   return {
     anTools: { run: () => app.dialog(F) }, anShear: { run: () => app.startMeasure('vrShear'), checked: () => app.tool === 'vrShear' },
     anSounding: { run: () => app.startMeasure('sounding'), checked: () => app.tool === 'sounding' },
+    anSection: { run: () => app.startMeasure('section'), checked: () => app.tool === 'section' },
   };
 }
 

@@ -3,7 +3,7 @@
 import { Archive2Decoder, type L2Volume } from '../decode/archive2';
 import { bunzip2 } from '../decode/bzip2';
 import { fetchBytes } from '../data/net';
-import { recodeVolume, buildProduct, liveComposite, SweepCache, type BuilderSweep, type L2BuildParams, type L2ProductSweep, type VolumeMoment } from '../radar/l2products';
+import { recodeVolume, buildProduct, liveComposite, rollingTilts, SweepCache, type BuilderSweep, type L2BuildParams, type L2ProductSweep, type VolumeMoment } from '../radar/l2products';
 import { buildVolumePack } from '../radar/volume-pack';
 import { padSweep } from '../radar/sweep-pad';
 import type { JobClock, JobHandler } from './job-clock';
@@ -154,6 +154,21 @@ function l2Product(v: VolEntry, a: { sweep: number; product: number; params: L2B
   };
 }
 
+/**
+ * A volume product of a live volume in rolling mode: built from the live volume's complete tilts and the previous
+ * volume's tilts above them (rollingTilts). Returns the sweep with the time span of the data used and how many tilts
+ * came from each volume; not cached, as the live volume changes with every request.
+ */
+function rollingProduct(v: VolEntry, prev: VolEntry, a: { product: number; params: L2BuildParams }) {
+  const pick = rollingTilts(v.sweeps, prev.sweeps);
+  const sweeps = [...pick.live.map((i) => v.sweeps[i]), ...pick.prev.map((i) => prev.sweeps[i])];
+  const times = [...pick.live.map((i) => v.volume.sweeps[i].timesMs), ...pick.prev.map((i) => prev.volume.sweeps[i].timesMs)].filter((t) => t.length);
+  const p = sweeps.length ? buildProduct(a.product, sweeps[0], sweeps, a.params) : null;
+  if (!p) return { meta: v.meta, sweep: null };
+  const startMs = Math.min(...times.map((t) => t[0])), endMs = Math.max(...times.map((t) => t[t.length - 1]));
+  return { meta: v.meta, sweep: { ...p, startMs, endMs, rolling: { liveTilts: pick.live.length, prevTilts: pick.prev.length, prevTimeMs: prev.meta.volumeTimeMs } } };
+}
+
 /** Adds the padded upload image to a sweep result so the main thread only copies it to the GPU. */
 function withUpload<T extends { sweep: any }>(r: T): T {
   const s = r.sweep;
@@ -177,6 +192,10 @@ export const L2_HANDLERS: Record<string, JobHandler> = {
   'l2.meta': async (a, job) => (await loadVolume(a.url, a.live, job, a.chunks)).meta,
   'l2.product': async (a, job) => {
     const v = await loadVolume(a.url, a.live, job, a.chunks);
+    if (a.rolling) {
+      const prev = await loadVolume(a.rolling.url, false, job, a.rolling.chunks);
+      return job.time(() => withUpload(rollingProduct(v, prev, a)));
+    }
     return job.time(() => {
       const r = l2Product(v, a);
       // 8-bit ZDR codes are inverted by the builder; the display maps them back.

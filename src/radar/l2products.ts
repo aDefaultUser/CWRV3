@@ -452,6 +452,19 @@ export function volumetricSweeps(sweeps: BuilderSweep[]): BuilderSweep[] {
   return kept;
 }
 
+/**
+ * Rolling volume: the tilts a volume product is built from while a live volume is still being scanned. The complete
+ * sweeps of the live volume come first; the previous volume fills the tilts above the highest one the live volume
+ * has rescanned (its volumetricSweeps more than 0.2° higher, so a tilt scanned in both is taken from the live
+ * volume). Indices are into `live` and `prev`.
+ */
+export function rollingTilts(live: BuilderSweep[], prev: BuilderSweep[]): { live: number[]; prev: number[] } {
+  const angle = (s: BuilderSweep) => s.nominal ?? s.elevation;
+  const fresh = volumetricSweeps(live.filter((s) => s.complete));
+  const top = fresh.length ? Math.max(...fresh.map(angle)) : -Infinity;
+  return { live: fresh.map((s) => live.indexOf(s)), prev: volumetricSweeps(prev).filter((s) => angle(s) > top + 0.2).map((s) => prev.indexOf(s)) };
+}
+
 // -------------------------------------------------------------------------------------------- azimuth frame
 /**
  * Azimuth frame shared by the volume products and the volume packs (volume-pack.ts): AZ_BINS half-degree bins, bin b
