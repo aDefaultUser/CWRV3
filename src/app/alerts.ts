@@ -172,19 +172,20 @@ export class AlertMemory {
 // ------------------------------------------------------------------------------------------- NEXRAD adapter
 const KM_DEG = 111.2;
 /**
- * The one place alerts read NEXRAD storm attributes: today the selected site's Level 3 overlays (storm tracks and
- * TVS icons must be on); re-point at the NEXRAD layer's latestStormAttributes() when that exists. Null for fixtures
- * and for products older than 15 minutes.
+ * The one place alerts read NEXRAD storm attributes: the selected site's newest volume (not the frame on screen), from
+ * the Level 3 overlays that are switched on (storm tracks for arrival, TVS icons for TVS). Null for fixtures and for
+ * products older than 15 minutes.
  */
 export function nexradStorms(n: NexradLayer, now = Date.now()): StormAttributes | null {
-  const s = n.siteInfo();
-  if (!s || n.fixture || !n.overlayTime || now - n.overlayTime > 15 * 60e3) return null;
+  const s = n.siteInfo(), a = n.latestStormAttributes();
+  if (!s || !a || a.site !== s.id || n.fixture || now - a.volumeTimeMs > 15 * 60e3) return null;
   const ll = (x: number, y: number) => ({ lon: s.lon + x / (KM_DEG * Math.cos((s.lat * Math.PI) / 180)), lat: s.lat + y / KM_DEG });
+  const cells = a.cells ?? [];
   return {
-    site: s.id, timeMs: n.overlayTime,
-    cells: n.scit.filter((c) => c.dir === c.dir && c.speed === c.speed).map((c) => ({ id: c.id, ...ll(c.x, c.y), fromDeg: c.dir, speedKt: c.speed })),
-    tvs: n.overlays.tvs.map((t: { x: number; y: number }) => {
-      const cell = n.scit.find((c) => Math.hypot(t.x - c.x, t.y - c.y) < 6), p = ll(t.x, t.y);
+    site: s.id, timeMs: a.volumeTimeMs,
+    cells: cells.filter((c) => c.dir === c.dir && c.speed === c.speed).map((c) => ({ id: c.id, ...ll(c.x, c.y), fromDeg: c.dir, speedKt: c.speed })),
+    tvs: (a.tvs ?? []).map((t: { x: number; y: number }) => {
+      const cell = cells.find((c) => Math.hypot(t.x - c.x, t.y - c.y) < 6), p = ll(t.x, t.y);
       return { id: cell?.id ?? `${p.lat.toFixed(1)},${p.lon.toFixed(1)}`, ...p };
     }),
   };

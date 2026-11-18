@@ -79,7 +79,6 @@ export async function listL3(site: string, ds: string): Promise<L3File[]> {
   return items.filter((i) => /^sn\.\d{4}$/.test(i.name)).map((i) => ({ t: tgftpTime(i.modified), url: base + i.name, name: i.name })).filter((f) => f.t === f.t).sort((a, b) => a.t - b.t);
 }
 
-export const l3Last = (site: string, ds: string) => `${TGFTP_L3}DS.${ds}/SI.${site.toLowerCase()}/sn.last`;
 
 export type L3Entry = (typeof PRODUCTS.level3)[number];
 export const L3 = PRODUCTS.level3;

@@ -162,7 +162,7 @@ export function buildBindings(app: App): Record<string, BindingMap> {
   const motion: BindingMap = {
     'TFrmStormMotionVectorControl.sRadioButton1': radio('settings.nexradStormMotionCustom', false),
     'TFrmStormMotionVectorControl.sRadioButton2': radio('settings.nexradStormMotionCustom', true),
-    'TFrmStormMotionVectorControl.sLabelFX4': status(() => { const a = nx().autoMotion; return settings.bool('settings.nexradStormMotionCustom') ? 'Status: manual vector in use' : a ? `Storm Motion retrieved (${a.speedKt.toFixed(0)} kt from ${a.fromDeg.toFixed(0)}°)` : 'No current Level 3 vector available; using manual.'; }),
+    'TFrmStormMotionVectorControl.sLabelFX4': status(() => { const a = nx().motionFor(nx().shownVolume); return settings.bool('settings.nexradStormMotionCustom') ? 'Status: manual vector in use' : a ? `Storm Motion retrieved (${a.speedKt.toFixed(0)} kt from ${a.fromDeg.toFixed(0)}°)` : 'No Level 3 vector for the shown volume; using manual.'; }),
     'TFrmStormMotionVectorControl.sSpeedButton4': act(() => app.startMeasure('motion'), () => app.tool === 'motion'),
     'TFrmStormMotionVectorControl.sCheckBox1': custom(() => app.centerForMotion, (v) => (app.centerForMotion = !!v)),
   };

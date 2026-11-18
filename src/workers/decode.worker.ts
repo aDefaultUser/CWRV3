@@ -150,7 +150,7 @@ function l2Product(v: VolEntry, a: { sweep: number; product: number; params: L2B
 function l3Result(p: L3Product) {
   return {
     code: p.code, awips: p.awips, lat: p.lat, lon: p.lon, heightFt: p.heightFt, vcp: p.vcp, opMode: p.opMode,
-    volumeTimeMs: p.volumeTimeMs, generationTimeMs: p.generationTimeMs, elevationNumber: p.elevationNumber, p: p.p,
+    volumeTimeMs: p.volumeTimeMs, generationTimeMs: p.generationTimeMs, volumeScan: p.volumeScan, elevationNumber: p.elevationNumber, p: p.p,
     radial: p.radial, raster: p.raster, lut: p.lut, flags: [...p.flags], units: p.units,
     cells: p.cells, tvs: p.tvs, etvs: p.etvs, hail: p.hail, features: p.features, contours: p.contours, texts: p.texts, circles: p.circles, pages: p.pages,
   };

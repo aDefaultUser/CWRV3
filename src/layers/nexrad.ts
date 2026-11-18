@@ -14,13 +14,14 @@ import { evalPalette } from '../render/palette';
 import { PolySet, type PolyFill, type FillStyle } from '../render/polys';
 import { LineSet, PointSet, TextSet, GlyphAtlas, SHAPE, type Polyline, type PointSpec, type Label } from '../render/prims';
 import { RADAR_SITES } from '../generated/radar-sites';
-import { listL2, listL3, l2Retention, l3Last, effectiveSource, L2, L3, l3Range, l3PaletteKey, L2_PALETTE_KEYS, l2Moment, type L2File, type L3Entry } from '../radar/sources';
+import { listL2, listL3, l2Retention, effectiveSource, L2, L3, l3Range, l3PaletteKey, L2_PALETTE_KEYS, l2Moment, type L2File, type L3Entry } from '../radar/sources';
 import type { L2Meta, L2SweepMeta } from '../workers/decode.worker';
 import { algorithmKey, type L2BuildParams } from '../radar/l2products';
 import { hailThresholds } from '../settings/postload';
 import { perfMark } from '../perf/meter';
 import { ChunkFeed } from '../radar/chunks';
 import { loadPref, savePref, prefObject } from '../app/persist';
+import { matchVolume, overlayFiles, LISTING_LAG_MAX_MS } from '../radar/overlay-match';
 
 export interface TiltTab { key: string; label: string; angle: number; sweepIndices: number[] }
 
@@ -28,13 +29,30 @@ export interface TiltTab { key: string; label: string; angle: number; sweepIndic
  * A Level 2 volume. `sweep.id` is the display identity the sweep was built for (NexradLayer.l2Identity), `key` the
  * exact request it came from, `req` the newest request in flight and `metaReq` the newest metadata read.
  */
-interface L2Frame { t: number; file: L2File; meta?: L2Meta; sweep?: SweepTex & { elevation: number; startMs: number; endMs: number; complete: boolean; progress: number; id: string }; key?: string; req?: string; metaReq?: number; error?: string }
+interface L2Frame { t: number; file: L2File; meta?: L2Meta; sweep?: SweepTex & { elevation: number; startMs: number; endMs: number; complete: boolean; progress: number; id: string; motion: string }; key?: string; req?: string; metaReq?: number; error?: string }
 /** A Level 3 file; `id` is the site and product it belongs to (NexradLayer.l3Identity). */
-interface L3Frame { t: number; url: string; id: string; tex?: SweepTex; raster?: { tex: GPUTexture; bounds: [number, number, number, number]; nx: number; ny: number }; vcp?: number; volumeTimeMs?: number; loading?: boolean; error?: string; elevation?: number }
+interface L3Frame { t: number; url: string; id: string; tex?: SweepTex; raster?: { tex: GPUTexture; bounds: [number, number, number, number]; nx: number; ny: number }; vcp?: number; volumeTimeMs?: number; volumeScan?: number; loading?: boolean; error?: string; elevation?: number }
 
-/** An automatic storm motion vector is current for this long after its product's volume time. */
+/** The newest automatic storm motion vector (custom radar input) is current for this long after its volume time. */
 export const AUTO_MOTION_MAX_AGE = 20 * 60e3;
+const ML_DS = ['166m0', '166ma', '166m1', '166mb', '166m2', '166m3'];
+/** Automatic storm motion: 56rm0 average storm speed and direction (halfwords 51/52, tenths), or null when invalid. */
+const motionOf = (p: { p?: number[] } | null): { speedKt: number; fromDeg: number } | null => {
+  const sp = p?.p ? p.p[7] / 10 : NaN, dir = p?.p ? p.p[8] / 10 : NaN;
+  return sp >= 0 && sp < 150 && dir >= 0 && dir <= 360 ? { speedKt: sp, fromDeg: dir } : null;
+};
+const utcHm = (t: number) => new Date(t).toISOString().slice(11, 16);
 const kmToLonLat = (lon0: number, lat0: number, x: number, y: number): [number, number] => [lon0 + x / (111.2 * Math.cos((lat0 * Math.PI) / 180)), lat0 + y / 111.2];
+
+/** Storm motion per cell id (direction from, deg; speed, kt) from the STI product's text pages. */
+function stiMotion(pages: string[][]) {
+  const motion = new Map<string, { dir: number; speed: number }>();
+  for (const page of pages) for (const line of page) {
+    const m = /^\s*([A-Z]\d)\s+\d+\/\s*\d+\s+(\d+)\/\s*(\d+)/.exec(line);
+    if (m) motion.set(m[1], { dir: +m[2], speed: +m[3] });
+  }
+  return motion;
+}
 
 export class NexradLayer extends MapLayer {
   readonly id = 'nexrad';
@@ -68,16 +86,43 @@ export class NexradLayer extends MapLayer {
   private ageText: TextSet;
   overlays: { cells: any[]; tvs: any[]; hail: any[]; meso: any[]; ml: any[]; ss: string[][]; sti: string[][] } = { cells: [], tvs: [], hail: [], meso: [], ml: [], ss: [], sti: [] };
   /**
-   * Automatic storm motion: the current Level 3 (56rm0) vector of the selected site and its product time; null when
-   * there is none (another site, a failed or invalid read, or older than AUTO_MOTION_MAX_AGE).
+   * Newest automatic storm motion: the Level 3 (56rm0) vector of the selected site's newest volume and its volume
+   * time (the custom radar's automatic input); null when there is none, it is invalid or older than AUTO_MOTION_MAX_AGE.
    */
   autoMotion: { speedKt: number; fromDeg: number; site: string; timeMs: number } | null = null;
-  /** Volume time of the storm-cell (STI) product behind `scit`, for tracking-mode ETAs. */
+  /** Volume time of the storm-cell (STI) product behind `scit` (0 when none matches the shown volume), for ETAs. */
   overlayTime = 0;
-  /** Storm motion in use: the manual vector, or the L3 vector when automatic and available. */
-  stormMotion(): { speedKt: number; fromDeg: number } {
-    if (settings.bool('settings.nexradStormMotionCustom') || !this.autoMotion) return { speedKt: settings.num('settings.nexradStormMotionSpeed'), fromDeg: settings.num('settings.nexradStormMotionAzimuth') };
-    return { speedKt: this.autoMotion.speedKt, fromDeg: this.autoMotion.fromDeg };
+  /** Decoded storm-attribute products by `site|ds`, then volume time (ms). */
+  private storm = new Map<string, Map<number, any>>();
+  /** Product files already read (`url@listing time` → listing time). */
+  private stormRead = new Map<string, number>();
+  /** Set once the selected site's products were listed; until then a missing match is not reported. */
+  private stormListed = false;
+  /** Products matched to the shown volume; the overlays are rebuilt when it changes. */
+  private overlayKey = '';
+  /** Volume time the overlays and storm motion are matched to: the drawn radar frame, else the products' own loop. */
+  shownVolume: number | null = null;
+  /** "No storm attributes for HH:MMZ" when an overlay is on and no product matches the shown volume, else ''. */
+  overlayNote = '';
+  private products(ds: string): Iterable<any> { return this.storm.get(`${this.currentSite()}|${ds}`)?.values() ?? []; }
+  /** Automatic (56rm0) storm motion of the volume scanned at `volumeMs`, or null when none matches it. */
+  motionFor(volumeMs: number | null): { speedKt: number; fromDeg: number } | null {
+    return volumeMs === null ? null : motionOf(matchVolume(this.products('56rm0'), volumeMs));
+  }
+  /** Storm motion for a volume (default the shown one): the manual vector, or its own L3 vector when automatic. */
+  stormMotion(volumeMs = this.shownVolume): { speedKt: number; fromDeg: number } {
+    const auto = settings.bool('settings.nexradStormMotionCustom') ? null : this.motionFor(volumeMs);
+    return auto ?? { speedKt: settings.num('settings.nexradStormMotionSpeed'), fromDeg: settings.num('settings.nexradStormMotionAzimuth') };
+  }
+  /** Storm attributes of the newest loaded volume (for live consumers); a list is null when its product is not loaded. */
+  latestStormAttributes(): { site: string; volumeTimeMs: number; cells: any[] | null; tvs: any[] | null; hail: any[] | null; meso: any[] | null } | null {
+    const ds = ['58sti', '61tvs', 'p59hi', '141md'];
+    const newest = Math.max(...ds.flatMap((d) => [...this.products(d)].map((p) => p.volumeTimeMs)));
+    if (!Number.isFinite(newest)) return null;
+    const [sti, tvs, hi, md] = ds.map((d) => matchVolume(this.products(d), newest));
+    const motion = stiMotion(sti?.pages ?? []);
+    const cells = sti ? sti.cells.map((c: any) => ({ ...c, dir: motion.get(c.id)?.dir ?? NaN, speed: motion.get(c.id)?.speed ?? NaN })) : null;
+    return { site: this.currentSite(), volumeTimeMs: newest, cells, tvs: tvs ? [...tvs.tvs, ...tvs.etvs] : null, hail: hi?.hail ?? null, meso: md?.features ?? null };
   }
   scit: { id: string; dir: number; speed: number; maxDbz: number; tvs: boolean; meso: boolean; poh: number; posh: number; mehs: number; x: number; y: number }[] = [];
   onTilts: () => void = () => {};
@@ -110,11 +155,16 @@ export class NexradLayer extends MapLayer {
    */
   l2Identity(): string {
     const p = this.product(), tilt = this.liveComposite || p >= 11 ? '' : this.tiltAngle;
-    const auto = !settings.bool('settings.nexradStormMotionCustom') && !!this.autoMotion;
+    // Automatic storm motion is per volume (each sweep records the vector it was built with; see fits).
+    const auto = !settings.bool('settings.nexradStormMotionCustom');
     return `${this.currentSite()}|${p}|${this.liveComposite}|${tilt}|${algorithmKey(p, this.algorithmParams(), auto)}`;
   }
   l3Identity(): string { return `${this.currentSite()}|${this.l3Entry().ds}`; }
-  private shownL2(): L2Frame[] { const id = this.l2Identity(); return this.l2.filter((f) => f.sweep?.id === id); }
+  private shownL2(): L2Frame[] { const id = this.l2Identity(); return this.l2.filter((f) => this.fits(f, id)); }
+  /** A sweep fits its identity; storm-relative velocity also only while built with its volume's current storm motion. */
+  private fits(f: L2Frame, id: string): boolean {
+    return f.sweep?.id === id && (this.product() !== 7 || this.liveComposite || f.sweep.motion === JSON.stringify(this.stormMotion(f.t)));
+  }
   private shownL3(): L3Frame[] { const id = this.l3Identity(); return this.l3.filter((f) => f.id === id && (f.tex || f.raster)); }
   private dropSweep(f: L2Frame) { f.sweep?.tex.destroy(); f.sweep = undefined; }
 
@@ -126,6 +176,7 @@ export class NexradLayer extends MapLayer {
     this.l2 = []; this.l3 = []; this.tilts = []; this.onTilts();
     this.overlays = { cells: [], tvs: [], hail: [], meso: [], ml: [], ss: [], sti: [] };
     this.scit = [];
+    this.storm.clear(); this.stormRead.clear(); this.stormListed = false; this.overlayKey = ''; this.overlayTime = 0;
     this.clearAutoMotion(); // the previous site's vector is never the new site's automatic input
   }
 
@@ -136,7 +187,7 @@ export class NexradLayer extends MapLayer {
 
   /** Build parameters of the selected product at the selected site for a volume scanned at `volumeMs`. */
   buildParams(volumeMs = timeline.t): L2BuildParams {
-    const p = this.algorithmParams();
+    const p = this.algorithmParams(volumeMs);
     return { ...p, envIsotherms: hailEnvironment(this.product(), p.isothermAuto, this.sitePoint(), volumeMs) };
   }
   /** Rebuilds a hail product of the selected site when its isotherms arrive (other radars' arrivals are ignored). */
@@ -165,16 +216,14 @@ export class NexradLayer extends MapLayer {
   /** Drops an automatic vector whose product is older than AUTO_MOTION_MAX_AGE (no longer current). */
   expireAutoMotion(now = Date.now()) { if (this.autoMotion && now - this.autoMotion.timeMs > AUTO_MOTION_MAX_AGE) this.clearAutoMotion(); }
   private autoMotionChanged() {
-    if (this.isL2() && this.product() === 7) this.reloadL2();
     for (const fn of this.autoMotionListeners) fn();
   }
-  /** Product algorithm settings (without the environmental isotherms, which depend on the volume time). */
-  algorithmParams(): Omit<L2BuildParams, 'envIsotherms'> {
+  /** Product algorithm settings for a volume (without the environmental isotherms, which depend on the volume time). */
+  algorithmParams(volumeMs = this.shownVolume): Omit<L2BuildParams, 'envIsotherms'> {
     const [zl, zu] = hailThresholds(settings.num('settings.nexradAlgorithmHailZLower'), settings.num('settings.nexradAlgorithmHailZUpper'));
-    const custom = settings.bool('settings.nexradStormMotionCustom') || !this.autoMotion;
     return {
       qualityDealiasing: settings.bool('settings.nexradQualityDealiasing'),
-      stormMotion: custom ? { speedKt: settings.num('settings.nexradStormMotionSpeed'), fromDeg: settings.num('settings.nexradStormMotionAzimuth') } : { speedKt: this.autoMotion!.speedKt, fromDeg: this.autoMotion!.fromDeg },
+      stormMotion: this.stormMotion(volumeMs),
       hailZLower: zl, hailZUpper: zu,
       // "Custom isotherm heights" on → the custom heights; off → the environmental table (falls back to custom).
       isothermAuto: !settings.bool('settings.nexradAlgorithmHailIsothermCustom'),
@@ -200,9 +249,8 @@ export class NexradLayer extends MapLayer {
     try {
       if (this.enabled() && this.isL2()) await this.refreshL2(site);
       if (this.enabled() && !this.isL2()) await this.refreshL3(site);
-      // Overlays come from the live Level 3 feed; they would not match archived fixture volumes.
       // Overlay products change once per volume: live-sweep polls (every few seconds) re-read them at most each minute.
-      if (!this.fixture && (this.overlaysEnabled() || settings.num('layerState.NEXRADLevel2Product') === 7) && (!this.liveScan || Date.now() - this.overlaysAt > 60e3)) { this.overlaysAt = Date.now(); await this.refreshOverlays(site); }
+      if ((this.overlaysEnabled() || settings.num('layerState.NEXRADLevel2Product') === 7) && (!this.liveScan || Date.now() - this.overlaysAt > 60e3)) { this.overlaysAt = Date.now(); await this.refreshOverlays(site); }
     } catch (e) {
       this.statusText = `Error: ${(e as Error).message}`;
       this.setStatus('error', this.statusText);
@@ -325,7 +373,7 @@ export class NexradLayer extends MapLayer {
       const old = f.sweep;
       const tex = uploadSweep(this.r, s, this.id);
       const expected = s.half ? 720 : 360;
-      f.sweep = { ...tex, elevation: s.elevation, startMs: s.startMs, endMs: s.endMs, complete: s.complete, progress: Math.min(1, s.radials / expected), id };
+      f.sweep = { ...tex, elevation: s.elevation, startMs: s.startMs, endMs: s.endMs, complete: s.complete, progress: Math.min(1, s.radials / expected), id, motion: JSON.stringify(params.stormMotion) };
       if (old?.id === id && f.file.live) { this.wipeStart = performance.now(); this.wipeFromKey = f.key ?? ''; }
       // Live-composite update effect: flash when the newest composite changes (not on the first load).
       if (composite && f === this.l2[this.l2.length - 1]) {
@@ -383,7 +431,7 @@ export class NexradLayer extends MapLayer {
   private reloadL2() {
     const id = this.l2Identity();
     let dropped = false;
-    for (const f of this.l2) { if (f.sweep && f.sweep.id !== id) { this.dropSweep(f); f.key = undefined; dropped = true; } void this.loadL2(f); }
+    for (const f of this.l2) { if (f.sweep && !this.fits(f, id)) { this.dropSweep(f); f.key = undefined; dropped = true; } void this.loadL2(f); }
     if (dropped && this.enabled() && this.isL2()) this.updateL2Status();
   }
 
@@ -445,7 +493,7 @@ export class NexradLayer extends MapLayer {
     try {
       const res = await pool.for(this.id).run('l3', { url: f.url, live: true });
       if (!this.l3.includes(f) || f.tex || f.raster) return; // replaced (site or product change) or already rebuilt
-      f.vcp = res.vcp; f.volumeTimeMs = res.volumeTimeMs;
+      f.vcp = res.vcp; f.volumeTimeMs = res.volumeTimeMs; f.volumeScan = res.volumeScan;
       if (res.volumeTimeMs) f.t = res.volumeTimeMs;
       const rng = l3Range(p);
       const lut: Float32Array = res.lut;
@@ -475,41 +523,99 @@ export class NexradLayer extends MapLayer {
   }
 
   // ------------------------------------------------------------------------------------------- overlays
+  /** Level 3 products the enabled overlays draw (hail also feeds the storm-cell table). */
+  private overlayDs(): string[] {
+    const on = (k: string) => settings.bool('layerState.' + k), ds: string[] = [];
+    if (on('NEXRADStormTracksOn')) ds.push('58sti', 'p62ss');
+    if (on('NEXRADTVSIconsOn')) ds.push('61tvs');
+    if (on('NEXRADHAILIconsOn') || on('NEXRADStormTracksOn')) ds.push('p59hi');
+    if (on('NEXRADMESOIconsOn')) ds.push('141md');
+    if (on('NEXRADMeltingLayerOn')) ds.push(ML_DS[settings.num('layerState.NEXRADMeltingLayerElevation')] ?? '166ma');
+    return ds;
+  }
+
+  /**
+   * Reads the overlay (and automatic storm motion) products of the loop's volumes from the rotating TGFTP files, newest
+   * first, each file once. Products are kept by their own volume time and drawn only for the volume they match.
+   */
   private async refreshOverlays(site: string) {
-    const info = this.siteInfo(), gen = this.gen;
-    if (!info) return;
-    const get = async (ds: string) => { try { return await pool.for(this.id).run('l3', { url: l3Last(site, ds), live: true }); } catch { return null; } };
-    const on = (k: string) => settings.bool('layerState.' + k);
-    const mlDs = ['166m0', '166ma', '166m1', '166mb', '166m2', '166m3'][settings.num('layerState.NEXRADMeltingLayerElevation')] ?? '166ma';
+    const gen = this.gen, current = () => gen === this.gen && this.currentSite() === site;
     const wantMotion = settings.num('layerState.NEXRADLevel2Product') === 7 && !settings.bool('settings.nexradStormMotionCustom');
-    const [sti, tvs, hi, md, ml, ss, srm] = await Promise.all([
-      on('NEXRADStormTracksOn') ? get('58sti') : null, on('NEXRADTVSIconsOn') ? get('61tvs') : null,
-      on('NEXRADHAILIconsOn') || on('NEXRADStormTracksOn') ? get('p59hi') : null, on('NEXRADMESOIconsOn') ? get('141md') : null,
-      on('NEXRADMeltingLayerOn') ? get(mlDs) : null, on('NEXRADStormTracksOn') ? get('p62ss') : null,
-      wantMotion ? get('56rm0') : null,
-    ]);
-    if (gen !== this.gen || this.currentSite() !== site) return; // another site was selected meanwhile
+    const dsList = [...this.overlayDs(), ...(wantMotion ? ['56rm0'] : [])];
+    const listed = await Promise.all(dsList.map((ds) => listL3(site, ds).catch(() => [])));
+    if (!current()) return; // another site was selected meanwhile
+    const frames = this.enabled() ? (this.isL2() ? this.l2 : this.l3).map((f) => f.t) : [];
+    const from = timeline.loopStart - 10 * 60e3, to = timeline.loopEnd + LISTING_LAG_MAX_MS;
+    const cap = frames.length ? Infinity : settings.num('settings.nexradLevel3MaxFrameCount');
+    const jobs = dsList.flatMap((ds, i) => overlayFiles(listed[i], frames, from, to, cap).filter((f) => !this.stormRead.has(`${f.url}@${f.t}`)).map((f) => ({ ds, f })));
+    jobs.sort((a, b) => b.f.t - a.f.t);
+    let next = 0, motionArrived = false;
+    const reader = async () => {
+      while (next < jobs.length && current()) {
+        const { ds, f } = jobs[next++];
+        let res: any;
+        try { res = await pool.for(this.id).run('l3', { url: f.url, live: true }); } catch { continue; } // read again next refresh
+        if (!current()) return;
+        this.stormRead.set(`${f.url}@${f.t}`, f.t);
+        if (!(res?.volumeTimeMs > 0)) continue; // never labelled with another time
+        const key = `${site}|${ds}`;
+        if (!this.storm.has(key)) this.storm.set(key, new Map());
+        this.storm.get(key)!.set(res.volumeTimeMs, res);
+        if (ds === '56rm0') motionArrived = true;
+      }
+    };
+    await Promise.all(Array.from({ length: 4 }, reader));
+    if (!current()) return;
+    const oldest = timeline.loopStart - 30 * 60e3;
+    for (const m of this.storm.values()) for (const t of m.keys()) if (t < oldest) m.delete(t);
+    for (const [k, t] of this.stormRead) if (t < oldest) this.stormRead.delete(k);
+    this.stormListed = true;
     if (wantMotion) {
-      // A missing, invalid or out-of-date product leaves no automatic vector (never the previous one).
-      const sp = srm?.p ? srm.p[6] / 10 : NaN, dir = srm?.p ? srm.p[7] / 10 : NaN;
-      const timeMs = srm?.volumeTimeMs > 0 ? srm.volumeTimeMs : Date.now();
-      if (sp >= 0 && sp < 150 && dir >= 0 && dir <= 360 && Date.now() - timeMs <= AUTO_MOTION_MAX_AGE) this.setAutoMotion({ speedKt: sp, fromDeg: dir }, timeMs);
+      const newest = [...this.products('56rm0')].reduce((a, p) => (!a || p.volumeTimeMs > a.volumeTimeMs ? p : a), null);
+      const m = motionOf(newest);
+      if (m && Date.now() - newest.volumeTimeMs <= AUTO_MOTION_MAX_AGE) this.setAutoMotion(m, newest.volumeTimeMs);
       else this.clearAutoMotion();
+      if (motionArrived && this.isL2() && this.product() === 7) this.reloadL2();
     }
-    this.overlayTime = (sti as { volumeTimeMs?: number } | null)?.volumeTimeMs ?? Date.now();
+  }
+
+  /** Volume time of the overlay products' own newest volume at the timeline time (no radar frame drawn), or null. */
+  private ownOverlayFrame(ds: string[]): number | null {
+    let best: number | null = null;
+    for (const d of ds) for (const p of this.products(d)) {
+      const t = p.volumeTimeMs;
+      if (t <= timeline.t && timeline.t - t <= 15 * 60e3 && (best === null || t > best)) best = t;
+    }
+    return best;
+  }
+
+  /**
+   * Matches the overlay products to the shown volume (the drawn radar frame `radarT`, with its volume scan number for
+   * Level 3, else the products' own loop); overlays, the storm-cell table and the geometry are rebuilt when it changes.
+   */
+  private syncOverlays(radarT: number | null, radarScan?: number) {
+    const ds = this.overlayDs();
+    const frameT = radarT ?? this.ownOverlayFrame(ds);
+    this.shownVolume = frameT;
+    const scan = radarT === null ? undefined : radarScan;
+    const m = new Map(ds.map((d) => [d, frameT === null ? null : matchVolume(this.products(d), frameT, undefined, scan)]));
+    const none = frameT !== null && ds.length > 0 && [...m.values()].every((p) => !p);
+    this.overlayNote = none && this.stormListed ? `No storm attributes for ${utcHm(frameT)}Z` : '';
+    const key = `${this.currentSite()}|${ds.map((d) => `${d}@${m.get(d)?.volumeTimeMs ?? '-'}`).join(',')}|${this.overlayNote}`;
+    if (key === this.overlayKey) return;
+    this.overlayKey = key;
+    const sti = m.get('58sti'), tvs = m.get('61tvs'), hi = m.get('p59hi'), md = m.get('141md'), ss = m.get('p62ss');
+    const ml = m.get(ds.find((d) => d.startsWith('166m')) ?? '');
+    this.overlayTime = sti?.volumeTimeMs ?? 0;
     this.overlays = { cells: sti?.cells ?? [], tvs: [...(tvs?.tvs ?? []), ...(tvs?.etvs ?? [])], hail: hi?.hail ?? [], meso: md?.features ?? md?.circles ?? [], ml: ml?.contours ?? [], ss: ss?.pages ?? [], sti: sti?.pages ?? [] };
     this.buildScit();
-    this.buildOverlayGeometry(info.lon, info.lat);
+    this.rebuildOverlays();
   }
 
   private buildScit() {
     const cells = this.overlays.cells;
     const hail = this.overlays.hail;
-    const motion = new Map<string, { dir: number; speed: number }>();
-    for (const page of this.overlays.sti) for (const line of page) {
-      const m = /^\s*([A-Z]\d)\s+\d+\/\s*\d+\s+(\d+)\/\s*(\d+)/.exec(line);
-      if (m) motion.set(m[1], { dir: +m[2], speed: +m[3] });
-    }
+    const motion = stiMotion(this.overlays.sti);
     const maxDbz = new Map<string, number>();
     for (const page of this.overlays.ss) for (const line of page) {
       const m = /^\s*([A-Z]\d)\s+\d+\/\s*\d+\s+[\d.]+\s+[\d.]+\s+\d+\s+(\d+)/.exec(line);
@@ -566,6 +672,7 @@ export class NexradLayer extends MapLayer {
         lines.push({ coords: ll, style: 2 + (c.level === null ? i % 4 : Math.abs(c.level) % 4) });
       });
     }
+    if (this.overlayNote) labels.push({ lon: lon0, lat: lat0, text: this.overlayNote, size: 11, color: [255, 220, 120, 255], halo: [0, 0, 0, 220], dy: -14, priority: 5 });
     // Borders draw first (underneath) for the cell track lines (styles 0/1).
     this.overlayLines.setLines(border ? [...lines.filter((l) => l.style <= 1).map((l) => ({ ...l, style: 6 })), ...lines] : lines);
     this.overlayPts.setPoints(pts);
@@ -748,6 +855,7 @@ export class NexradLayer extends MapLayer {
 
   draw(ctx: DrawContext) {
     const info = this.siteInfo();
+    let radarT: number | null = null, radarScan: number | undefined; // the drawn frame (the later one past a blend's midpoint)
     if (this.enabled() && info) {
       const site = { lon: info.lon, lat: info.lat, heightKm: (info.elevFt * 0.3048) / 1000 };
       const d = this.displayRange();
@@ -765,6 +873,7 @@ export class NexradLayer extends MapLayer {
         const { a, b, w } = bracket(frames, timeline.t, blend, 15 * 60e3);
         if (a?.f.sweep) {
           const sw = a.f.sweep;
+          radarT = (b && w >= 0.5 ? b : a).f.t;
           const scanMs = (f: L2Frame) => f.sweep?.startMs || f.t;
           const pt = this.ptypeParams(d, b && w >= 0.5 ? scanMs(b.f) : scanMs(a.f));
           const lut = lutFor(pt);
@@ -802,9 +911,12 @@ export class NexradLayer extends MapLayer {
         const lut = lutFor(pt);
         if (a?.f.tex) {
           const bt = b?.f.tex && b.f.tex.gates === a.f.tex.gates ? b.f.tex : null;
+          const shown = (bt && w >= 0.5 ? b! : a).f;
+          radarT = shown.t; radarScan = shown.volumeScan;
           this.radar.draw(ctx, { site, elevation: a.f.elevation ?? 0.5, a: a.f.tex, b: bt, w: bt ? w : 0, wipe: -1, progress: 1, alpha, smoothing, tilt3D, exaggeration: exag, shadow: false, azOffset: 0, lut, ptype: pt });
         } else if (a?.f.raster) {
           const ra = a.f.raster;
+          radarT = a.f.t; radarScan = a.f.volumeScan;
           this.l3raster.draw(ctx, { mode: 0, w: 0, alpha, smoothing, bounds: ra.bounds, proj: latLonProj(ra.bounds[2], ra.bounds[1], ra.bounds[0], ra.bounds[3], ra.nx, ra.ny), luts: [plain], data: [[ra.tex, ra.tex]] }, 4);
         }
       }
@@ -822,6 +934,7 @@ export class NexradLayer extends MapLayer {
       }
       this.beam.draw(ctx);
     }
+    if (!ctx.probe) this.syncOverlays(radarT, radarScan);
     if (!ctx.probe) { this.overlayFill.draw(ctx); this.overlayLines.draw(ctx); this.overlayPts.draw(ctx); this.overlayText.draw(ctx); }
     if (!ctx.probe && this.dataAge && settings.bool('settings.nexradLiveScanDataAgeIndicator') && !settings.bool('settings.nexradLiveScanDataAgeIndicatorLegacy')) this.ageText.draw(ctx);
   }
