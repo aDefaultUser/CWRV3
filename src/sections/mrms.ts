@@ -45,12 +45,15 @@ export function pickMrmsFrames(entries: { t: number; key: string }[], n: number,
 
 interface Loaded { tex: GPUTexture; proj: ProjParams; bounds: [number, number, number, number]; min: number; max: number }
 
+/** UTC days (YYYYMMDD, comma-separated) at the ends of the loop window: the index folders listed for it. */
+const loopDays = () => [...new Set([timeline.loopStart, timeline.loopEnd].map((t) => new Date(t).toISOString().slice(0, 10).replace(/-/g, '')))].join(',');
+
 export class MrmsLayer extends GridLayer {
   readonly id = 'mrms';
   readonly archive = 'resolver';
   readonly title = 'MRMS';
   private store: FrameStore<Loaded>;
-  private index: { prod: number; at: number; entries: { t: number; key: string }[] } | null = null;
+  private index: { prod: number; at: number; entries: { t: number; key: string }[]; days: string } | null = null;
   private loadedProduct = -1;
   /** Timeline key (mode, archive time) the index and frames belong to. */
   private loadedKey = '';
@@ -105,15 +108,16 @@ export class MrmsLayer extends GridLayer {
     const p = this.product();
     const key = timeline.key;
     if (p.index !== this.loadedProduct || key !== this.loadedKey) { this.store.clear(); this.frames = []; this.loadedProduct = p.index; this.loadedKey = key; this.index = null; }
-    // Re-read the index when it is older than the product's refresh minutes.
-    if (!this.index || this.index.prod !== p.index || Date.now() - this.index.at > p.refreshMin * 60e3) {
+    // Re-read the index when it is older than the product's refresh minutes (live) or the loop covers other days.
+    const days = loopDays();
+    if (!this.index || this.index.prod !== p.index || this.index.days !== days || (timeline.mode === 'live' && Date.now() - this.index.at > p.refreshMin * 60e3)) {
       this.statusText = 'Status: Loading MRMS index...';
       this.setStatus('loading', this.statusText);
       let entries: { t: number; key: string }[];
       try { entries = await this.listIndex(p); }
       catch (e) { if (this.loadedProduct === p.index && this.loadedKey === key) { this.statusText = 'Status: Error loading chosen product.'; this.setStatus('error', `MRMS index: ${(e as Error).message}`); } return; }
       if (this.loadedProduct !== p.index || this.loadedKey !== key) return; // product, mode or archive time changed while listing
-      this.index = { prod: p.index, at: Date.now(), entries };
+      this.index = { prod: p.index, at: Date.now(), entries, days };
     }
     const wanted = pickMrmsFrames(this.index.entries.filter((e) => e.t <= timeline.loopEnd + 60e3), mrmsFrameCount(), timeline.loopStart);
     this.store.setWanted(wanted);
@@ -123,9 +127,8 @@ export class MrmsLayer extends GridLayer {
 
   private async listIndex(p: MrmsProduct) {
     const dir = mrmsDir(p);
-    const days = new Set([timeline.loopStart, timeline.loopEnd].map((t) => new Date(t).toISOString().slice(0, 10).replace(/-/g, '')));
     const out: { t: number; key: string }[] = [];
-    for (const day of days) {
+    for (const day of loopDays().split(',')) {
       const { objects } = await listS3(MRMS_BUCKET, `CONUS/${dir}/${day}/`, { maxPages: 4 });
       for (const o of objects) {
         const m = /_(\d{8})-(\d{6})\.grib2\.gz$/.exec(o.key);

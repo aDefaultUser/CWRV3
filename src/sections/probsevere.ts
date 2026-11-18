@@ -8,79 +8,22 @@ import { MapLayer, NOT_AVAILABLE } from '../layers/base';
 import { FrameStore } from '../layers/frames';
 import { timeline } from '../app/timeline';
 import { settings } from '../settings/store';
-import { fetchJson, fetchText, listS3, parseDirIndex } from '../data/net';
+import { fetchText, listS3, parseDirIndex } from '../data/net';
 import { LineSet, TextSet, type GlyphAtlas, type Color, type Label, type LineStyle, type Polyline } from '../render/prims';
 import { PolySet, type PolyFill } from '../render/polys';
 import { destination } from '../gis/geodesy';
 import { pointInRing } from '../layers/warnings';
 import { MRMS_BUCKET } from './mrms';
+import { pool } from '../workers/pool';
+import { PS_TYPES, probSevereTime, ProbSevereVersionError, type PsFile, type PsObject } from './probsevere-data';
+
+export { PS_TYPES, probSevereTime, ProbSevereVersionError, parseProbSevere, checkedProbSevere, type PsFile, type PsObject } from './probsevere-data';
 
 export const PS_NCEP_DIR = 'https://mrms.ncep.noaa.gov/ProbSevere/PROBSEVERE/';
-/** Probability types in file order; `ext.settings.probSevereType` indexes this list. */
-export const PS_TYPES = [
-  { key: 'ProbSevere', label: 'Severe (any)', short: 'Severe' },
-  { key: 'ProbTor', label: 'Tornado', short: 'Tor' },
-  { key: 'ProbHail', label: 'Hail', short: 'Hail' },
-  { key: 'ProbWind', label: 'Wind', short: 'Wind' },
-] as const;
-
-export interface PsObject {
-  id: string;
-  /** Probabilities (%) in PS_TYPES order. */
-  prob: number[];
-  meshIn: number;
-  /** Maximum low-level azimuthal shear (s⁻¹). */
-  maxLlaz: number;
-  /** Mean motion (m/s), east and north positive (the file's MOTION_SOUTH is positive northward). */
-  motionE: number; motionN: number;
-  /** Mean of the outer-ring vertices. */
-  lon: number; lat: number;
-  rings: number[][];
-}
-export interface PsFile { t: number; objects: PsObject[] }
-
-/** "YYYYMMDD_HHMMSS" (file names and validTime) → epoch ms. */
-export function probSevereTime(s: string): number | null {
-  const m = /(\d{4})(\d{2})(\d{2})_(\d{2})(\d{2})(\d{2})/.exec(s);
-  return m ? Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +m[6]) : null;
-}
 const hhmm = (t: number) => `${new Date(t).toISOString().slice(11, 16)}Z`;
 /** File-name time stamp (YYYYMMDD_HHMMSS) of an epoch ms. */
 const stamp = (t: number) => new Date(t).toISOString().slice(0, 19).replace(/[-:]/g, '').replace('T', '_');
 const fileTime = (name: string) => (/MRMS_PROBSEVERE_\d{8}_\d{6}\.json$/.test(name) ? probSevereTime(name) : null);
-
-/** A file of another ProbSevere version (archived files before v3): its fields differ. */
-export class ProbSevereVersionError extends Error {}
-
-/** Parses a ProbSevere v3 file; other products and versions are rejected (their fields differ). */
-export function parseProbSevere(j: any): PsFile {
-  if (j?.type !== 'FeatureCollection' || !Array.isArray(j.features)) throw new Error('not a ProbSevere feature collection');
-  if (!/^ProbSevere 3(\.|$)/.test(String(j.product ?? ''))) throw new ProbSevereVersionError(`unsupported product "${j.product}" (ProbSevere v3 only)`);
-  const t = probSevereTime(String(j.validTime ?? ''));
-  if (t === null) throw new Error('missing validTime');
-  const objects: PsObject[] = [];
-  for (const f of j.features) {
-    const p = f?.properties ?? {}, g = f?.geometry;
-    const polys: number[][][][] = g?.type === 'Polygon' ? [g.coordinates] : g?.type === 'MultiPolygon' ? g.coordinates : [];
-    const rings = polys.map((poly) => (poly[0] ?? []).flat()).filter((r) => r.length >= 6 && r.every(Number.isFinite));
-    if (!rings.length || p.ID === undefined) continue;
-    let lon = 0, lat = 0;
-    for (let i = 0; i < rings[0].length; i += 2) { lon += rings[0][i]; lat += rings[0][i + 1]; }
-    const n = rings[0].length / 2, num = (k: string) => (p[k] === undefined || p[k] === '' ? NaN : Number(p[k]));
-    objects.push({
-      id: String(p.ID), prob: PS_TYPES.map((x) => num(x.key)), meshIn: num('MESH'), maxLlaz: num('MAXLLAZ'),
-      motionE: num('MOTION_EAST'), motionN: num('MOTION_SOUTH'), lon: lon / n, lat: lat / n, rings,
-    });
-  }
-  return { t, objects };
-}
-
-/** Parses a downloaded file and checks it is valid at the time it was requested for (never relabelled). */
-export function checkedProbSevere(json: unknown, t: number, key: string): PsFile {
-  const file = parseProbSevere(json);
-  if (file.t !== t) throw new Error(`valid time ${hhmm(file.t)} does not match ${key}`);
-  return file;
-}
 
 /** Tolerance for a file before the displayed time: about one cadence (files come every ~2 min). */
 export const PS_MATCH_MS = 150e3;
@@ -149,20 +92,26 @@ export class ProbSevereLayer extends MapLayer {
   private gen = 0;
   private shown: PsFile | null = null;
   private builtKey = '';
-  /** Archive listing whose files turned out to be an earlier ProbSevere version: nothing more of it is downloaded. */
-  private oldVersionKey = '';
+  /**
+   * Archive listing with files of an earlier ProbSevere version: those up to `t` (the newest such file) are not
+   * downloaded, since older files of the bucket are of that version too.
+   */
+  private oldVersion: { key: string; t: number } | null = null;
   private lines: LineSet; private fills: PolySet; private text: TextSet;
 
   constructor(r: Renderer, atlas: GlyphAtlas) {
     super(r);
     this.lines = new LineSet(r); this.fills = new PolySet(r); this.text = new TextSet(r, atlas);
     this.store = new FrameStore<PsFile>(async (f) => {
-      try {
-        return checkedProbSevere(await fetchJson(f.key, { cache: 'immutable', maxBytes: 30e6 }), f.t, f.key);
-      } catch (e) {
-        if (e instanceof ProbSevereVersionError && timeline.mode === 'archive' && this.listing) { this.oldVersionKey = this.listing.key; queueMicrotask(() => void this.refresh()); }
-        throw e;
+      const r = await pool.for(this.id).run<{ file?: PsFile; oldVersion?: string }>('probsevere', { url: f.key, t: f.t }, f.key);
+      if (r.file) return r.file;
+      // Only a file of the listing shown now marks it: a download of an earlier archive time can fail late.
+      const l = this.listing;
+      if (timeline.mode === 'archive' && l?.files.some((x) => x.key === f.key)) {
+        this.oldVersion = { key: l.key, t: Math.max(f.t, this.oldVersion?.key === l.key ? this.oldVersion.t : -Infinity) };
+        queueMicrotask(() => void this.refresh());
       }
+      throw new ProbSevereVersionError(r.oldVersion ?? 'not ProbSevere v3');
     }, () => {}, 4, () => { this.builtKey = ''; this.updateStatus(); });
   }
 
@@ -189,8 +138,8 @@ export class ProbSevereLayer extends MapLayer {
       }
     }
     if (!on) this.setStatus('off', '');
-    if (archive && this.oldVersionKey === this.listing.key) { this.store.setWanted([]); this.shown = null; this.builtKey = ''; this.updateStatus(); return; }
-    const files = this.listing.files;
+    const oldUntil = archive && this.oldVersion?.key === this.listing.key ? this.oldVersion.t : -Infinity;
+    const files = this.listing.files.filter((f) => f.t > oldUntil);
     // Shown: the loop window plus the hour before the newest file (trends); hidden for alerts: the newest file only.
     const from = Math.min(timeline.loopStart, (files.at(-1)?.t ?? 0) - 62 * 60e3);
     this.store.setWanted(on ? files.filter((f) => f.t >= from).slice(-200) : archive ? [] : files.slice(-1));
@@ -227,7 +176,7 @@ export class ProbSevereLayer extends MapLayer {
     if (!this.enabled()) return;
     const c = this.store.counts(), n = this.store.frames.length;
     if (!n) {
-      const old = timeline.mode === 'archive' && this.oldVersionKey === this.listing?.key;
+      const old = timeline.mode === 'archive' && this.oldVersion !== null && this.oldVersion.key === this.listing?.key;
       this.setStatus('unavailable', old ? `ProbSevere v3: ${NOT_AVAILABLE} (the archived files are an earlier version)` : timeline.mode === 'archive' ? NOT_AVAILABLE : 'ProbSevere: no files in the loop period');
       return;
     }

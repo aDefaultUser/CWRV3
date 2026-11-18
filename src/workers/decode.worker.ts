@@ -7,7 +7,9 @@ import { readShp, readDbf, simplify } from '../decode/shapefile';
 import { readAbiCmi, readAbiL2, readGlmLcfa, examineAbi, type H5Like, type GoesProjection } from '../decode/goes';
 import { gridMap } from '../gis/gridproj';
 import { parseIdx, findIdx, HRRR_FIELDS, type HrrrField } from '../decode/hrrr';
-import { fetchBytes, fetchText, abortAll } from '../data/net';
+import { fetchBytes, fetchText, abortAll, type FetchOpts } from '../data/net';
+import { probSevereResult } from '../sections/probsevere-data';
+import { iemStormProducts } from '../radar/archive';
 import { gaussianBlur, isolines, lambertInverse } from '../gis/contour';
 import { fetchShapes, geojsonFeatures } from './shape-tasks';
 import { fetchGrib, encodeNormHalf, downsampleMax, downsampleGrid, geoOfGrid, contourLines, windSamples, unitConv } from './grid-tasks';
@@ -447,6 +449,15 @@ const HANDLERS: Record<string, JobHandler> = {
   'goes.l2': goesL2,
   'glm': glm,
   'zipLines': zipLines,
+  // JSON of a few MB per file: parsed here, not on the frame thread.
+  'probsevere': async (a: { url: string; t: number }, job) => {
+    const bytes = await fetchBytes(a.url, { cache: 'immutable', maxBytes: 30e6 });
+    return job.time(() => probSevereResult(JSON.parse(new TextDecoder().decode(bytes)), a.t, a.url));
+  },
+  'iem.attrs': async (a: { url: string; site: string; cache: FetchOpts['cache'] }, job) => {
+    const bytes = await fetchBytes(a.url, { cache: a.cache, timeoutMs: 60_000 });
+    return job.time(() => iemStormProducts(JSON.parse(new TextDecoder().decode(bytes)), a.site));
+  },
   'net.abort': async () => abortAll(),
   'goes.examine': async (a: { bytes: Uint8Array }, job) => { const h = await getH5(); return job.time(() => examineAbi(h, a.bytes)); },
 };
@@ -455,7 +466,7 @@ const HANDLERS: Record<string, JobHandler> = {
  * processing time as unavailable rather than zero.
  */
 const TIMED = new Set(['grid.all', 'grid.model', 'grib.inventory', 'grid.meso', 'grid.severe', 'grid.diff', 'grid.mrms', 'shapes', 'geojson', 'surface',
-  'l2.meta', 'l2.product', 'l2.composite', 'l2.volume', 'l3', 'mrms', 'hrrr', 'hrrr.ptype', 'grib.point', 'goes', 'goes.l2', 'glm', 'zipLines', 'goes.examine']);
+  'l2.meta', 'l2.product', 'l2.composite', 'l2.volume', 'l3', 'mrms', 'hrrr', 'hrrr.ptype', 'grib.point', 'goes', 'goes.l2', 'glm', 'zipLines', 'goes.examine', 'probsevere', 'iem.attrs']);
 
 function transferables(v: any, out: Transferable[] = [], seen = new Set<any>()): Transferable[] {
   if (!v || typeof v !== 'object' || seen.has(v)) return out;

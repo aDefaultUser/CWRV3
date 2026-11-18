@@ -26,7 +26,6 @@ import { matchVolume, overlayFiles, LISTING_LAG_MAX_MS, VOLUME_MATCH_TOL_MS } fr
 import { panes, type RadarView } from '../app/panes';
 import { RadarTools } from './radar-tools';
 import { AWS_L3, IEM_ATTR_SINCE, IEM_DS, iemAttrUrl, iemStormProducts, l3ArchiveCode, l3ArchiveCodes, listL3Archive } from '../radar/archive';
-import { fetchJson } from '../data/net';
 import { archiveCache } from '../data/iem';
 import { CrossSection } from './cross-section';
 import { RadarTrail } from './radar-trail';
@@ -794,11 +793,11 @@ export class NexradLayer extends MapLayer {
     const todo = frames.filter((t) => t >= IEM_ATTR_SINCE && !this.stormRead.has(`iem@${t}`));
     const reader = async () => {
       for (let t = todo.pop(); t !== undefined && current(); t = todo.pop()) {
-        let gj: Parameters<typeof iemStormProducts>[0];
-        try { gj = await fetchJson(iemAttrUrl(t), { cache: archiveCache(t), timeoutMs: 60_000 }); } catch { continue; } // asked again next refresh
+        let sets: ReturnType<typeof iemStormProducts>;
+        try { sets = await pool.for(this.id).run('iem.attrs', { url: iemAttrUrl(t), site, cache: archiveCache(t) }); } catch { continue; } // asked again next refresh
         if (!current()) return;
         this.stormRead.set(`iem@${t}`, t);
-        for (const set of iemStormProducts(gj, site)) for (const ds of dsList) {
+        for (const set of sets) for (const ds of dsList) {
           const key = `${site}|${ds}`, p = set.get(ds)!;
           if (!this.storm.has(key)) this.storm.set(key, new Map());
           if (!this.storm.get(key)!.has(p.volumeTimeMs)) this.storm.get(key)!.set(p.volumeTimeMs, p);
