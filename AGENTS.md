@@ -36,6 +36,10 @@ WebGPU needs a hardware adapter: on Linux `chromium --enable-unsafe-webgpu --ena
   target, composite), `src/render/volume-ray.ts` (reference ray math); packs carry an occupancy grid for skipping.
   3D view: `src/layers/radar-volume3d.ts` (settings, pack of the shown frame), `src/render/volume-view.ts` (march
   target, composite), `src/render/volume-ray.ts` (reference ray math); packs carry an occupancy grid for skipping.
+- Linked panes: `src/render/panes.ts` (grid geometry, pane-relative points), `src/app/panes.ts` (layout, views of
+  panes 1–3, presets, saved layouts). The renderer draws the scene into each pane's viewport with the one camera
+  sized to a pane: a layer is recorded once and replayed, unless it is `perPane` (NEXRAD), whose `draw` runs per pane
+  with `ctx.pane`. `NexradLayer.view(pane)`: pane 0 is the radar settings; every per-pane method takes the pane.
 - `src/decode/`, `src/workers/` — decoders (Archive II, Level 3, GRIB2, NetCDF/HDF5 via h5wasm) run in the worker
   pool; callers name the owner: `pool.for(layerId).run(task, args)`. `l2-volumes.ts` holds the Level 2 volume cache
   (live chunk volumes update incrementally; `tests/helpers/archive2-writer.ts` writes synthetic volumes for tests).

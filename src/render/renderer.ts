@@ -2,8 +2,13 @@
 import { Gpu } from './gpu';
 import { Camera, invert, mul } from './camera';
 import { SKY, TILES, RASTER, RADAR, LINES, POINTS, TEXT, SPRITES, POLYS } from './shaders';
+import { MAX_PANES, SINGLE_PANE, paneCount, paneOrigin, paneSize, type PaneGrid } from './panes';
 
-export interface DrawContext { r: Renderer; pass: GPURenderPassEncoder; probe: boolean }
+/**
+ * `pass` takes the draw commands a render bundle can record too (pipeline, bind groups, draws): with more than one
+ * pane a layer's commands are recorded once and replayed in every pane. `pane` is the pane drawn (0 in a recording).
+ */
+export interface DrawContext { r: Renderer; pass: GPURenderCommandsMixin & GPUBindingCommandsMixin; probe: boolean; pane: number }
 export interface PrepassContext {
   r: Renderer; enc: GPUCommandEncoder;
   /**
@@ -19,7 +24,9 @@ export interface Drawable {
    * main pass begins. Called once per frame for visible layers in layer order; the main pass may sample the result.
    */
   prepass?(ctx: PrepassContext): void;
-  /** Records draw calls. Called once per frame for visible layers in layer order. */
+  /** Draws differently from pane to pane: draw() is then called for every pane (ctx.pane), in the pane's viewport. */
+  readonly perPane?: boolean;
+  /** Records draw calls. Called once per frame for visible layers in layer order (once per pane for a perPane layer). */
   draw(ctx: DrawContext): void;
   /** True when the layer can answer a probe (topmost such layer is probed). */
   probeKind?(): string | null;
@@ -57,11 +64,17 @@ export class Renderer {
   private probeTex!: GPUTexture;
   private probeRead!: GPUBuffer;
   private probeBusy = false;
+  /**
+   * Pane grid of the map. Every pane shows the scene through the one camera, sized to a pane, so camera
+   * coordinates (pick, project, declutter) and probe points are relative to a pane and hold for each of them.
+   */
+  grid: PaneGrid = SINGLE_PANE;
+  /** Pointer probe at a pane-relative CSS pixel, read in every pane. */
   probeRequest: { x: number; y: number } | null = null;
-  lastProbe: ProbeResult | null = null;
-  onProbe: ((r: ProbeResult | null) => void) | null = null;
-  /** One-shot probes of a named layer at a CSS pixel (analysis tools); served before the pointer probe. */
-  probeOnce: { x: number; y: number; layer: string; done: (r: ProbeResult | null) => void }[] = [];
+  /** The probe result of each pane (the same in all for a layer that is not perPane). */
+  onProbe: ((r: (ProbeResult | null)[]) => void) | null = null;
+  /** One-shot probes of a named layer at a pane-relative CSS pixel of `pane` (analysis tools); served before the pointer probe. */
+  probeOnce: { x: number; y: number; layer: string; pane?: number; done: (r: ProbeResult | null) => void }[] = [];
   // timing
   private tsQuery: GPUQuerySet | null = null;
   private tsResolve: GPUBuffer | null = null;
@@ -133,7 +146,7 @@ export class Renderer {
     this.buildPipelines();
     this.skyBuf = d.createBuffer({ size: 112, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.skyBG = d.createBindGroup({ layout: this.layouts.sky, entries: [{ binding: 0, resource: { buffer: this.skyBuf } }] });
-    this.probeTex = d.createTexture({ size: [1, 1], format: 'rgba32float', usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC });
+    this.probeTex = d.createTexture({ size: [MAX_PANES, 1], format: 'rgba32float', usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC });
     this.probeRead = d.createBuffer({ size: 256, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
     if (this.gpu.timestamps) {
       this.tsQuery = d.createQuerySet({ type: 'timestamp', count: TS_QUERIES });
@@ -173,12 +186,15 @@ export class Renderer {
     this.skyBG = this.gpu.device.createBindGroup({ layout: this.layouts.sky, entries: [{ binding: 0, resource: { buffer: this.skyBuf } }] });
   }
 
+  /** Device-pixel size of one pane (the whole backbuffer when there is one). */
+  paneSize(): [number, number] { return paneSize(this.grid, this.gpu.width, this.gpu.height); }
+
   private writeFrame(buf: GPUBuffer, vpRot: Float64Array) {
     const g = this.gpu, c = this.camera;
     const f = new Float32Array(64);
     f.set(vpRot, 0);
     f.set([c.eye[0], c.eye[1], c.eye[2], (performance.now() - this.time0) / 1000], 16);
-    f.set([g.width, g.height, g.dpr, this.flashRow], 20);
+    f.set([...this.paneSize(), g.dpr, this.flashRow], 20);
     f.set(this.light, 24);
     f.set([c.zoomScale, c.metersPerPixel(1) / g.dpr, this.diffuseIntensity, this.globeLighting ? 1 : 0], 28);
     g.device.queue.writeBuffer(buf, 0, f);
@@ -188,7 +204,8 @@ export class Renderer {
   frame() {
     const g = this.gpu, d = g.device, c = this.camera;
     g.resize();
-    c.width = g.width / g.dpr; c.height = g.height / g.dpr;
+    const [pw, ph] = this.paneSize(), panes = paneCount(this.grid);
+    c.width = pw / g.dpr; c.height = ph / g.dpr;
     c.compute();
     this.writeFrame(this.frameBuf, c.vpRot);
     const sky = new Float32Array(28);
@@ -211,30 +228,56 @@ export class Renderer {
         : { view, loadOp: 'clear', storeOp: 'store', clearValue: { r: 0, g: 0, b: 0, a: 1 } }],
       timestampWrites: doTs ? { querySet: this.tsQuery!, beginningOfPassWriteIndex: 0, endOfPassWriteIndex: 1 } : undefined,
     });
-    pass.setBindGroup(0, this.frameBG);
-    pass.setPipeline(this.pipes.sky);
-    pass.setBindGroup(1, this.skyBG);
-    pass.draw(3);
-    const ctx: DrawContext = { r: this, pass, probe: false };
-    for (const l of this.layers) { pass.setBindGroup(0, this.frameBG); l.draw(ctx); }
+    const drawSky = (p: GPURenderPassEncoder) => { p.setBindGroup(0, this.frameBG); p.setPipeline(this.pipes.sky); p.setBindGroup(1, this.skyBG); p.draw(3); };
+    if (panes === 1) {
+      drawSky(pass);
+      for (const l of this.layers) { pass.setBindGroup(0, this.frameBG); l.draw({ r: this, pass, probe: false, pane: 0 }); }
+    } else {
+      // Layers that look the same in every pane are recorded once (their draw() runs once, as with a single pane)
+      // and replayed in each viewport; a perPane layer draws into each pane itself.
+      const steps: (GPURenderBundle | Drawable)[] = [];
+      let rec: GPURenderBundleEncoder | null = null;
+      for (const l of this.layers) {
+        if (l.perPane) { if (rec) steps.push(rec.finish()); rec = null; steps.push(l); continue; }
+        rec ??= d.createRenderBundleEncoder({ colorFormats: [g.format], sampleCount: g.sampleCount });
+        rec.setBindGroup(0, this.frameBG);
+        l.draw({ r: this, pass: rec, probe: false, pane: 0 });
+      }
+      if (rec) steps.push(rec.finish());
+      for (let p = 0; p < panes; p++) {
+        const [x, y] = paneOrigin(this.grid, p, pw, ph);
+        pass.setViewport(x, y, pw, ph, 0, 1);
+        pass.setScissorRect(x, y, pw, ph);
+        drawSky(pass);
+        for (const s of steps) {
+          if (s instanceof GPURenderBundle) pass.executeBundles([s]);
+          else { pass.setBindGroup(0, this.frameBG); s.draw({ r: this, pass, probe: false, pane: p }); }
+        }
+      }
+    }
     pass.end();
 
-    let probeLayer: Drawable | null = null;
+    let probeLayer: Drawable | null = null, probed: number[] = [];
     const once = this.probeBusy ? undefined : this.probeOnce.shift();
     if (once || (this.probeRequest && !this.probeBusy)) {
       if (once) probeLayer = this.layers.find((l) => l.id === once.layer && l.probeKind?.()) ?? null;
       else for (let i = this.layers.length - 1; i >= 0; i--) if (this.layers[i].probeKind?.()) { probeLayer = this.layers[i]; break; }
       if (probeLayer) {
         const { x, y } = once ?? this.probeRequest!;
-        const W = g.width, H = g.height;
-        const cx = ((x * g.dpr) / W) * 2 - 1, cy = 1 - ((y * g.dpr) / H) * 2;
-        const M = new Float64Array([W, 0, 0, 0, 0, H, 0, 0, 0, 0, 1, 0, -cx * W, -cy * H, 0, 1]);
+        const cx = ((x * g.dpr) / pw) * 2 - 1, cy = 1 - ((y * g.dpr) / ph) * 2;
+        const M = new Float64Array([pw, 0, 0, 0, 0, ph, 0, 0, 0, 0, 1, 0, -cx * pw, -cy * ph, 0, 1]);
         this.writeFrame(this.probeFrameBuf, mul(M, c.vpRot));
+        // One texel per pane, each the same pane-relative point; a layer that is not perPane is read once.
+        probed = once ? [Math.min(panes - 1, once.pane ?? 0)] : probeLayer.perPane ? Array.from({ length: panes }, (_, p) => p) : [0];
         const pp = enc.beginRenderPass({ colorAttachments: [{ view: this.probeTex.createView(), loadOp: 'clear', storeOp: 'store', clearValue: { r: 0, g: 0, b: 0, a: 0 } }] });
-        pp.setBindGroup(0, this.probeFrameBG);
-        probeLayer.draw({ r: this, pass: pp, probe: true });
+        for (const p of probed) {
+          pp.setViewport(p, 0, 1, 1, 0, 1);
+          pp.setScissorRect(p, 0, 1, 1);
+          pp.setBindGroup(0, this.probeFrameBG);
+          probeLayer.draw({ r: this, pass: pp, probe: true, pane: p });
+        }
         pp.end();
-        enc.copyTextureToBuffer({ texture: this.probeTex }, { buffer: this.probeRead, bytesPerRow: 256 }, [1, 1]);
+        enc.copyTextureToBuffer({ texture: this.probeTex }, { buffer: this.probeRead, bytesPerRow: 256 }, [MAX_PANES, 1]);
       }
     }
     if (doTs) { enc.resolveQuerySet(this.tsQuery!, 0, 2 * timed, this.tsResolve!, 0); enc.copyBufferToBuffer(this.tsResolve!, 0, this.tsRead!, 0, 16 * timed); }
@@ -259,19 +302,17 @@ export class Renderer {
       const layer = probeLayer.id;
       if (!once) this.probeRequest = null;
       this.probeRead.mapAsync(GPUMapMode.READ).then(() => {
-        const v = new Float32Array(this.probeRead.getMappedRange().slice(0, 16));
+        const v = new Float32Array(this.probeRead.getMappedRange().slice(0, 16 * MAX_PANES));
         this.probeRead.unmap();
         this.probeBusy = false;
-        const r = v[1] > 0 ? { kind, value: v[0], layer } : null;
-        if (once) { once.done(r); return; }
-        this.lastProbe = r;
-        this.onProbe?.(this.lastProbe);
+        const at = (p: number): ProbeResult | null => (v[4 * p + 1] > 0 ? { kind, value: v[4 * p], layer } : null);
+        if (once) { once.done(at(probed[0])); return; }
+        this.onProbe?.(Array.from({ length: panes }, (_, p) => at(probed.includes(p) ? p : 0)));
       }, () => { this.probeBusy = false; once?.done(null); });
     } else if (once) once.done(null);
     else if (this.probeRequest && !this.probeBusy) {
       this.probeRequest = null;
-      this.lastProbe = null;
-      this.onProbe?.(null);
+      this.onProbe?.(Array.from({ length: panes }, () => null));
     }
   }
 }

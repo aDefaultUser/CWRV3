@@ -47,7 +47,7 @@ export abstract class MapLayer implements Drawable {
     // what it held for the other time).
     this.draw = (ctx) => { if (!this.archiveBlocked() && (this.archive === 'static' || refreshed === timeline.epoch)) draw.call(this, ctx); };
     this.tick = (t, now) => { if (!this.archiveBlocked()) tick.call(this, t, now); };
-    this.legends = () => (this.archiveBlocked() ? [] : legends.call(this));
+    this.legends = (pane) => (this.archiveBlocked() ? [] : legends.call(this, pane));
     this.probeKind = () => (this.archiveBlocked() ? null : probeKind.call(this));
   }
   /** True while a past time is shown and this layer has no archive for it. */
@@ -58,10 +58,11 @@ export abstract class MapLayer implements Drawable {
   async refresh(): Promise<void> {}
   /** Called once per animation frame before drawing (time-dependent CPU updates). */
   tick(_t: number, _now: number): void {}
-  legends(): LegendSpec[] { return []; }
+  /** Legends of the layer as drawn in `pane` (the same in every pane unless the layer is perPane). */
+  legends(_pane = 0): LegendSpec[] { return []; }
   probeKind(): string | null { return null; }
-  /** Converts a probe sample (0..1) into display text. */
-  probeText(_v: number): string { return ''; }
+  /** Converts a probe sample (0..1) read in `pane` into display text. */
+  probeText(_v: number, _pane = 0): string { return ''; }
   setStatus(state: LayerStatus['state'], text: string, extra: Partial<LayerStatus> = {}) {
     const own: LayerStatus = { state, text, ...extra };
     // A live request that settles while a past time is shown must not report the layer as showing data.

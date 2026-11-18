@@ -23,13 +23,15 @@ import { OCC_N, OCC_LAYERS } from '../radar/volume-pack';
 import { VOLUME_MOMENTS } from '../radar/l2products';
 import { VIEW3D } from '../layers/radar-volume3d';
 import { destination } from '../gis/geodesy';
+import { panes, presets } from '../app/panes';
 
 /** `fps`: FPS limit for the run (0 = unlimited); omitted = the user's settings. */
 /**
  * `l2volume` and `l2iso` orbit the camera around the selected radar with the 3D volume view on (volume rendering or
- * isosurfaces) while the Level 2 loop plays.
+ * isosurfaces) while the Level 2 loop plays. `l2panes2` and `l2panes4` show the REF / SRV and REF / VEL / ZDR / CC
+ * pane presets while the Level 2 loop plays and the map pans and zooms around the radar.
  */
-export interface BenchOptions { scenario: 'idle' | 'panzoom' | 'l2loop' | 'l3probe' | 'stress' | 'l2volume' | 'l2iso'; seconds?: number; fps?: number; label?: string; raw?: boolean }
+export interface BenchOptions { scenario: 'idle' | 'panzoom' | 'l2loop' | 'l3probe' | 'stress' | 'l2volume' | 'l2iso' | 'l2panes2' | 'l2panes4'; seconds?: number; fps?: number; label?: string; raw?: boolean }
 
 /** Summary of display cadence: RAF deltas and how many rendered frames spanned more than one display period. */
 function cadence(raf: number[], frames: FrameSample[], capMs: number) {
@@ -89,11 +91,17 @@ export function installBench(app: App) {
     const start0 = { ...cam.target }; // copy: setView mutates target in place
     app.fpsOverride = o.fps ?? null;
     const view3d = o.scenario === 'l2volume' ? 1 : o.scenario === 'l2iso' ? 2 : 0, view3dBefore = settings.num(VIEW3D(''));
-    if (o.scenario === 'l2loop' || view3d) { settings.set('layerState.NEXRADOn', true); settings.set('layerState.NEXRADLevel2', true); app.activeTab = 'NEXRADPro'; }
+    const preset = o.scenario === 'l2panes2' ? 0 : o.scenario === 'l2panes4' ? 1 : -1, layoutBefore = panes.layout;
+    if (o.scenario === 'l2loop' || view3d || preset >= 0) { settings.set('layerState.NEXRADOn', true); settings.set('layerState.NEXRADLevel2', true); app.activeTab = 'NEXRADPro'; }
     if (view3d) settings.set(VIEW3D(''), view3d);
+    if (preset >= 0) {
+      app.applyPaneLayout(presets(app.nexrad.view(), app.nexrad.tilts.map((t) => t.angle))[preset]);
+      // Every pane holds its sweep of the newest volume before the run starts.
+      for (const end = performance.now() + 90_000; performance.now() < end && !Array.from({ length: panes.count }, (_, p) => app.nexrad.shownScan(p)).every(Boolean);) await new Promise((r) => setTimeout(r, 500));
+    }
     if (o.scenario === 'l3probe') { settings.set('layerState.NEXRADOn', true); settings.set('layerState.NEXRADLevel2', false); settings.set('config.generalMapMode', 2); }
     await waitReady(90_000);
-    if (o.scenario === 'l2loop' || o.scenario === 'l3probe' || o.scenario === 'stress' || view3d) timeline.play(true);
+    if (o.scenario === 'l2loop' || o.scenario === 'l3probe' || o.scenario === 'stress' || view3d || preset >= 0) timeline.play(true);
     const prepass: number[] = [], site = app.nexrad.siteInfo();
     app.meter.recording = [];
     app.meter.rafRecording = [];
@@ -108,6 +116,7 @@ export function installBench(app: App) {
           app.poke();
         }
         if (view3d && site) { cam.setView({ lon: site.lon, lat: site.lat, z: 14, tilt: 60, swivel: (t * 20) % 360 }, true); app.poke(); }
+        if (preset >= 0 && site) { cam.setView({ lon: site.lon + Math.sin(t * 0.6) * 1.2, lat: site.lat + Math.sin(t * 0.4) * 0.8, z: 22 * (0.55 + 0.45 * Math.cos(t * 0.5)), tilt: 0, swivel: 0 }, true); app.poke(); }
         prepass.push(app.renderer.gpuPrepassMs);
         if (o.scenario === 'l3probe') { const r = c.getBoundingClientRect(); app.renderer.probeRequest = { x: r.width / 2 + Math.cos(t * 2) * r.width / 4, y: r.height / 2 + Math.sin(t * 2) * r.height / 4 }; app.poke(); }
         if (t < seconds) requestAnimationFrame(step); else resolve();
@@ -123,6 +132,8 @@ export function installBench(app: App) {
     const prepassStats = { meanMs: sorted.reduce((a, b) => a + b, 0) / Math.max(1, sorted.length), p95Ms: sorted[Math.floor(sorted.length * 0.95)] ?? 0, maxMs: sorted[sorted.length - 1] ?? 0 };
     const volumeView = view3d ? { status: app.nexrad.view3d.status, target: view ? [view.width, view.height, view.divisor] : null } : undefined;
     if (view3d) settings.set(VIEW3D(''), view3dBefore);
+    const paneViews = preset >= 0 ? { layout: panes.layout, grid: panes.grid, labels: Array.from({ length: panes.count }, (_, p) => app.nexrad.paneLabel(p)) } : undefined;
+    if (preset >= 0) panes.setLayout(layoutBefore);
     const fps = app.fpsOverride ?? settings.num('config.generalActiveFPS');
     const capMs = fps > 0 ? 1000 / fps : 0;
     app.fpsOverride = null;
@@ -134,7 +145,7 @@ export function installBench(app: App) {
       adapter: g.info, backbuffer: { width: g.width, height: g.height, dpr: g.dpr, devicePixelRatio, cssWidth: c.clientWidth, cssHeight: c.clientHeight, msaa: g.sampleCount },
       userAgent: navigator.userAgent, stats: FrameMeter.stats(frames), cadence: cadence(raf, frames, capMs),
       // GPU time of the layers' prepasses (part of the GPU time in `stats`), sampled once per display refresh.
-      prepass: prepassStats, volumeView,
+      prepass: prepassStats, volumeView, panes: paneViews,
       longTasks: longTasks.slice(lt0).map((l) => ({ startMs: +(l.start - t0).toFixed(1), durationMs: +l.duration.toFixed(1) })),
       jsHeapMB: mem ? +(mem.usedJSHeapSize / 1e6).toFixed(1) : null,
       layers: [...app.layers.values()].filter((l) => 'status' in l).map((l) => ({ id: l.id, enabled: (l as { enabled: () => boolean }).enabled(), status: (l as { status: unknown }).status })),
@@ -318,5 +329,5 @@ export function installBench(app: App) {
     a.download = name; a.click();
   }
 
-  (window as unknown as { cwrv3bench: unknown }).cwrv3bench = { run, download, useL2Fixture, volumeCheck, trailCheck, isoCheck, app, settings, timeline };
+  (window as unknown as { cwrv3bench: unknown }).cwrv3bench = { run, download, useL2Fixture, volumeCheck, trailCheck, isoCheck, app, settings, timeline, panes };
 }

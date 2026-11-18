@@ -4,7 +4,8 @@
 // volumes of public/perf-fixtures.json. Writes <out>/<date>-<label>.json with raw per-frame data.
 // Usage: node tools/perf/run-bench.mjs <label> <mode: fixed4k|dpr15|dpr1|dpr2> --out <dir> [--fps 60|0] [--novsync]
 //        [--headful] [--seconds 60] [--runs 3] [--scenarios idle,panzoom,l2loop,l3probe,stress] [--trace l2loop]
-//        (further scenarios, not in the default list: l2volume and l2iso, the 3D volume view while orbiting the radar)
+//        (further scenarios, not in the default list: l2volume and l2iso, the 3D volume view while orbiting the radar;
+//        l2panes2 and l2panes4, the REF / SRV and REF / VEL / ZDR / CC pane layouts while panning around the radar)
 //        [--fixtures <dir with local copies of the fixture volumes, verified by SHA-256>]
 // --fps sets the FPS target for the runs (0 = unlimited; omitted = the user's settings, unlimited by default);
 // --novsync also disables the browser's vsync and frame-rate limit (headroom runs).
@@ -59,7 +60,7 @@ const SETUP = {
   stress: "S.set('config.generalMapMode',1); S.set('config.performanceMode',2); S.set('layerState.LightningOn',true); S.set('layerState.10mWindVectorsOn',true); S.set('layerState.saFillOn',true); S.set('layerState.FrontsOn',true); S.set('layerState.CentersOn',true); S.set('layerState.NEXRADLevel2',true); S.set('settings.nexradSitesOn',true); A.renderer.camera.setView({lon:-95,lat:39,z:120,tilt:15,swivel:0},true);",
 };
 // The 3D volume view scenarios use the Level 2 loop's setup; the benchmark turns the view on and orbits the camera.
-SETUP.l2volume = SETUP.l2iso = SETUP.l2loop;
+SETUP.l2volume = SETUP.l2iso = SETUP.l2panes2 = SETUP.l2panes4 = SETUP.l2loop;
 const results = { env, adapter: null, scenarios: {} };
 const date = env.date.slice(0, 10);
 try {
@@ -89,7 +90,7 @@ try {
       }
     }
     results.adapter = rs[0].adapter;
-    results.scenarios[sc] = { runs: rs.map((r) => ({ label: r.label, fpsLimit: r.fpsLimit, stats: r.stats, cadence: r.cadence, longTasks: r.longTasks, jsHeapMB: r.jsHeapMB, backbuffer: r.backbuffer, tiles: r.tiles, fixture: r.fixture, prepass: r.prepass, volumeView: r.volumeView, layers: r.layers.filter((l) => l.enabled).map((l) => `${l.id}:${l.status.state}`), raw: r.raw })) };
+    results.scenarios[sc] = { runs: rs.map((r) => ({ label: r.label, fpsLimit: r.fpsLimit, stats: r.stats, cadence: r.cadence, longTasks: r.longTasks, jsHeapMB: r.jsHeapMB, backbuffer: r.backbuffer, tiles: r.tiles, fixture: r.fixture, prepass: r.prepass, panes: r.panes, volumeView: r.volumeView, layers: r.layers.filter((l) => l.enabled).map((l) => `${l.id}:${l.status.state}`), raw: r.raw })) };
     const s = rs.map((r) => r.stats);
     console.log(sc, s.map((x, i) => `fps ${x.fps.toFixed(1)} p99 ${x.p99Ms.toFixed(2)} >20ms ${x.dropped20ms}/${x.frames} cpu ${x.cpuMean.toFixed(2)} gpu ${x.gpuMean.toFixed(2)}/${x.gpuP95?.toFixed?.(2)} late ${rs[i].cadence.lateFrames} raf ${rs[i].cadence.rafPeriodMs.toFixed(2)}`).join(' | '), 'bb', rs[0].backbuffer.width + 'x' + rs[0].backbuffer.height);
     if (rs[0].volumeView) console.log('  prepass', rs.map((r) => `mean ${r.prepass.meanMs.toFixed(2)} p95 ${r.prepass.p95Ms.toFixed(2)} max ${r.prepass.maxMs.toFixed(2)} ms, target ${r.volumeView.target?.join('x')}`).join(' | '));

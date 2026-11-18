@@ -4,6 +4,7 @@ import { settingExclusion } from '../settings/exclusions';
 import { FORMS } from '../generated/ui-forms';
 import { ANALYSIS_FORMS } from '../generated/ui-forms-analysis';
 import { ARCHIVE_FORMS } from '../generated/ui-forms-archive';
+import { PANE_FORMS } from '../generated/ui-forms-panes';
 import type { ControlDef, FormDef } from './form-types';
 import { settings, SETTING_DEFS } from '../settings/store';
 
@@ -39,7 +40,7 @@ const ICON_LABELS: Record<string, string> = {
 };
 
 export const formDef = (name: string): FormDef => {
-  const f = FORMS.find((x) => x.form === name) ?? ANALYSIS_FORMS.find((x) => x.form === name) ?? ARCHIVE_FORMS.find((x) => x.form === name);
+  const f = FORMS.find((x) => x.form === name) ?? ANALYSIS_FORMS.find((x) => x.form === name) ?? ARCHIVE_FORMS.find((x) => x.form === name) ?? PANE_FORMS.find((x) => x.form === name);
   if (!f) throw new Error(`form ${name} not in catalog`);
   return f;
 };

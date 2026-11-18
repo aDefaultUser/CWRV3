@@ -22,7 +22,8 @@ import { hailThresholds } from '../settings/postload';
 import { perfMark } from '../perf/meter';
 import { ChunkFeed } from '../radar/chunks';
 import { loadPref, savePref, prefObject } from '../app/persist';
-import { matchVolume, overlayFiles, LISTING_LAG_MAX_MS } from '../radar/overlay-match';
+import { matchVolume, overlayFiles, LISTING_LAG_MAX_MS, VOLUME_MATCH_TOL_MS } from '../radar/overlay-match';
+import { panes, type RadarView } from '../app/panes';
 import { RadarTools } from './radar-tools';
 import { AWS_L3, IEM_ATTR_SINCE, IEM_DS, iemAttrUrl, iemStormProducts, l3ArchiveCode, l3ArchiveCodes, listL3Archive } from '../radar/archive';
 import { fetchJson } from '../data/net';
@@ -33,13 +34,43 @@ import { Volume3D } from './radar-volume3d';
 
 export interface TiltTab { key: string; label: string; angle: number; sweepIndices: number[] }
 
+type L2Sweep = SweepTex & { elevation: number; startMs: number; endMs: number; complete: boolean; progress: number; id: string; motion: string; rolling?: { liveTilts: number; prevTilts: number } };
 /**
- * A Level 2 volume. `sweep.id` is the display identity the sweep was built for (NexradLayer.l2Identity), `key` the
- * exact request it came from, `req` the newest request in flight and `metaReq` the newest metadata read.
+ * One pane's product of a Level 2 volume. `sweep.id` is the display identity the sweep was built for
+ * (NexradLayer.l2Identity of that pane), `key` the exact request it came from and `req` the newest request in flight.
  */
-interface L2Frame { t: number; file: L2File; meta?: L2Meta; sweep?: SweepTex & { elevation: number; startMs: number; endMs: number; complete: boolean; progress: number; id: string; motion: string; rolling?: { liveTilts: number; prevTilts: number } }; key?: string; req?: string; metaReq?: number; error?: string }
+interface L2Slot { sweep?: L2Sweep; key?: string; req?: string; error?: string }
+/**
+ * A Level 2 volume: its file and metadata (`metaReq` is the newest metadata read) are shared by the panes. The frame
+ * itself is the slot of pane 0; `panes[p - 1]` is the slot of pane p.
+ */
+interface L2Frame extends L2Slot { t: number; file: L2File; meta?: L2Meta; metaReq?: number; panes?: (L2Slot | undefined)[] }
+const slot = (f: L2Frame, pane: number): L2Slot | undefined => (pane === 0 ? f : f.panes?.[pane - 1]);
+/** Every pane's slot of a volume. */
+const slots = (f: L2Frame): L2Slot[] => [f, ...(f.panes ?? []).filter((s): s is L2Slot => !!s)];
 /** A Level 3 file; `id` is the site and product it belongs to (NexradLayer.l3Identity). */
 interface L3Frame { t: number; url: string; id: string; tex?: SweepTex; raster?: { tex: GPUTexture; bounds: [number, number, number, number]; nx: number; ny: number }; vcp?: number; volumeTimeMs?: number; volumeScan?: number; loading?: boolean; error?: string; elevation?: number }
+
+/**
+ * Volumes of the loop while more than one pane is shown: every pane holds a sweep of each (1–5 MB of texture), so
+ * the newest ones only.
+ */
+export const PANE_VOLUMES = 12;
+/** What one pane draws with and drew last. Each pane has its own draw objects: one writes its uniforms once a frame. */
+class PaneDraw {
+  radar: RadarDraw; shadow: RadarDraw; oldSweep: RadarDraw; l3raster: RasterDraw;
+  /** The pane's Level 3 loop and the site and product (l3Identity) it was listed for. */
+  l3: L3Frame[] = []; l3Key = '';
+  lastDrawn: L2Frame | null = null;
+  /** Volume time of the radar frame drawn last; null when the pane draws none. */
+  shownT: number | null = null;
+  /** P-type state of the scan drawn last (legend note and status line). */
+  ptypeShown: PtypeState<PtypeTex> | null = null;
+  constructor(r: Renderer) { this.radar = new RadarDraw(r); this.shadow = new RadarDraw(r); this.oldSweep = new RadarDraw(r); this.l3raster = new RasterDraw(r); }
+  invalidate() { this.radar.invalidate(); this.shadow.invalidate(); this.oldSweep.invalidate(); this.l3raster.invalidate(); }
+}
+/** The same volume: equal, or volume times within the tolerance storm attributes are matched with. */
+const sameVolume = (a: number | null, b: number | null) => a === b || (a !== null && b !== null && Math.abs(a - b) <= VOLUME_MATCH_TOL_MS);
 
 /** The newest automatic storm motion vector (custom radar input) is current for this long after its volume time. */
 export const AUTO_MOTION_MAX_AGE = 20 * 60e3;
@@ -66,8 +97,14 @@ export class NexradLayer extends MapLayer {
   readonly id = 'nexrad';
   readonly archive = 'resolver';
   readonly title = 'NEXRAD';
+  /** Each pane draws its own product (ctx.pane); pane 0 is the view the radar settings describe. */
+  readonly perPane = true;
   l2: L2Frame[] = [];
-  l3: L3Frame[] = [];
+  private readonly views: PaneDraw[] = [new PaneDraw(this.r)];
+  private paneDraw(pane: number) { return (this.views[pane] ??= new PaneDraw(this.r)); }
+  /** Level 3 loop of pane 0. */
+  get l3() { return this.views[0].l3; }
+  set l3(frames: L3Frame[]) { this.views[0].l3 = frames; }
   tilts: TiltTab[] = [];
   tiltAngle = loadPref('l2tilt', 0.5, (v) => typeof v === 'number' && Number.isFinite(v));
   /** Live sweep requested; it is never active while an archive time is shown. */
@@ -84,11 +121,9 @@ export class NexradLayer extends MapLayer {
   private beam: LineSet | null = null; private beamKey = '';
   gauge = 0;
   flags = { avset: false, sails: false, mrle: false };
-  private radar: RadarDraw; private shadow: RadarDraw; private oldSweep: RadarDraw; private l3raster: RasterDraw;
   private luts = new Map<string, Lut>();
   private overlayLines: LineSet; private overlayPts: PointSet; private overlayText: TextSet; private overlayFill: PolySet;
   private site = '';
-  private mode = '';
   private wipeStart = 0; private wipeFromKey = '';
   /** Radar Control "Display old sweep" / "Flash old sweep": the previous sweep under a sweep still arriving. */
   readonly liveOld = prefObject('liveOldSweep', { display: true, flash: true });
@@ -140,7 +175,9 @@ export class NexradLayer extends MapLayer {
   onTilts: () => void = () => {};
   /** Fixed volume list (archive data) used instead of the live index; set by the benchmark and recorded references. */
   fixture: { site: string; files: L2File[] } | null = null;
-  private lastDrawn: L2Frame | null = null;
+  /** The Level 2 volume pane 0 drew last. */
+  private get lastDrawn() { return this.views[0].lastDrawn; }
+  private set lastDrawn(f: L2Frame | null) { this.views[0].lastDrawn = f; }
   /** Range rings and the VR-shear measurement around the selected site. */
   readonly tools: RadarTools;
   /** Volume packs (every tilt of one moment) of this layer's volumes, for the cross-section and 3D views. */
@@ -187,7 +224,6 @@ export class NexradLayer extends MapLayer {
 
   constructor(r: Renderer, atlas: GlyphAtlas) {
     super(r);
-    this.radar = new RadarDraw(r); this.shadow = new RadarDraw(r); this.oldSweep = new RadarDraw(r); this.l3raster = new RasterDraw(r);
     this.overlayLines = new LineSet(r); this.overlayPts = new PointSet(r); this.overlayText = new TextSet(r, atlas); this.overlayFill = new PolySet(r);
     this.ageText = new TextSet(r, atlas);
     this.tools = new RadarTools(r, atlas, this);
@@ -200,11 +236,24 @@ export class NexradLayer extends MapLayer {
 
   enabled() { return settings.bool('layerState.NEXRADOn'); }
   overlaysEnabled() { return ['NEXRADStormTracksOn', 'NEXRADTVSIconsOn', 'NEXRADHAILIconsOn', 'NEXRADMESOIconsOn', 'NEXRADMeltingLayerOn'].some((k) => settings.bool('layerState.' + k)); }
-  isL2() { return settings.bool('layerState.NEXRADLevel2'); }
-  product() { return this.liveComposite ? 0 : settings.num('layerState.NEXRADLevel2Product'); }
-  l3Entry(): L3Entry { return L3[settings.num('layerState.NEXRADLevel3Product')] ?? L3[0]; }
+  /**
+   * What a pane shows. Pane 0 (and any pane the layout does not show) is the radar settings and the tilt
+   * preference, at the timeline time; panes 1–3 are the pane store's views.
+   */
+  view(pane = 0): RadarView {
+    if (pane > 0 && pane < panes.count) return panes.views[pane - 1];
+    return { level2: settings.bool('layerState.NEXRADLevel2'), product: settings.num('layerState.NEXRADLevel2Product'), l3: settings.num('layerState.NEXRADLevel3Product'), tilt: this.tiltAngle, offsetMin: 0 };
+  }
+  /** Panes shown, and those of them that show Level 2. */
+  private paneList() { return Array.from({ length: panes.count }, (_, p) => p); }
+  private l2Panes() { return this.paneList().filter((p) => this.isL2(p)); }
+  /** The live composite replaces the product of pane 0 only. */
+  private composite(pane: number) { return pane === 0 && this.liveComposite; }
+  isL2(pane = 0) { return this.view(pane).level2; }
+  product(pane = 0) { return this.composite(pane) ? 0 : this.view(pane).product; }
+  l3Entry(pane = 0): L3Entry { return L3[this.view(pane).l3] ?? L3[0]; }
   siteInfo() { return RADAR_SITES.find((s) => s.id === settings.str('settings.nexradSiteICAO').toUpperCase()) ?? null; }
-  invalidate() { this.radar.invalidate(); this.shadow.invalidate(); this.oldSweep.invalidate(); this.l3raster.invalidate(); this.view3d.invalidate(); }
+  invalidate() { this.views.forEach((v) => v.invalidate()); this.view3d.invalidate(); }
 
   /** Bumped by freeAll (site change): every request of an older generation is discarded when it completes. */
   private gen = 0;
@@ -213,37 +262,55 @@ export class NexradLayer extends MapLayer {
    * What a Level 2 sweep means: site, product, live composite, tilt (volume products and the composite have none)
    * and the product's algorithm inputs. A sweep is drawn, probed and listed only under the identity it was built for.
    */
-  l2Identity(): string {
-    const p = this.product(), tilt = this.liveComposite || p >= 11 ? '' : this.tiltAngle;
+  l2Identity(pane = 0): string {
+    const p = this.product(pane), composite = this.composite(pane), tilt = composite || p >= 11 ? '' : this.view(pane).tilt;
     // Automatic storm motion is per volume (each sweep records the vector it was built with; see fits).
     const auto = !settings.bool('settings.nexradStormMotionCustom');
-    return `${this.currentSite()}|${p}|${this.liveComposite}|${tilt}|${algorithmKey(p, this.algorithmParams(), auto)}${this.rolling() ? '|rolling' : ''}`;
+    return `${this.currentSite()}|${p}|${composite}|${tilt}|${algorithmKey(p, this.algorithmParams(), auto)}${this.rolling(pane) ? '|rolling' : ''}`;
   }
   /** Rolling mode of the live volume's volume products (11–19): tilts not yet rescanned come from the previous volume. */
-  rolling() { return settings.bool('ext.settings.nexradLevel2Rolling') && !this.liveComposite && this.product() >= 11; }
-  l3Identity(): string { return `${this.currentSite()}|${this.l3Entry().ds}`; }
-  private shownL2(): L2Frame[] { const id = this.l2Identity(); return this.l2.filter((f) => this.fits(f, id)); }
+  rolling(pane = 0) { return settings.bool('ext.settings.nexradLevel2Rolling') && !this.composite(pane) && this.product(pane) >= 11; }
+  l3Identity(pane = 0): string { return `${this.currentSite()}|${this.l3Entry(pane).ds}`; }
+  /** Volumes of the loop: all of them, or the newest PANE_VOLUMES while more than one pane is shown. */
+  private loopL2(): L2Frame[] { return panes.count > 1 ? this.l2.slice(-PANE_VOLUMES) : this.l2; }
+  private shownL2(pane = 0): L2Frame[] { const id = this.l2Identity(pane); return this.loopL2().filter((f) => this.fits(f, id, pane)); }
   /** A sweep fits its identity; storm-relative velocity also only while built with its volume's current storm motion. */
-  private fits(f: L2Frame, id: string): boolean {
-    return f.sweep?.id === id && (this.product() !== 7 || this.liveComposite || f.sweep.motion === JSON.stringify(this.stormMotion(f.t)));
+  private fits(f: L2Frame, id: string, pane = 0): boolean {
+    const sw = slot(f, pane)?.sweep;
+    return sw?.id === id && (this.product(pane) !== 7 || this.composite(pane) || sw.motion === JSON.stringify(this.stormMotion(f.t)));
   }
-  private shownL3(): L3Frame[] { const id = this.l3Identity(); return this.l3.filter((f) => f.id === id && (f.tex || f.raster)); }
-  private dropSweep(f: L2Frame) { f.sweep?.tex.destroy(); f.sweep = undefined; }
+  private shownL3(pane = 0): L3Frame[] { const id = this.l3Identity(pane); return this.paneDraw(pane).l3.filter((f) => f.id === id && (f.tex || f.raster)); }
+  private dropSweep(s: L2Slot) { s.sweep?.tex.destroy(); s.sweep = undefined; }
 
-  /** Frees the radar frames (nothing is listed for the selection). */
-  private freeFrames() {
-    for (const f of this.l2) f.sweep?.tex.destroy();
-    for (const f of this.l3) { f.tex?.tex.destroy(); f.raster?.tex.destroy(); }
-    this.l2 = []; this.l3 = [];
+  /** Frees the Level 2 volumes (nothing is listed for the selection). */
+  private freeL2() {
+    for (const f of this.l2) for (const s of slots(f)) s.sweep?.tex.destroy();
+    this.l2 = [];
+  }
+  /** Frees a pane's Level 3 loop. */
+  private freeL3(v: PaneDraw) {
+    for (const f of v.l3) { f.tex?.tex.destroy(); f.raster?.tex.destroy(); }
+    v.l3 = []; v.l3Key = '';
+  }
+  /**
+   * Frees what the panes other than pane 0 no longer show: sweeps of a pane that left the layout or shows Level 3,
+   * or of a volume outside the loop, and the Level 3 loop of a pane that left the layout or shows Level 2.
+   */
+  private trimPanes() {
+    const loop = this.loopL2();
+    for (const f of this.l2) f.panes?.forEach((s, i) => {
+      if (s && (i + 1 >= panes.count || !this.isL2(i + 1) || !loop.includes(f))) { s.sweep?.tex.destroy(); f.panes![i] = undefined; }
+    });
+    this.views.forEach((v, p) => { if (p > 0 && v.l3.length && (p >= panes.count || this.isL2(p))) this.freeL3(v); });
   }
 
   /** Frees everything for a site change ("Radar site switched. Freeing all volumes."). */
   freeAll() {
     this.gen++;
     this.volumes.clear();
-    for (const f of this.l2) f.sweep?.tex.destroy();
-    for (const f of this.l3) { f.tex?.tex.destroy(); f.raster?.tex.destroy(); }
-    this.l2 = []; this.l3 = []; this.tilts = []; this.onTilts();
+    this.freeL2();
+    this.views.forEach((v) => this.freeL3(v));
+    this.tilts = []; this.onTilts();
     this.overlays = { cells: [], tvs: [], hail: [], meso: [], ml: [], ss: [], sti: [] };
     this.scit = [];
     this.storm.clear(); this.stormRead.clear(); this.stormListed = false; this.overlayKey = ''; this.overlayTime = 0;
@@ -255,16 +322,18 @@ export class NexradLayer extends MapLayer {
   /** Environmental isotherm table of the selected site, for the status text of the algorithm dialog. */
   envStatus(): string { const p = this.sitePoint(); return p ? isothermStatus(this.currentSite(), p) : 'No environmental isotherm data loaded'; }
 
-  /** Build parameters of the selected product at the selected site for a volume scanned at `volumeMs`. */
-  buildParams(volumeMs = timeline.t): L2BuildParams {
+  /** Build parameters of a pane's product at the selected site for a volume scanned at `volumeMs`. */
+  buildParams(volumeMs = timeline.t, pane = 0): L2BuildParams {
     const p = this.algorithmParams(volumeMs);
-    return { ...p, envIsotherms: hailEnvironment(this.product(), p.isothermAuto, this.sitePoint(), volumeMs) };
+    return { ...p, envIsotherms: hailEnvironment(this.product(pane), p.isothermAuto, this.sitePoint(), volumeMs) };
   }
   /** Rebuilds a hail product of the selected site when its isotherms arrive (other radars' arrivals are ignored). */
   private readonly isothermsArrived = (key: string) => {
     const p = this.sitePoint();
-    if (p && key === pointKey(p) && this.isL2() && usesIsotherms(this.product()) && !settings.bool('settings.nexradAlgorithmHailIsothermCustom')) this.reloadL2();
+    if (p && key === pointKey(p) && this.l2Panes().some((q) => usesIsotherms(this.product(q))) && !settings.bool('settings.nexradAlgorithmHailIsothermCustom')) this.reloadL2();
   };
+  /** A pane's Level 2 product is storm-relative velocity, which needs each volume's storm motion. */
+  private srvShown() { return this.paneList().some((p) => this.view(p).product === 7); }
   /** Listeners told when the automatic (Level 3) storm motion appears, changes or is dropped. */
   readonly autoMotionListeners = new Set<() => void>();
   /**
@@ -321,10 +390,11 @@ export class NexradLayer extends MapLayer {
     if (!this.enabled()) this.publishTimeline();
     if (!this.enabled() && !this.overlaysEnabled()) { this.statusText = `Awaiting activation (${this.isL2() ? 'L2' : 'L3'})...`; this.setStatus('off', ''); return; }
     try {
-      if (this.enabled() && this.isL2()) await this.refreshL2(site);
-      if (this.enabled() && !this.isL2()) await this.refreshL3(site);
+      this.trimPanes();
+      if (this.enabled() && this.l2Panes().length) await this.refreshL2(site);
+      if (this.enabled()) await Promise.all(this.paneList().filter((p) => !this.isL2(p)).map((p) => this.refreshL3(site, p)));
       // Overlay products change once per volume: live-sweep polls (every few seconds) re-read them at most each minute.
-      if ((this.overlaysEnabled() || settings.num('layerState.NEXRADLevel2Product') === 7) && (!this.liveScan || Date.now() - this.overlaysAt > 60e3)) { this.overlaysAt = Date.now(); await this.refreshOverlays(site); }
+      if ((this.overlaysEnabled() || this.srvShown()) && (!this.liveScan || Date.now() - this.overlaysAt > 60e3)) { this.overlaysAt = Date.now(); await this.refreshOverlays(site); }
     } catch (e) {
       this.statusText = `Error: ${(e as Error).message}`;
       this.setStatus('error', this.statusText);
@@ -366,8 +436,9 @@ export class NexradLayer extends MapLayer {
     // Only the AWS archive keeps past volumes.
     const archive = timeline.mode === 'archive';
     const src = archive ? 3 : effectiveSource(settings.num('settings.nexradL2DataSource'), settings.str('settings.nexradL2CustomDataSource'));
-    this.statusText = 'Retrieving Level 2 index...';
-    this.onStatus(this);
+    // The status line and the timeline are pane 0's: they follow Level 2 only while pane 0 shows it.
+    const main = () => this.isL2();
+    if (main()) { this.statusText = 'Retrieving Level 2 index...'; this.onStatus(this); }
     let files = this.fixture && this.fixture.site === site ? this.fixture.files : await this.l2Index(site, src);
     if (gen !== this.gen) return; // site changed while listing
     // Live sweep: the real-time chunk volume replaces the growing full-volume file when the chunk feed is current.
@@ -376,31 +447,31 @@ export class NexradLayer extends MapLayer {
       if (gen !== this.gen) return;
       if (live) files = [...files.filter((f) => !f.live && Math.abs(f.t - live.t) > 60e3), live].sort((a, b) => a.t - b.t);
     } else this.liveSource = { kind: null, note: '' };
-    if (!files.length && archive) { this.freeFrames(); this.statusText = `Level 2 at ${site}: ${NOT_AVAILABLE}`; this.setStatus('unavailable', NOT_AVAILABLE); this.publishTimeline(); return; }
-    if (!files.length) { this.statusText = 'Server returned empty file index for active site. No action taken.'; this.setStatus('error', this.statusText); return; }
+    if (!files.length && archive) { this.freeL2(); if (main()) { this.statusText = `Level 2 at ${site}: ${NOT_AVAILABLE}`; this.setStatus('unavailable', NOT_AVAILABLE); this.publishTimeline(); } return; }
+    if (!files.length) { if (main()) { this.statusText = 'Server returned empty file index for active site. No action taken.'; this.setStatus('error', this.statusText); } return; }
     const newest = files[files.length - 1];
-    if (!this.fixture && !archive && Date.now() - newest.t > 30 * 60e3) this.statusText = `Site down. Last volume ${new Date(newest.t).toUTCString().slice(17, 22)}Z`;
+    if (main() && !this.fixture && !archive && Date.now() - newest.t > 30 * 60e3) this.statusText = `Site down. Last volume ${new Date(newest.t).toUTCString().slice(17, 22)}Z`;
     const download = settings.num('settings.nexradLevel2MaxVolumeDownloadCount');
     const memory = settings.num('settings.nexradLevel2VolumeCountMemory');
     const held = new Set(this.l2.filter((f) => !f.file.live).map((f) => f.file.url));
     const wanted = l2Retention(files, held, download, memory, this.liveScan && newest.live ? newest : null);
     const keep = new Map(this.l2.map((f) => [f.file.url, f]));
     const next: L2Frame[] = wanted.map((f) => keep.get(f.url) ?? { t: f.t, file: f });
-    for (const f of this.l2) if (!next.includes(f)) f.sweep?.tex.destroy();
+    for (const f of this.l2) if (!next.includes(f)) for (const s of slots(f)) s.sweep?.tex.destroy();
     this.l2 = next;
-    if (this.liveScan) { const lf = this.l2.find((f) => f.file.live); if (lf) { lf.key = undefined; lf.file = { ...newest, live: true }; } }
+    this.trimPanes();
+    if (this.liveScan) { const lf = this.l2.find((f) => f.file.live); if (lf) { for (const s of slots(lf)) s.key = undefined; lf.file = { ...newest, live: true }; } }
     await Promise.all([...this.l2].reverse().map((f) => this.loadL2(f)));
     if (gen === this.gen) this.updateL2Status();
   }
 
-  sweepFor(meta: L2Meta, product: number): number | null {
+  sweepFor(meta: L2Meta, product: number, angle = this.tiltAngle): number | null {
     // Column ZDR/KDP need dual-pol moments; the other volume products need reflectivity only.
     if (product >= 11) return (product === 17 || product === 18) && !meta.sweeps.some((s) => s.moments.includes('RHO')) ? null : 0;
     const need = l2Moment(product);
     const showSplit = settings.bool('settings.nexradLevel2ShowSplitCuts');
     const cands = meta.sweeps.filter((s) => need && s.moments.includes(need));
     if (!cands.length) return null;
-    const angle = this.tiltAngle;
     let best: L2SweepMeta[] = [];
     let bd = Infinity;
     for (const s of cands) {
@@ -415,15 +486,12 @@ export class NexradLayer extends MapLayer {
   }
 
   /**
-   * Builds the current product for one volume. The newest request for a volume wins: a result is applied only while
-   * its request is still the volume's newest, the site is unchanged and the display identity (product, tilt, live
-   * composite, algorithm inputs) is the one it was requested for. When the product cannot be built, no sweep of
-   * another meaning stays behind it.
+   * Reads a volume's metadata once for all panes (again for a live volume), then builds each Level 2 pane's product.
+   * A newer read of the volume supersedes this one.
    */
   private async loadL2(f: L2Frame) {
-    const product = this.product(), composite = this.liveComposite, gen = this.gen, id = this.l2Identity();
+    const gen = this.gen;
     const current = () => gen === this.gen && this.l2.includes(f);
-    let key = '';
     try {
       if (!f.meta || f.file.live) {
         const token = f.metaReq = (f.metaReq ?? 0) + 1;
@@ -431,59 +499,86 @@ export class NexradLayer extends MapLayer {
         if (token !== f.metaReq || !current()) return; // a newer read of this volume, or another site
         f.meta = meta;
       }
-      const meta = f.meta;
-      if (meta.volumeTimeMs) f.t = meta.volumeTimeMs;
-      if (!this.tilts.length || f === this.l2[this.l2.length - 1]) this.buildTilts(meta);
-      if (this.l2Identity() !== id) return; // the selection changed meanwhile; its own request follows
-      const sweepIdx = composite ? -1 : this.sweepFor(meta, product);
-      const params = this.buildParams(f.t);
+      if (f.meta.volumeTimeMs) f.t = f.meta.volumeTimeMs;
+      if (!this.tilts.length || f === this.l2[this.l2.length - 1]) this.buildTilts(f.meta);
+    } catch (e) {
+      if (!current()) return;
+      for (const p of this.l2Panes()) this.buildFailed(this.slotFor(f, p), p, e);
+      return;
+    }
+    // Panes other than pane 0 hold sweeps of the loop's volumes only (trimPanes).
+    const loop = this.loopL2().includes(f);
+    await Promise.all(this.l2Panes().filter((p) => p === 0 || loop).map((p) => this.buildL2(f, p, gen)));
+  }
+
+  /**
+   * Builds a pane's product for one volume. The newest request for a pane's slot wins: a result is applied only while
+   * its request is still the slot's newest, the site is unchanged and the pane's display identity (product, tilt, live
+   * composite, algorithm inputs) is the one it was requested for; it never reaches another pane's slot. When the
+   * product cannot be built, no sweep of another meaning stays behind it.
+   */
+  private async buildL2(f: L2Frame, pane: number, gen: number) {
+    const product = this.product(pane), composite = this.composite(pane), id = this.l2Identity(pane), meta = f.meta!;
+    const s = this.slotFor(f, pane);
+    // The slot is replaced when the pane leaves the layout or its volume the loop.
+    const current = () => gen === this.gen && this.l2.includes(f) && slot(f, pane) === s;
+    let key = '';
+    try {
+      const sweepIdx = composite ? -1 : this.sweepFor(meta, product, this.view(pane).tilt);
+      const params = this.buildParams(f.t, pane);
       // Rolling: a live volume's product also reads the previous complete volume (its own identity, see l2Identity).
-      const prev = this.rolling() && f.file.live ? this.l2.filter((x) => !x.file.live && x.t < f.t).pop() : undefined;
+      const prev = this.rolling(pane) && f.file.live ? this.l2.filter((x) => !x.file.live && x.t < f.t).pop() : undefined;
       const rolling = prev && { url: prev.file.url, chunks: prev.file.chunks };
       key = `${id}|${sweepIdx}|${JSON.stringify(params)}|${meta.sweeps.length}|${meta.sweeps[meta.sweeps.length - 1]?.radials}|${rolling?.url ?? ''}`;
-      if (f.key === key) { f.req = undefined; return; } // already built (or known unavailable); an older request in flight is superseded
-      if (f.req === key) return;
-      if (sweepIdx === null) { f.error = 'not available for this volume'; this.dropSweep(f); f.key = key; f.req = undefined; this.updateL2Status(); return; }
-      f.req = key;
+      if (s.key === key) { s.req = undefined; return; } // already built (or known unavailable); an older request in flight is superseded
+      if (s.req === key) return;
+      if (sweepIdx === null) { s.error = 'not available for this volume'; this.dropSweep(s); s.key = key; s.req = undefined; this.updateL2Status(); return; }
+      s.req = key;
       const res = composite
         ? await pool.for(this.id).run('l2.composite', { url: f.file.url, live: f.file.live, chunks: f.file.chunks, base: settings.num('settings.nexradLevel2LiveCompositeCAPPIBase'), top: settings.num('settings.nexradLevel2LiveCompositeCAPPITop'), selectiveMax: settings.bool('settings.nexradLevel2LiveCompositeSelectiveMaximum') }, f.file.url)
         : await pool.for(this.id).run('l2.product', { url: f.file.url, live: f.file.live, chunks: f.file.chunks, sweep: sweepIdx, product, params, rolling }, f.file.url);
-      if (f.req !== key) return; // a newer request for this volume replaced this one
-      f.req = undefined;
-      if (!current() || this.l2Identity() !== id) return;
-      if (!res.sweep) { f.error = 'product unavailable'; this.dropSweep(f); f.key = key; this.updateL2Status(); return; }
-      const s = res.sweep;
-      const old = f.sweep;
-      const tex = uploadSweep(this.r, s, this.id);
-      const expected = s.half ? 720 : 360;
-      f.sweep = { ...tex, elevation: s.elevation, startMs: s.startMs, endMs: s.endMs, complete: s.complete, progress: Math.min(1, s.radials / expected), id, motion: JSON.stringify(params.stormMotion), rolling: s.rolling };
-      if (old?.id === id && f.file.live) { this.wipeStart = performance.now(); this.wipeFromKey = f.key ?? ''; }
+      if (s.req !== key) return; // a newer request for this slot replaced this one
+      s.req = undefined;
+      if (!current() || this.l2Identity(pane) !== id) return;
+      if (!res.sweep) { s.error = 'product unavailable'; this.dropSweep(s); s.key = key; this.updateL2Status(); return; }
+      const sw = res.sweep;
+      const old = s.sweep;
+      const tex = uploadSweep(this.r, sw, this.id);
+      const expected = sw.half ? 720 : 360;
+      s.sweep = { ...tex, elevation: sw.elevation, startMs: sw.startMs, endMs: sw.endMs, complete: sw.complete, progress: Math.min(1, sw.radials / expected), id, motion: JSON.stringify(params.stormMotion), rolling: sw.rolling };
+      if (old?.id === id && f.file.live) { this.wipeStart = performance.now(); this.wipeFromKey = s.key ?? ''; }
       // Live-composite update effect: flash when the newest composite changes (not on the first load).
       if (composite && f === this.l2[this.l2.length - 1]) {
-        const ck = `${f.file.url}|${s.radials}|${s.endMs}`;
+        const ck = `${f.file.url}|${sw.radials}|${sw.endMs}`;
         if (this.compositeKey && ck !== this.compositeKey) this.flashStart = performance.now();
         this.compositeKey = ck;
       }
       old?.tex.destroy();
-      f.key = key;
-      f.error = undefined;
-      if (f.file.live) {
-        const sm = f.meta.sweeps[sweepIdx ?? 0];
-        this.gauge = Math.round(f.sweep.progress * 360);
-        this.liveSweepText = `${(s.azimuths[s.radials - 1] ?? 0).toFixed(0)}°/${(sm?.elevation ?? 0).toFixed(1)}°`;
-        this.liveAz = s.complete ? null : s.azimuths[s.radials - 1] ?? null;
+      s.key = key;
+      s.error = undefined;
+      // The live-sweep gauge, readout and beam follow pane 0's tilt.
+      if (f.file.live && pane === 0) {
+        const sm = meta.sweeps[sweepIdx ?? 0];
+        this.gauge = Math.round(s.sweep.progress * 360);
+        this.liveSweepText = `${(sw.azimuths[sw.radials - 1] ?? 0).toFixed(0)}°/${(sm?.elevation ?? 0).toFixed(1)}°`;
+        this.liveAz = sw.complete ? null : sw.azimuths[sw.radials - 1] ?? null;
       }
       this.updateL2Status();
     } catch (e) {
-      if (key && f.req && f.req !== key) return;
-      f.req = undefined;
+      if (key && s.req && s.req !== key) return;
+      s.req = undefined;
       if (!current()) return;
-      f.error = (e as Error).message;
-      // A failed rebuild of the same meaning keeps the previous sweep; anything else is removed.
-      if (f.sweep && f.sweep.id !== this.l2Identity()) this.dropSweep(f);
-      f.key = undefined;
-      this.updateL2Status();
+      this.buildFailed(s, pane, e);
     }
+  }
+  private slotFor(f: L2Frame, pane: number): L2Slot { return pane === 0 ? f : ((f.panes ??= [])[pane - 1] ??= {}); }
+  /** A failed rebuild of the same meaning keeps the previous sweep; anything else is removed. */
+  private buildFailed(s: L2Slot, pane: number, e: unknown) {
+    s.req = undefined;
+    s.error = (e as Error).message;
+    if (s.sweep && s.sweep.id !== this.l2Identity(pane)) this.dropSweep(s);
+    s.key = undefined;
+    this.updateL2Status();
   }
 
   private buildTilts(meta: L2Meta) {
@@ -510,26 +605,40 @@ export class NexradLayer extends MapLayer {
     this.reloadL2();
   }
 
-  /** Requests the current product for every volume; sweeps of another meaning are freed now, not relabelled. */
+  /** Requests every pane's product for every volume; sweeps of another meaning are freed now, not relabelled. */
   private reloadL2() {
-    const id = this.l2Identity();
+    this.trimPanes();
+    const ids = this.paneList().map((p) => this.l2Identity(p));
     let dropped = false;
-    for (const f of this.l2) { if (f.sweep && !this.fits(f, id)) { this.dropSweep(f); f.key = undefined; dropped = true; } void this.loadL2(f); }
+    for (const f of this.l2) {
+      ids.forEach((id, p) => { const s = slot(f, p); if (s?.sweep && !this.fits(f, id, p)) { this.dropSweep(s); s.key = undefined; dropped ||= p === 0; } });
+      void this.loadL2(f);
+    }
     if (dropped && this.enabled() && this.isL2()) this.updateL2Status();
   }
 
   /** Re-requests products after a product, algorithm, tilt or live-composite change. */
-  reloadProducts() { this.reloadL2(); for (const f of this.l3) { f.tex?.tex.destroy(); f.tex = undefined; } if (!this.isL2()) this.refresh(); }
+  reloadProducts() { this.reloadL2(); this.views.forEach((v) => { for (const f of v.l3) { f.tex?.tex.destroy(); f.tex = undefined; } }); if (this.paneList().some((p) => !this.isL2(p))) this.refresh(); }
+
+  /**
+   * The layout or a pane's view changed: the panes' products are requested and what a pane no longer shows is freed.
+   * A pane whose view did not change keeps its sweeps (their requests are already answered under the same key).
+   */
+  panesChanged() {
+    this.reloadL2();
+    if (this.enabled()) { if (this.isL2()) this.updateL2Status(); void this.refresh(); }
+  }
 
   private updateL2Status() {
+    if (!this.isL2()) return; // the status line and the timeline are pane 0's
     const ready = this.shownL2();
-    const newest = this.l2[this.l2.length - 1];
+    const newest = this.loopL2()[this.loopL2().length - 1];
     this.nrtText = newest ? `NRT: ${Math.max(0, Math.round((timeline.now() - (newest.sweep?.endMs || newest.t)) / 60e3))} min` : 'NRT: ---';
     if (this.liveScan) {
       const how = this.liveSource.kind === 'chunks' ? `chunk feed: ${this.liveSource.note}` : `full-volume fallback${this.liveSource.note ? ` (${this.liveSource.note})` : ''}`;
       this.statusText = `${newest?.file.live ? 'Live sweep active' : 'Awaiting next scan'} · ${how}`;
     }
-    else this.statusText = ready.length ? `${ready.length}/${this.l2.length} volumes (keeps ≤${settings.num('settings.nexradLevel2VolumeCountMemory')})` : this.l2.some((f) => f.error) ? (this.l2.find((f) => f.error)!.error ?? 'error') : 'Awaiting new volume...';
+    else this.statusText = ready.length ? `${ready.length}/${this.loopL2().length} volumes (keeps ≤${panes.count > 1 ? Math.min(PANE_VOLUMES, settings.num('settings.nexradLevel2VolumeCountMemory')) : settings.num('settings.nexradLevel2VolumeCountMemory')})` : this.l2.some((f) => f.error) ? (this.l2.find((f) => f.error)!.error ?? 'error') : 'Awaiting new volume...';
     this.setStatus(ready.length ? 'ready' : 'loading', this.withPtype(this.statusText), { frames: ready.length, newestMs: newest?.t });
     this.publishTimeline();
   }
@@ -545,11 +654,12 @@ export class NexradLayer extends MapLayer {
   }
 
   // ------------------------------------------------------------------------------------------- Level 3
-  private async refreshL3(site: string) {
-    const p = this.l3Entry(), gen = this.gen;
+  /** Lists and loads a pane's Level 3 loop; the status line and the timeline follow pane 0's. */
+  private async refreshL3(site: string, pane = 0) {
+    const p = this.l3Entry(pane), gen = this.gen, v = this.paneDraw(pane), main = pane === 0;
     const key = `${site}|${p.ds}`;
-    const current = () => gen === this.gen && this.l3Identity() === key;
-    this.statusText = `Retrieving ${p.awips} index...`;
+    const current = () => gen === this.gen && pane < panes.count && !this.isL2(pane) && this.l3Identity(pane) === key;
+    if (main) this.statusText = `Retrieving ${p.awips} index...`;
     const archive = timeline.mode === 'archive';
     let files = archive ? [] : await listL3(site, p.ds), name: string = p.awips;
     if (archive) for (const code of l3ArchiveCodes(p.ds, p.awips)) {
@@ -558,16 +668,16 @@ export class NexradLayer extends MapLayer {
       if (files.length) { if (code !== p.awips) name = `${code} (archived successor of ${p.awips})`; break; }
     }
     if (!current()) return; // site or product changed while listing
-    if (!files.length && archive) { this.freeFrames(); this.statusText = `${p.awips} at ${site}: ${NOT_AVAILABLE}`; this.setStatus('unavailable', NOT_AVAILABLE); this.publishTimeline(); return; }
+    if (!files.length && archive) { this.freeL3(v); if (main) { this.statusText = `${p.awips} at ${site}: ${NOT_AVAILABLE}`; this.setStatus('unavailable', NOT_AVAILABLE); this.publishTimeline(); } return; }
     const max = settings.num('settings.nexradLevel3MaxFrameCount');
     const wanted = files.filter((f) => f.t >= timeline.loopStart - 10 * 60e3).slice(-max);
-    if (this.mode !== key) { for (const f of this.l3) { f.tex?.tex.destroy(); f.raster?.tex.destroy(); } this.l3 = []; this.mode = key; }
-    const keep = new Map(this.l3.map((f) => [`${f.url}@${f.t}`, f]));
+    if (v.l3Key !== key) { this.freeL3(v); v.l3Key = key; }
+    const keep = new Map(v.l3.map((f) => [`${f.url}@${f.t}`, f]));
     const next: L3Frame[] = wanted.map((w) => keep.get(`${w.url}@${w.t}`) ?? { t: w.t, url: w.url, id: key });
-    for (const f of this.l3) if (!next.includes(f)) { f.tex?.tex.destroy(); f.raster?.tex.destroy(); }
-    this.l3 = next;
-    await Promise.all([...this.l3].reverse().map((f) => this.loadL3(f, p)));
-    if (!current()) return;
+    for (const f of v.l3) if (!next.includes(f)) { f.tex?.tex.destroy(); f.raster?.tex.destroy(); }
+    v.l3 = next;
+    await Promise.all([...v.l3].reverse().map((f) => this.loadL3(f, p, v)));
+    if (!current() || !main) return;
     const ready = this.shownL3();
     this.statusText = ready.length ? `${name}: ${ready.length}/${this.l3.length} frames` : wanted.length ? 'Awaiting new volume...' : `No ${p.awips} files at ${site}`;
     const nv = ready[ready.length - 1];
@@ -577,12 +687,12 @@ export class NexradLayer extends MapLayer {
     this.publishTimeline();
   }
 
-  private async loadL3(f: L3Frame, p: L3Entry) {
+  private async loadL3(f: L3Frame, p: L3Entry, v: PaneDraw) {
     if (f.tex || f.raster || f.loading) return;
     f.loading = true;
     try {
       const res = await pool.for(this.id).run('l3', { url: f.url, live: !f.url.startsWith(AWS_L3) });
-      if (!this.l3.includes(f) || f.tex || f.raster) return; // replaced (site or product change) or already rebuilt
+      if (!v.l3.includes(f) || f.tex || f.raster) return; // replaced (site or product change) or already rebuilt
       f.vcp = res.vcp; f.volumeTimeMs = res.volumeTimeMs; f.volumeScan = res.volumeScan;
       if (res.volumeTimeMs) f.t = res.volumeTimeMs;
       const rng = l3Range(p);
@@ -630,7 +740,7 @@ export class NexradLayer extends MapLayer {
    */
   private async refreshOverlays(site: string) {
     const gen = this.gen, current = () => gen === this.gen && this.currentSite() === site;
-    const wantMotion = settings.num('layerState.NEXRADLevel2Product') === 7 && !settings.bool('settings.nexradStormMotionCustom');
+    const wantMotion = this.srvShown() && !settings.bool('settings.nexradStormMotionCustom');
     const dsList = [...this.overlayDs(), ...(wantMotion ? ['56rm0'] : [])];
     const archive = timeline.mode === 'archive';
     const from = timeline.loopStart - 10 * 60e3, to = timeline.loopEnd + (archive ? 0 : LISTING_LAG_MAX_MS);
@@ -672,7 +782,7 @@ export class NexradLayer extends MapLayer {
       const m = motionOf(newest);
       if (m && timeline.now() - newest.volumeTimeMs <= AUTO_MOTION_MAX_AGE) this.setAutoMotion(m, newest.volumeTimeMs);
       else this.clearAutoMotion();
-      if (motionArrived && this.isL2() && this.product() === 7) this.reloadL2();
+      if (motionArrived && this.srvShown()) this.reloadL2();
     }
   }
 
@@ -881,32 +991,34 @@ export class NexradLayer extends MapLayer {
     return l;
   }
 
-  displayRange(): { low: number; high: number; unit: string; reserve: boolean; palette: string; top: number } {
-    if (this.isL2()) {
-      const p = L2[this.product()];
-      const sixteen = (this.product() === 4) || (this.product() === 3 && this.shownL2().some((f) => f.sweep!.tex.format !== 'r8unorm'));
-      return { low: p.low, high: p.high, unit: p.unit, reserve: p.reserve, palette: settings.str(L2_PALETTE_KEYS[this.product()]), top: sixteen ? 65535 : 255 };
+  displayRange(pane = 0): { low: number; high: number; unit: string; reserve: boolean; palette: string; top: number } {
+    if (this.isL2(pane)) {
+      const i = this.product(pane), p = L2[i];
+      const sixteen = (i === 4) || (i === 3 && this.shownL2(pane).some((f) => slot(f, pane)!.sweep!.tex.format !== 'r8unorm'));
+      return { low: p.low, high: p.high, unit: p.unit, reserve: p.reserve, palette: settings.str(L2_PALETTE_KEYS[i]), top: sixteen ? 65535 : 255 };
     }
-    const e = this.l3Entry(), r = l3Range(e);
+    const e = this.l3Entry(pane), r = l3Range(e);
     return { low: r.low, high: r.high, unit: e.unit, reserve: true, palette: e.category === 'Hydrometeor Classification' ? 'HCAClasses' : settings.str(l3PaletteKey(e)), top: 255 };
   }
 
-  legends(): LegendSpec[] {
-    const trail = this.trail.legend(), own = this.productLegends();
+  /** The legends of what `pane` draws; the max-value trail is drawn in pane 0 only. */
+  legends(pane = 0): LegendSpec[] {
+    const trail = pane === 0 ? this.trail.legend() : null, own = this.productLegends(pane);
     return trail && own.length ? [...own, trail] : own;
   }
-  private productLegends(): LegendSpec[] {
+  private productLegends(pane: number): LegendSpec[] {
     if (!this.enabled() || !settings.bool('settings.nexradMapLegend')) return [];
-    const d = this.displayRange();
-    const rolled = this.isL2() && this.lastDrawn?.sweep?.rolling?.prevTilts ? this.lastDrawn.sweep : null;
+    const d = this.displayRange(pane), v = this.paneDraw(pane), l2 = this.isL2(pane);
+    const drawn = l2 && v.lastDrawn ? slot(v.lastDrawn, pane)?.sweep : undefined;
+    const rolled = drawn?.rolling?.prevTilts ? drawn : null;
     const r = rolled?.rolling;
     const rolling = rolled && r && `Rolling volume: ${r.prevTilts} of ${r.liveTilts + r.prevTilts} tilts from the previous volume · data ${utcHm(rolled.startMs)}–${utcHm(rolled.endMs)}Z`;
-    const column = this.isL2() ? columnNote(this.product(), () => this.buildParams(this.lastDrawn?.t)) : undefined;
-    const note = this.typed() && this.ptypeShown ? ptypeLabel(this.ptypeShown) : [rolling, column].filter(Boolean).join(' · ') || undefined;
-    if (this.typed() && this.ptypeShown?.status === 'ready') {
+    const column = l2 ? columnNote(this.product(pane), () => this.buildParams(v.lastDrawn?.t, pane)) : undefined;
+    const note = this.typed(pane) && v.ptypeShown ? ptypeLabel(v.ptypeShown) : [rolling, column].filter(Boolean).join(' · ') || undefined;
+    if (this.typed(pane) && v.ptypeShown?.status === 'ready') {
       const L = (k: string) => ({ palette: getPalette(settings.str(k)), lut: this.lut(settings.str(k), d.low, d.high, d.reserve, d.top) });
       const extra: NonNullable<LegendSpec['extra']> = [];
-      const k = this.ptypeKeys();
+      const k = this.ptypeKeys(l2);
       if (!settings.bool('settings.generalPrecipTypingHideSnowLegend')) extra.push({ label: 'Snow', ...L(k.snow) });
       if (!settings.bool('settings.generalPrecipTypingHideFRLegend')) extra.push({ label: 'FrzRain', ...L(k.fr) });
       if (!settings.bool('settings.generalPrecipTypingHideSleetLegend') && settings.bool('settings.generalPrecipTypingSleetEnabled')) extra.push({ label: 'Sleet', ...L(k.ip) });
@@ -915,12 +1027,12 @@ export class NexradLayer extends MapLayer {
     return [{ id: 'nexrad', palette: getPalette(d.palette), low: d.low, high: d.high, unit: d.unit, reserve: d.reserve, lut: this.lut(d.palette, d.low, d.high, d.reserve, d.top), note }];
   }
 
-  probeKind() { return this.enabled() && (this.isL2() ? this.shownL2() : this.shownL3()).length ? 'nexrad' : null; }
+  probeKind() { return this.enabled() && this.paneList().some((p) => (this.isL2(p) ? this.shownL2(p) : this.shownL3(p)).length) ? 'nexrad' : null; }
 
   /** Probe text per: value = low + (high − low)·f; velocity mph conversion and direction text. */
-  probeText(f: number): string {
-    const d = this.displayRange();
-    const isVel = this.isL2() ? [1, 6, 7].includes(this.product()) : this.l3Entry().category === 'Velocity';
+  probeText(f: number, pane = 0): string {
+    const d = this.displayRange(pane), l2 = this.isL2(pane);
+    const isVel = l2 ? [1, 6, 7].includes(this.product(pane)) : this.l3Entry(pane).category === 'Velocity';
     if (isVel && Math.abs(f * 65535 - 256) <= 2) return 'RF';
     let v = d.low + (d.high - d.low) * f;
     let unit = d.unit;
@@ -933,27 +1045,51 @@ export class NexradLayer extends MapLayer {
       if (settings.bool('config.generalRadarVelocityDirectionText')) return `${fmt} ${unit} ${v >= 0 ? 'Outgoing' : 'Incoming'}`;
       return `${fmtProbe(v)} ${unit}`;
     }
-    if (!this.isL2() && this.l3Entry().category === 'Hydrometeor Classification') return hcaName(Math.round(v / 10) * 10);
+    if (!l2 && this.l3Entry(pane).category === 'Hydrometeor Classification') return hcaName(Math.round(v / 10) * 10);
     const bound = v <= d.low + 1e-6 ? '≤' : v >= d.high - 1e-6 ? '≥' : '';
     return `${bound}${fmtProbe(v)} ${unit}`;
   }
 
   /**
-   * The scan drawn at the timeline time: its key (display identity, scan times, blend weight) and the elevation of its
+   * The frames a pane draws at its time (the timeline time less the pane's offset): bracket() over its loop. A pane
+   * with a time offset draws nothing before its first frame; at the timeline time the first frame is held, as bracket does.
+   */
+  private bracketOf<T extends { t: number }>(frames: T[], pane: number, blend: boolean) {
+    const offset = this.view(pane).offsetMin * 60e3, t = timeline.t - offset, r = bracket(frames, t, blend, 15 * 60e3);
+    return offset && r.a && r.a.t > t ? { a: null, b: null, w: 0 } : r;
+  }
+  private l2Sweeps(pane: number) { return this.shownL2(pane).map((f) => ({ t: f.t, f, sw: slot(f, pane)!.sweep! })); }
+  private blendL2() { return settings.num('settings.nexradScanTransitionMode') >= 1; }
+  private blendL3() { return settings.bool('layerState.RasterDataTemporalInterpolation') && settings.num('settings.nexradScanTransitionMode') >= 1; }
+
+  /**
+   * The scan a pane draws at its time: its key (display identity, scan times, blend weight) and the elevation of its
    * single tilt, null for volume and multi-tilt products (live composite, Level 2 volumetric products, Level 3
    * products without a tilt).
    */
-  shownScan(): { key: string; t: number; elevation: number | null } | null {
+  shownScan(pane = 0): { key: string; t: number; elevation: number | null } | null {
     if (!this.enabled()) return null;
     const blendKey = (b: { t: number } | null, w: number) => (b ? `${b.t}|${w.toFixed(2)}` : '');
-    if (this.isL2()) {
-      const { a, b, w } = bracket(this.shownL2().map((f) => ({ t: f.t, f })), timeline.t, settings.num('settings.nexradScanTransitionMode') >= 1, 15 * 60e3);
-      if (!a?.f.sweep) return null;
-      return { key: `${this.l2Identity()}|${a.t}|${blendKey(b, w)}`, t: a.t, elevation: this.liveComposite || this.product() >= 11 ? null : a.f.sweep.elevation };
+    if (this.isL2(pane)) {
+      const { a, b, w } = this.bracketOf(this.l2Sweeps(pane), pane, this.blendL2());
+      if (!a) return null;
+      return { key: `${this.l2Identity(pane)}|${a.t}|${blendKey(b, w)}`, t: a.t, elevation: this.composite(pane) || this.product(pane) >= 11 ? null : a.sw.elevation };
     }
-    const { a, b, w } = bracket(this.shownL3().map((f) => ({ t: f.t, f })), timeline.t, settings.bool('layerState.RasterDataTemporalInterpolation') && settings.num('settings.nexradScanTransitionMode') >= 1, 15 * 60e3);
+    const { a, b, w } = this.bracketOf(this.shownL3(pane).map((f) => ({ t: f.t, f })), pane, this.blendL3());
     if (!a) return null;
-    return { key: `${this.l3Identity()}|${a.t}|${blendKey(b, w)}`, t: a.t, elevation: a.f.tex && this.l3Entry().tilt !== null ? a.f.elevation ?? null : null };
+    return { key: `${this.l3Identity(pane)}|${a.t}|${blendKey(b, w)}`, t: a.t, elevation: a.f.tex && this.l3Entry(pane).tilt !== null ? a.f.elevation ?? null : null };
+  }
+
+  /** Caption of a pane: site, product and tilt, the time offset, and the volume time drawn or why nothing is drawn. */
+  paneLabel(pane: number): string {
+    const view = this.view(pane), v = this.paneDraw(pane), l2 = this.isL2(pane), p = this.product(pane);
+    const name = !l2 ? this.l3Entry(pane).name : this.composite(pane) ? 'Live Composite' : `${L2[p].name}${p < 11 ? ` ${view.tilt.toFixed(1)}°` : ''}`;
+    const head = `${this.currentSite()} · ${name}${view.offsetMin ? ` · −${view.offsetMin} min` : ''}`;
+    if (!this.enabled()) return head;
+    if (v.shownT !== null) return `${head} · ${utcHm(v.shownT)}Z`;
+    const errors = l2 ? this.loopL2().map((f) => slot(f, pane)?.error) : v.l3.map((f) => f.error);
+    const held = l2 ? this.shownL2(pane).length : this.shownL3(pane).length;
+    return `${head} · ${held ? 'no volume at this time' : errors.find(Boolean) ?? 'loading…'}`;
   }
 
   tick(_t: number, now: number) {
@@ -970,9 +1106,9 @@ export class NexradLayer extends MapLayer {
   }
 
   /** Reflectivity precipitation typing: HRRR p-type selects the rain/snow/freezing-rain/sleet palette. */
-  typed(): boolean {
+  typed(pane = 0): boolean {
     if (!settings.bool('settings.nexradPrecipitationTyping')) return false;
-    return this.isL2() ? this.product() === 0 : this.l3Entry().category === 'Reflectivity';
+    return this.isL2(pane) ? this.product(pane) === 0 : this.l3Entry(pane).category === 'Reflectivity';
   }
   /** P-type palettes: Level 2 has its own set (nexradL2PrecipTyping*), Level 3 uses the general p-typing set. */
   ptypeKeys(level2 = this.isL2()) {
@@ -980,96 +1116,99 @@ export class NexradLayer extends MapLayer {
       ? { rain: 'settings.nexradL2PrecipTypingRainPalette', snow: 'settings.nexradL2PrecipTypingSnowPalette', fr: 'settings.nexradL2PrecipTypingFRPalette', ip: 'settings.nexradL2PrecipTypingSleetPalette' }
       : { rain: 'settings.generalPrecipTypingRainPalette', snow: 'settings.generalPrecipTypingSnowPalette', fr: 'settings.generalPrecipTypingFRPalette', ip: 'settings.generalPrecipTypingSleetPalette' };
   }
-  private readonly onPtype = () => { this.radar.invalidate(); this.oldSweep.invalidate(); this.publishPtype(); };
+  private readonly onPtype = () => { this.views.forEach((v) => { v.radar.invalidate(); v.oldSweep.invalidate(); }); this.publishPtype(); };
   /** Appends the p-type state to the layer status (shown even when the legend is hidden). */
   private withPtype(text: string) { const note = this.typed() && this.ptypeShown ? ptypeLabel(this.ptypeShown) : ''; const base = text.replace(/ · P-type.*$/, ''); return note ? `${base} · ${note}` : base; }
   private publishPtype() { this.setStatus(this.status.state, this.withPtype(this.status.text), { frames: this.status.frames, newestMs: this.status.newestMs }); }
-  /** P-type state of the scan drawn last (legend note and status line). */
-  ptypeShown: PtypeState<PtypeTex> | null = null;
-  /** P-type for reflectivity scanned at `t` (ms): HRRR valid at that time, or null (ordinary reflectivity). */
-  private ptypeParams(d: { low: number; high: number; reserve: boolean; top: number }, t: number, shown = true) {
-    if (!this.typed()) { if (shown) this.ptypeShown = null; return null; }
+  /** P-type state of the scan pane 0 drew last (status line). */
+  get ptypeShown() { return this.views[0].ptypeShown; }
+  set ptypeShown(st: PtypeState<PtypeTex> | null) { this.views[0].ptypeShown = st; }
+  /** P-type for a pane's reflectivity scanned at `t` (ms): HRRR valid at that time, or null (ordinary reflectivity). */
+  private ptypeParams(d: { low: number; high: number; reserve: boolean; top: number }, t: number, shown = true, pane = 0) {
+    const v = this.paneDraw(pane);
+    if (!this.typed(pane)) { if (shown) v.ptypeShown = null; return null; }
     const st = ptypeAt(this.r, t, this.onPtype);
-    if (shown && (st.status !== this.ptypeShown?.status || st.validMs !== this.ptypeShown?.validMs)) { this.ptypeShown = st; this.publishPtype(); }
+    if (shown && (st.status !== v.ptypeShown?.status || st.validMs !== v.ptypeShown?.validMs)) { v.ptypeShown = st; if (pane === 0) this.publishPtype(); }
     if (st.status !== 'ready') return null;
     const lut = (k: string) => this.lut(settings.str(k), d.low, d.high, d.reserve, d.top);
-    const k = this.ptypeKeys();
+    const k = this.ptypeKeys(this.isL2(pane));
     return { tex: st.value.tex, proj: st.value.proj, snow: lut(k.snow), fr: lut(k.fr), ip: lut(k.ip),
       gradient: settings.num('settings.generalPrecipTypingRainSnowLineGradientWidth'), prob: settings.bool('settings.generalPrecipTypingProbabilityRendering'), sleet: settings.bool('settings.generalPrecipTypingSleetEnabled') };
   }
 
   draw(ctx: DrawContext) {
+    const pane = ctx.pane || 0, v = this.paneDraw(pane), main = pane === 0;
     const info = this.siteInfo();
     let radarT: number | null = null, radarScan: number | undefined; // the drawn frame (the later one past a blend's midpoint)
     if (this.enabled() && info) {
       const site = { lon: info.lon, lat: info.lat, heightKm: (info.elevFt * 0.3048) / 1000 };
-      const d = this.displayRange();
+      const d = this.displayRange(pane);
       const plain = this.lut(d.palette, d.low, d.high, d.reserve, d.top);
       // Typed scans use the rain palette; a scan without matching HRRR data keeps the ordinary palette.
-      const lutFor = (pt: unknown) => (pt ? this.lut(settings.str(this.ptypeKeys().rain), d.low, d.high, d.reserve, d.top) : plain);
+      const lutFor = (pt: unknown) => (pt ? this.lut(settings.str(this.ptypeKeys(this.isL2(pane)).rain), d.low, d.high, d.reserve, d.top) : plain);
       const alpha = settings.num('settings.nexradDataAlpha') / 255;
       const smoothing = settings.bool('settings.nexradSmoothing');
       const tilt3D = settings.bool('settings.nexrad3DTilt');
       const exag = settings.num('settings.nexrad3DTiltExaggeration');
-      if (this.isL2()) {
-        const shown = this.shownL2();
-        const frames = shown.map((f) => ({ t: f.t, f }));
-        const blend = settings.num('settings.nexradScanTransitionMode') >= 1;
-        const { a, b, w } = bracket(frames, timeline.t, blend, 15 * 60e3);
-        if (a?.f.sweep) {
-          const sw = a.f.sweep;
+      if (this.isL2(pane)) {
+        const shown = this.l2Sweeps(pane);
+        const { a, b, w } = this.bracketOf(shown, pane, this.blendL2());
+        if (a) {
+          const sw = a.sw;
           radarT = (b && w >= 0.5 ? b : a).f.t;
-          const scanMs = (f: L2Frame) => f.sweep?.startMs || f.t;
-          const pt = this.ptypeParams(d, b && w >= 0.5 ? scanMs(b.f) : scanMs(a.f));
+          const scanMs = (x: { f: L2Frame; sw: L2Sweep }) => x.sw.startMs || x.f.t;
+          const pt = this.ptypeParams(d, b && w >= 0.5 ? scanMs(b) : scanMs(a), true, pane);
           const lut = lutFor(pt);
-          if (a.f !== this.lastDrawn) { this.lastDrawn = a.f; perfMark('l2 frame'); }
+          if (a.f !== v.lastDrawn) { v.lastDrawn = a.f; if (main) perfMark('l2 frame'); }
           const live = a.f.file.live && !sw.complete;
           let wipe = -1;
           const dur = settings.num('settings.nexradUpdateSweepEffectDuration') * 1000;
           if (settings.bool('settings.nexradUpdateBeam') && this.wipeStart && performance.now() - this.wipeStart < dur) wipe = (performance.now() - this.wipeStart) / dur;
           void this.wipeFromKey;
           // Shadowed 3D tilts: a ground shadow of reflectivity, offset in azimuth.
-          if (!ctx.probe && tilt3D && settings.bool('settings.nexrad3DTiltShadow') && this.product() === 0 && sw.elevation > 0.1) {
-            this.shadow.draw(ctx, { site, elevation: sw.elevation, a: sw, b: null, w: 0, wipe: -1, progress: 1, alpha: 1, smoothing, tilt3D: false, exaggeration: 0, shadow: true, azOffset: settings.num('settings.nexradShadowAzmOffsetDegrees'), lut: this.lut('RadarShadow', -31, 225, false) });
+          if (!ctx.probe && tilt3D && settings.bool('settings.nexrad3DTiltShadow') && this.product(pane) === 0 && sw.elevation > 0.1) {
+            v.shadow.draw(ctx, { site, elevation: sw.elevation, a: sw, b: null, w: 0, wipe: -1, progress: 1, alpha: 1, smoothing, tilt3D: false, exaggeration: 0, shadow: true, azOffset: settings.num('settings.nexradShadowAzmOffsetDegrees'), lut: this.lut('RadarShadow', -31, 225, false) });
           }
           if (live && !ctx.probe && this.liveOld.display) {
             // Old sweep below the partially received new one, at the flash alpha range.
-            const prev = shown.filter((f) => !f.file.live).pop();
-            if (prev?.sweep) {
-              const ppt = this.ptypeParams(d, scanMs(prev), false);
+            const prev = shown.filter((x) => !x.f.file.live).pop();
+            if (prev) {
+              const ppt = this.ptypeParams(d, scanMs(prev), false, pane);
               const lo = settings.num('settings.nexradFadeOlderSweepLowerAlpha'), hi = settings.num('settings.nexradFadeOlderSweepUpperAlpha');
               const k = this.liveOld.flash ? 0.5 + 0.5 * Math.sin(performance.now() / 300) : 1;
-              this.oldSweep.draw(ctx, { site, elevation: prev.sweep.elevation, a: prev.sweep, b: null, w: 0, wipe: -1, progress: 1, alpha: alpha * (lo + (hi - lo) * k), smoothing, tilt3D, exaggeration: exag, shadow: false, azOffset: 0, lut: lutFor(ppt), ptype: ppt });
+              v.oldSweep.draw(ctx, { site, elevation: prev.sw.elevation, a: prev.sw, b: null, w: 0, wipe: -1, progress: 1, alpha: alpha * (lo + (hi - lo) * k), smoothing, tilt3D, exaggeration: exag, shadow: false, azOffset: 0, lut: lutFor(ppt), ptype: ppt });
             }
           }
-          const flash = this.liveComposite && settings.bool('settings.nexradLevel2LiveCompositeUpdateEffect') && a.f === this.l2[this.l2.length - 1] && !ctx.probe
+          const flash = this.composite(pane) && settings.bool('settings.nexradLevel2LiveCompositeUpdateEffect') && a.f === this.l2[this.l2.length - 1] && !ctx.probe
             ? updateFlash(performance.now() - this.flashStart, settings.num('settings.nexradLevel2LiveCompositeUpdateEffectFlashRepetitions'), settings.num('settings.nexradLevel2LiveCompositeUpdateEffectSpeedMultiplier'),
               settings.num('settings.nexradLevel2LiveCompositeUpdateEffectHighAlpha'), settings.num('settings.nexradLevel2LiveCompositeUpdateEffectLowAlpha')) : 0;
           const trailDeg = settings.bool('settings.nexradUpdateBeamFadeTrail') && (wipe >= 0 || live) && !ctx.probe ? settings.num('settings.nexradUpdateBeamFadeTrailWidthDegrees') : 0;
-          this.radar.draw(ctx, { site, elevation: sw.elevation, a: sw, b: b?.f.sweep ?? null, w: b ? w : 0, wipe, progress: live ? sw.progress : 1, alpha, smoothing, tilt3D, exaggeration: exag, shadow: false, azOffset: 0, lut, ptype: pt, flash, trailDeg });
-          this.updateDataAge(live ? sw : null, info);
-          this.view3d.draw(ctx, a.f.file.url, site);
+          v.radar.draw(ctx, { site, elevation: sw.elevation, a: sw, b: b?.sw ?? null, w: b ? w : 0, wipe, progress: live ? sw.progress : 1, alpha, smoothing, tilt3D, exaggeration: exag, shadow: false, azOffset: 0, lut, ptype: pt, flash, trailDeg });
+          // The data age and the 3D view belong to pane 0's volume.
+          if (main) { this.updateDataAge(live ? sw : null, info); this.view3d.draw(ctx, a.f.file.url, site); }
         }
       } else {
-        const frames = this.shownL3().map((f) => ({ t: f.t, f }));
-        const { a, b, w } = bracket(frames, timeline.t, settings.bool('layerState.RasterDataTemporalInterpolation') && settings.num('settings.nexradScanTransitionMode') >= 1, 15 * 60e3);
-        const pt = a?.f.tex ? this.ptypeParams(d, b && w >= 0.5 ? b.f.t : a.f.t) : null;
+        const frames = this.shownL3(pane).map((f) => ({ t: f.t, f }));
+        const { a, b, w } = this.bracketOf(frames, pane, this.blendL3());
+        const pt = a?.f.tex ? this.ptypeParams(d, b && w >= 0.5 ? b.f.t : a.f.t, true, pane) : null;
         const lut = lutFor(pt);
         if (a?.f.tex) {
           const bt = b?.f.tex && b.f.tex.gates === a.f.tex.gates ? b.f.tex : null;
           const shown = (bt && w >= 0.5 ? b! : a).f;
           radarT = shown.t; radarScan = shown.volumeScan;
-          this.radar.draw(ctx, { site, elevation: a.f.elevation ?? 0.5, a: a.f.tex, b: bt, w: bt ? w : 0, wipe: -1, progress: 1, alpha, smoothing, tilt3D, exaggeration: exag, shadow: false, azOffset: 0, lut, ptype: pt });
+          v.radar.draw(ctx, { site, elevation: a.f.elevation ?? 0.5, a: a.f.tex, b: bt, w: bt ? w : 0, wipe: -1, progress: 1, alpha, smoothing, tilt3D, exaggeration: exag, shadow: false, azOffset: 0, lut, ptype: pt });
         } else if (a?.f.raster) {
           const ra = a.f.raster;
           radarT = a.f.t; radarScan = a.f.volumeScan;
-          this.l3raster.draw(ctx, { mode: 0, w: 0, alpha, smoothing, bounds: ra.bounds, proj: latLonProj(ra.bounds[2], ra.bounds[1], ra.bounds[0], ra.bounds[3], ra.nx, ra.ny), luts: [plain], data: [[ra.tex, ra.tex]] }, 4);
+          v.l3raster.draw(ctx, { mode: 0, w: 0, alpha, smoothing, bounds: ra.bounds, proj: latLonProj(ra.bounds[2], ra.bounds[1], ra.bounds[0], ra.bounds[3], ra.nx, ra.ny), luts: [plain], data: [[ra.tex, ra.tex]] }, 4);
         }
       }
     }
-    if (info && this.enabled()) this.trail.draw(ctx, info);
+    if (!ctx.probe) v.shownT = radarT;
+    // The max-value trail is of pane 0's product and tilt, so it is drawn there only.
+    if (main && info && this.enabled()) this.trail.draw(ctx, info);
     // Live beam (settings.nexradLiveBeam): a line from the radar along the newest radial of an incomplete live sweep.
-    if (!ctx.probe && info && this.enabled() && this.isL2() && this.liveAz !== null && settings.bool('settings.nexradLiveBeam')) {
+    if (main && !ctx.probe && info && this.enabled() && this.isL2() && this.liveAz !== null && settings.bool('settings.nexradLiveBeam')) {
       this.beam ??= new LineSet(this.r);
       const key = `${info.id}|${this.liveAz.toFixed(1)}`;
       if (key !== this.beamKey) {
@@ -1081,11 +1220,12 @@ export class NexradLayer extends MapLayer {
       }
       this.beam.draw(ctx);
     }
-    if (!ctx.probe) this.syncOverlays(radarT, radarScan);
-    if (!ctx.probe) { this.overlayFill.draw(ctx); this.overlayLines.draw(ctx); this.overlayPts.draw(ctx); this.overlayText.draw(ctx); }
+    if (!ctx.probe && main) this.syncOverlays(radarT, radarScan);
+    // Storm attributes are matched to pane 0's volume: another pane shows them only while it draws that volume.
+    if (!ctx.probe && (main || sameVolume(radarT, this.views[0].shownT))) { this.overlayFill.draw(ctx); this.overlayLines.draw(ctx); this.overlayPts.draw(ctx); this.overlayText.draw(ctx); }
     if (!ctx.probe && info) this.tools.draw(ctx, info);
     this.section.draw(ctx);
-    if (!ctx.probe && this.dataAge && settings.bool('settings.nexradLiveScanDataAgeIndicator') && !settings.bool('settings.nexradLiveScanDataAgeIndicatorLegacy')) this.ageText.draw(ctx);
+    if (main && !ctx.probe && this.dataAge && settings.bool('settings.nexradLiveScanDataAgeIndicator') && !settings.bool('settings.nexradLiveScanDataAgeIndicatorLegacy')) this.ageText.draw(ctx);
   }
 
   /**

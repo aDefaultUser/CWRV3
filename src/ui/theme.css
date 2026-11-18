@@ -108,6 +108,9 @@ button, select, input { font: inherit; color: inherit; }
 .hud-info { position: absolute; max-width: 360px; background: rgba(18, 18, 21, .9); border: 1px solid #ff3030; border-radius: 3px; padding: 5px 8px; white-space: pre; pointer-events: auto; }
 .probe { position: absolute; padding: 2px 6px; background: rgba(0, 0, 0, .75); border: 1px solid #5a7bd0; border-radius: 2px; color: #fff; font-weight: 600; pointer-events: none; white-space: nowrap; }
 .crosshair { position: absolute; width: 21px; height: 21px; margin: -10px 0 0 -10px; pointer-events: none; background: linear-gradient(#fff, #fff) center/1px 100% no-repeat, linear-gradient(#fff, #fff) center/100% 1px no-repeat; mix-blend-mode: difference; }
+.pane-legend { position: absolute; pointer-events: none; }
+.pane-label { position: absolute; padding: 2px 7px; background: rgba(0, 0, 0, .68); border: 1px solid #3a4d80; border-radius: 2px; color: #fff; font-weight: 600; pointer-events: none; white-space: nowrap; }
+.pane-divider { position: absolute; background: #6f8fdc; pointer-events: none; }
 .tooltip { position: absolute; z-index: 50; padding: 3px 6px; background: #19191c; border: 1px solid #3f5fa0; color: #fff; pointer-events: none; white-space: pre; }
 
 /* ---- dialogs / menus ---- */

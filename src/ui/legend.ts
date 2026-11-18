@@ -33,11 +33,15 @@ export function drawLegends(cv: HTMLCanvasElement, legends: LegendSpec[], flashR
   cv.dataset.legend = JSON.stringify(geo);
 }
 export interface LegendGeometry { label: string; x0: number; barW: number; barY: number; barH: number; lo: number; hi: number }
+/** The colour bar of a legend row in a strip `W` wide (CSS px), right of its unit text of width `unitW`. */
+export function legendBar(unitW: number, W: number): { x0: number; barW: number } {
+  const x0 = unitW + 16;
+  return { x0, barW: Math.max(10, W - x0) };
+}
 
 function drawOne(g: CanvasRenderingContext2D, unit: string, l: LegendSpec, flashRow: number, W: number, y: number, stacked: boolean): LegendGeometry {
   g.font = NORMAL;
-  const unitW = g.measureText(unit).width;
-  const x0 = unitW + 16, barW = Math.max(10, W - x0);
+  const { x0, barW } = legendBar(g.measureText(unit).width, W);
   const [lo, hi] = legendRange(l.palette, l.low, l.high);
   const rows = l.lut.rows, row = rows > 1 ? Math.min(flashRow, rows - 1) : 0;
   // Bar: sample the lookup over the legend range.

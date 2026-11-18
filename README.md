@@ -162,6 +162,36 @@ Probe reads the displayed value under the pointer.
     until a finer size fits again (the dialog shows the size in use). It follows the loop: each frame shows its own
     volume, and nothing is drawn for a frame whose volume is still loading. It needs Level 2 data and is drawn over
     the product's sweep, not sorted in depth with it or with other layers.
+* Linked panes (CWRV3 menu → Linked panes…; Alt+P or "Next pane layout" cycles the layouts): the map as one pane,
+  two side by side, two stacked or four (2 × 2). The panes share the one camera (pan, zoom, tilt and swivel in any
+  pane move all of them), the one timeline and the pointer: a crosshair marks the pointer's map point in every other
+  pane, and in Probe mode every pane shows the readout of what it draws there. Only NEXRAD differs between panes.
+  Pane 1 is the Radar Control selection (level, product, tilt), as in the single view; panes 2–4 each have their own
+  data level (Level 2 or 3), product, tilt and "Min. earlier" (that pane shows the volume of so many minutes before
+  the timeline time, and nothing before its first volume). Every other layer (background, GIS, warnings, MRMS,
+  satellite, annotations…) is drawn the same in every pane. Each pane has its NEXRAD legend across its top and a
+  caption with the site, product, tilt, offset and the volume time it draws, or why it draws nothing ("loading…",
+  "not available for this volume", "no volume at this time"); the other layers' legends are in pane 1 only.
+  * Quick presets: **REF / SRV** (two panes), **REF / VEL / ZDR / CC** (four panes: reflectivity, dealiased
+    velocity, ZDR and CC at the current tilt) and **Four lowest tilts** (the current single-tilt product, or
+    reflectivity, at the four lowest angles of the volume shown; a SAILS/MRLE rescan or split cut of an angle counts
+    once). A preset or a saved layout also sets pane 1, i.e. the Radar Control product and tilt. "Save current
+    as…" keeps the layout and every pane's view under a name; Recall (or a double click) and Delete act on the list.
+  * A volume is downloaded and decoded once for all panes; a pane adds one product build and one sweep texture
+    (1–5 MB) per volume. While more than one pane is shown the Level 2 loop is the newest 12 volumes in every pane.
+  * The timeline's frames are pane 1's. A pane whose sweep of the shown volume is still loading keeps its previous
+    volume, and its caption names the volume time it actually draws.
+  * Storm attributes (storm tracks, TVS, hail, mesocyclones, melting layer) are matched to pane 1's volume and are
+    drawn in another pane only while that pane draws the same volume (so not in a pane with a time offset).
+  * Range rings, the cross-section line and the VR-shear points are drawn in every pane, and the line and points can
+    be placed or dragged in any pane. VR shear measures the pane its first point is clicked in when that pane shows
+    velocity, else the first pane that does (the readout names the pane), and ends when that pane's product changes.
+    The Probe beam geometry is that of each pane's own tilt.
+  * Pane 1 only: the cross-section panel's volume, the max-value trail and its legend, the 3D volume view, the live
+    composite, the live-sweep gauge, beam and data age, and the screen-space items (timestamp, watch and info boxes,
+    placed road labels).
+  * Archive replay works in every pane: Level 2 panes from the volume archive, a Level 3 pane from the Level 3
+    archive.
 * Archive replay (CWRV3 menu → Archive replay…): enter a UTC date and time (and optionally a radar site) and choose
   Go to time. The loop then ends at that time instead of now: radar, warnings, storm reports, SPC products, MRMS and
   satellite are loaded for it, the status bar shows **ARCHIVE yyyy-mm-dd HH:MMZ** (click it to reopen the dialog) and
@@ -214,7 +244,8 @@ repository, [aDefaultUser/CWRV3](https://github.com/aDefaultUser/CWRV3).
 
 * Drag to pan; use the wheel to zoom. Ctrl+drag tilts and swivels.
 * R toggles radar site labels; Alt+D measures distance; Alt+L adds road labels; Alt+V starts a VR-shear measurement;
-  Alt+S picks a sounding point; Alt+X draws a cross-section / RHI line.
+  Alt+S picks a sounding point; Alt+X draws a cross-section / RHI line; Alt+P shows the next pane layout (one pane,
+  two side by side, two stacked, four).
 * Ctrl+T starts telestration, Space clears it, and Esc cancels the active tool (and clears the VR-shear measurement
   and the cross-section line).
 
@@ -229,7 +260,9 @@ npm run bench -- <label> <fixed4k|dpr1|dpr15|dpr2> --out <dir> [--fps 60|0] [--h
 
 `APP_URL` selects the server the benchmark opens (default `http://127.0.0.1:4173/`). `--scenarios` also accepts
 `l2volume` and `l2iso` (not in the default list): the 3D volume view in volume or isosurface mode while the camera
-orbits the radar and the Level 2 loop plays; their results add the GPU time of the prepass. In the browser console,
+orbits the radar and the Level 2 loop plays; their results add the GPU time of the prepass. `l2panes2` and
+`l2panes4` (also not in the default list) show the REF / SRV and REF / VEL / ZDR / CC pane presets while the Level 2
+loop plays and the map pans and zooms around the radar. In the browser console,
 `cwrv3bench.volumeCheck()` renders vertical sections of the drawn Level 2 volume with the GPU volume sampler and
 compares them pixel by pixel with the TypeScript reference; `cwrv3bench.trailCheck()` reads back the max-value trail
 drawn now and compares it texel by texel with the TypeScript blend reference over the same volumes. `cwrv3bench.isoCheck()` reads back where the
@@ -246,7 +279,8 @@ Every preference is saved in the browser's `localStorage` under the `cwrv3.` pre
 `cwrv3.setting/<id>` holding the JSON value; the other user state (styles, text styles, style library, presets,
 viewpoints, scene and layer presets, layer order, RGB recipes, model configurations, palettes loaded from files,
 placefile and shapefile lists, road labels, dialog options, GPS serial options, storm alert points, the archive
-replay time and archive event presets) uses one key per preference.
+replay time and archive event presets, the pane layout with the views of panes 2–4 (`cwrv3.panes`) and the saved
+pane layouts (`cwrv3.paneLayouts`)) uses one key per preference.
 Large user files (shapefiles, custom background, logo, overlay image) are kept in Cache Storage
 (`cwrv3-user-files`); downloaded public data is cached in `cwrv3-data-v1`.
 
@@ -310,6 +344,11 @@ Exact parity with the original program is not claimed. Known differences:
   thinner than a step along the ray can be missed. Isosurface normals come from differences 0.6 km apart. The
   volume is not depth-sorted with the map's other layers, and a velocity pack carries one storm motion, so two
   views of the same volume cannot show ground-relative and storm-relative velocity at once.
+* Linked panes are not in the original. There is one camera and one timeline: panes cannot be panned, zoomed or
+  played independently, and a pane's time can differ only by a fixed offset. A pane has the camera's 30° vertical
+  field of view, so the same camera distance shows the same north–south extent in a half-height pane at half the
+  scale. The backbuffer is divided into equal whole-pixel panes (an odd width or height leaves one unused pixel row
+  or column). Only NEXRAD has per-pane products; the trail, the 3D view and the section follow pane 1.
 * NAM-family and HiresW model feeds were unavailable from the public servers when last checked (HTTP 404 on
   2026-11-17; the `noaa-nam-pds` bucket ends on 2026-11-03) and are reported as unavailable instead of being
   substituted. RRFS, which replaced them operationally, is listed as its own model.
@@ -337,10 +376,19 @@ production build, FPS target 60. Frame times are `requestAnimationFrame` interva
 | | Level 2 loop (8 KTLX volumes), target 60, 1 × 60 s | 60.0 fps, p99 16.8 ms, 0/3601 frames > 20 ms, CPU 2.1 ms mean, GPU 1.3 ms mean |
 | | 3D volume view, volume rendering (`l2volume`: orbit around KTLX, loop playing), target 60, 2 × 40 s | 2/2 runs 60.0 fps, p99 16.8 ms, 0/2401 frames > 20 ms, CPU 2.7 ms mean, GPU 2.1 ms mean, of which the 1920×1080 march 0.62 ms mean, 0.70 ms p95, 0.77 ms max |
 | | 3D volume view, isosurfaces 50 and 30 dBZ (`l2iso`), target 60, 2 × 40 s | 2/2 runs 60.0 fps, p99 16.8 ms, 0/2401 frames > 20 ms, CPU 2.7 ms mean, GPU 2.4 ms mean, of which the march 0.97 ms mean, 1.4 ms p95, 1.6 ms max |
+| | Linked panes, 2 side by side REF / SRV (`l2panes2`: loop playing, pan and zoom around KTLX), target 60, 2 × 40 s | 2/2 runs 60.0 fps, p99 16.8 ms, 0/2401 frames > 20 ms, CPU 2.1 ms mean, GPU 1.6–1.7 ms mean, 1.7–1.8 ms p95 |
+| | Linked panes, 4 (2 × 2) REF / VEL / ZDR / CC (`l2panes4`), target 60, 2 × 40 s | 2/2 runs 60.0 fps, p99 16.8 ms, 0/2401 frames > 20 ms, CPU 2.0 ms mean, GPU 2.2–2.3 ms mean, 2.4 ms p95 |
 
-Mean CPU time per frame was about 2 ms and GPU time about 0.6–1.6 ms in every run without the 3D volume view, so the
-frame rate is set by the FPS target or the display refresh, not by rendering cost. The 4K runs are short smoke
-checks, not full measurements.
+Mean CPU time per frame was about 2 ms and GPU time about 0.6–1.6 ms in every run without the 3D volume view or
+panes, so the frame rate is set by the FPS target or the display refresh, not by rendering cost. The 4K runs are
+short smoke checks, not full measurements.
+
+Linked panes cost GPU time, not CPU time: the layers that are the same in every pane are recorded once per frame and
+replayed in each pane's viewport, and only NEXRAD is drawn per pane. In the session of the two pane rows the
+single-pane Level 2 loop measured 1.5 ms GPU and 2.2 ms CPU (2 × 40 s, 60.0 fps), so two panes added about 0.2 ms
+and four about 0.8 ms of GPU time at 3840×2160 (the pane runs also pan and zoom, which the loop run does not). Each
+pane holds its own sweep of every volume of the loop: with the 8 fixture volumes, reflectivity at two tilts in two
+panes was 20.2 MB of NEXRAD texture memory against 10.1 MB for the single view (F8).
 
 The march of the 3D volume view costs what the echo on screen costs. Measured by hand at 3840×2160 (a 1920×1080
 target, 160 samples per ray) with the fixture's storms filling the view, 150–250 km from the radar: 2.2–2.4 ms for
@@ -392,7 +440,7 @@ profiles from `api/1/nws/bufkit.json`, and for archive replay `api/1/vtec/sbw_in
 
 | Part | Lines |
 | --- | ---: |
-| TypeScript / JavaScript | 21,369 |
+| TypeScript / JavaScript | 21,714 |
 | WGSL shaders | 921 |
-| **Total functional** | **22,290** |
-| CSS (separate) | 175 |
+| **Total functional** | **22,635** |
+| CSS (separate) | 178 |

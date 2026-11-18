@@ -289,7 +289,7 @@ export class VolumeView {
   }
 
   private resize() {
-    const g = this.r.gpu, w = Math.ceil(g.width / this.divisor), h = Math.ceil(g.height / this.divisor);
+    const g = this.r.gpu, [pw, ph] = this.r.paneSize(), w = Math.ceil(pw / this.divisor), h = Math.ceil(ph / this.divisor);
     if (this.target && w === this.width && h === this.height) return;
     this.target?.destroy();
     this.width = w; this.height = h;

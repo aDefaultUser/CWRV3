@@ -1,7 +1,9 @@
 // Application: shell DOM, layer wiring, input, HUD, menus, data refresh and the render loop
 // with the original's FPS caps.
 import { settings, SETTING_DEFS, type SettingEdits } from '../settings/store';
-import { Renderer, type Drawable } from '../render/renderer';
+import { Renderer, type Drawable, type ProbeResult } from '../render/renderer';
+import { MAX_PANES, paneAt, paneOrigin } from '../render/panes';
+import { panes, LAYOUTS, type PaneLayout } from './panes';
 import { GlyphAtlas } from '../render/prims';
 import { TileLayer } from '../render/tiles';
 import { timeline } from './timeline';
@@ -56,6 +58,7 @@ import type { ProbSevereLayer } from '../sections/probsevere';
 import { radarStatus, radarStatusDetail } from '../radar/status';
 import { analysisBindings, analysisMenu, analysisMenuActions, analysisPointMenu, analysisPointActions } from '../ui/analysis-forms';
 import { archiveBindings, archiveMenu, archiveMenuActions } from '../ui/archive-forms';
+import { paneBindings, paneMenu, paneMenuActions } from '../ui/pane-forms';
 import { archiveBadge } from './archive';
 import { NOT_AVAILABLE } from '../layers/base';
 import { openSounding } from '../ui/sounding-panel';
@@ -117,12 +120,16 @@ export class App {
   private outputSize: [number, number] | null = null;
   private lastInteract = 0;
   private lastFrame = 0;
+  /** Pointer position relative to the pane it is over (CSS px), and that pane. */
   private mouse: [number, number] | null = null;
+  private mousePane = 0;
   private lastClickLL: [number, number] | null = null;
   private flashT = 0;
   /** Edits made through the open Settings dialog since it opened or since Apply (what Cancel reverts). */
   private settingsEdits: SettingEdits = new Map();
-  private hud!: { watchBox: HTMLElement; roadTip: HTMLElement; cityList: HTMLElement; cell: HTMLElement; brand: HTMLCanvasElement; maplabel: HTMLElement; time: HTMLElement; strikes: HTMLElement; probe: HTMLElement; cross: HTMLElement; info: HTMLElement; tip: HTMLElement; legend: HTMLCanvasElement; svg: SVGSVGElement; logo: HTMLElement; overlay: HTMLImageElement };
+  private hud!: { watchBox: HTMLElement; roadTip: HTMLElement; cityList: HTMLElement; cell: HTMLElement; brand: HTMLCanvasElement; maplabel: HTMLElement; time: HTMLElement; strikes: HTMLElement; info: HTMLElement; tip: HTMLElement; legend: HTMLCanvasElement; svg: SVGSVGElement; logo: HTMLElement; overlay: HTMLImageElement;
+    /** Per pane: its legend strip (pane 0's is `legend`), linked crosshair, probe readout and caption; and the two pane dividers. */
+    panes: { legend: HTMLCanvasElement; cross: HTMLElement; probe: HTMLElement; label: HTMLElement }[]; dividers: HTMLElement[] };
   private status: HTMLElement[] = [];
   private gauge!: HTMLElement;
   private selectedAlert: Alert | null = null;
@@ -182,6 +189,8 @@ export class App {
     this.applyCameraSettings(true);
     this.applyLayerOrder();
     this.applySampleCount();
+    r.grid = panes.grid;
+    panes.on(() => this.applyPanes());
     r.onProbe = (p) => this.showProbe(p);
     onProgress((active, received, total) => { this.dl = { active, received, total }; });
     this.bindings = buildBindings(this);
@@ -190,6 +199,7 @@ export class App {
     Object.assign(this.bindings, toolFormBindings(this));
     Object.assign(this.bindings, analysisBindings(this));
     Object.assign(this.bindings, archiveBindings(this));
+    Object.assign(this.bindings, paneBindings(this));
     this.bindings.TFrmStringDisplay = stringDisplayBindings(() => this.viewerText, () => closeDialog('TFrmStringDisplay'));
     this.buildShell();
     // "Show exceptions" (Advanced menu): uncaught errors also appear as toasts (always logged to the console).
@@ -409,6 +419,8 @@ export class App {
     const ov = this.el('div', '', dp); ov.id = 'overlay';
     this.perf = new PerfPanel(dp, () => this.perfSnapshot());
     const legend = this.el('canvas', '', ov); legend.id = 'legendcv'; legend.style.width = '100%';
+    const paneLegends = [legend, ...Array.from({ length: MAX_PANES - 1 }, () => this.el('canvas', 'pane-legend', ov))];
+    const dividers = [this.el('div', 'pane-divider', ov), this.el('div', 'pane-divider', ov)];
     const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
     svg.setAttribute('style', 'position:absolute;inset:0;width:100%;height:100%;pointer-events:none');
     ov.appendChild(svg);
@@ -418,9 +430,11 @@ export class App {
       watchBox: this.el('div', 'hud-box hud-watches', ov), roadTip: this.el('div', 'hud-roadlabel', ov), cityList: this.el('div', 'hud-box hud-cities', ov), cell: this.el('div', 'hud-box hud-cell', ov),
       brand: this.el('canvas', 'hud-brand', ov),
       maplabel: this.el('div', 'hud-time hud-sub', ov),
-      time: this.el('div', 'hud-time', ov), strikes: this.el('div', 'hud-box hud-strikes', ov), probe: this.el('div', 'probe', ov),
-      cross: this.el('div', 'crosshair', ov), info: this.el('div', 'hud-info', ov), tip: this.el('div', 'tooltip', ov), legend, svg, logo, overlay,
+      time: this.el('div', 'hud-time', ov), strikes: this.el('div', 'hud-box hud-strikes', ov),
+      panes: paneLegends.map((cv) => ({ legend: cv, label: this.el('div', 'pane-label', ov), probe: this.el('div', 'probe', ov), cross: this.el('div', 'crosshair', ov) })), dividers,
+      info: this.el('div', 'hud-info', ov), tip: this.el('div', 'tooltip', ov), legend, svg, logo, overlay,
     };
+    for (const p of this.hud.panes) { p.probe.style.display = 'none'; p.cross.style.display = 'none'; p.label.style.display = 'none'; }
     this.hud.info.style.display = 'none'; this.hud.tip.style.display = 'none'; this.hud.roadTip.style.display = 'none';
     const lp = settings.arr<number>('config.guiLightningCountPosition');
     this.hud.strikes.style.left = `${lp[0]}px`; this.hud.strikes.style.top = `${lp[1]}px`;
@@ -691,7 +705,7 @@ export class App {
   mainMenu(anchor: HTMLElement) {
     const r = anchor.getBoundingClientRect();
     const node = this.menuNode('TFrmMap', 'MainMenu');
-    showMenu({ ...node, children: [...node.children, ...analysisMenu(), ...archiveMenu()] }, r.left, r.bottom, { ...mainMenuActions(this), ...analysisMenuActions(this), ...archiveMenuActions(this) });
+    showMenu({ ...node, children: [...node.children, ...analysisMenu(), ...paneMenu(), ...archiveMenu()] }, r.left, r.bottom, { ...mainMenuActions(this), ...analysisMenuActions(this), ...paneMenuActions(this), ...archiveMenuActions(this) });
   }
   l2ProductMenu(anchor: HTMLElement) {
     if (!settings.bool('layerState.NEXRADLevel2')) return;
@@ -730,6 +744,35 @@ export class App {
     }
     this.refreshLayer('nexrad');
   }
+  // ------------------------------------------------------------------------------------------- panes
+  /** CSS size of one pane. */
+  private paneCss(): [number, number] { const g = this.renderer.gpu, [w, h] = this.renderer.paneSize(); return [w / g.dpr, h / g.dpr]; }
+  /** The pane under a point of the map canvas (CSS px) and the point relative to it: the camera's coordinates. */
+  private paneXY(x: number, y: number) { const [w, h] = this.paneCss(); return paneAt(panes.grid, w, h, x, y); }
+  /** Top-left corner of a pane on the map canvas (CSS px). */
+  private paneCorner(pane: number): [number, number] { const [w, h] = this.paneCss(); return paneOrigin(panes.grid, pane, w, h); }
+  /** With several panes: whether a camera (pane-relative) point lies inside a pane; always true for the single view. */
+  private inPane(x: number, y: number) { const c = this.renderer.camera; return panes.count === 1 || (x >= 0 && y >= 0 && x <= c.width && y <= c.height); }
+  /** The layout or a pane's view changed. */
+  private applyPanes() {
+    this.renderer.grid = panes.grid;
+    this.legendKeys = [];
+    this.nexrad.panesChanged();
+    this.poke();
+  }
+  cyclePanes() { panes.cycle(); this.toast(`Panes: ${LAYOUTS[panes.layout].name}`); }
+  /** Shows a preset or saved layout: its pane 0 view becomes the radar settings and tilt, the others the panes' views. */
+  applyPaneLayout(l: PaneLayout) {
+    const main = l.views[0];
+    this.nexrad.liveComposite = false;
+    settings.set('layerState.NEXRADLevel2', main.level2);
+    settings.set(main.level2 ? 'layerState.NEXRADLevel2Product' : 'layerState.NEXRADLevel3Product', main.level2 ? main.product : main.l3);
+    if (main.level2 && main.product < 11) this.nexrad.setTilt(main.tilt);
+    settings.set('layerState.NEXRADOn', true);
+    panes.apply(l);
+    if (this.activeTab === 'NEXRADPro') this.renderFrame();
+  }
+
   flyOpts() { return { jerk: settings.num('config.generalCameraFlyJerk'), end: settings.num('config.generalCameraFlyEndSmoothing'), nonLinear: settings.bool('config.generalCameraFlyNonLinear') }; }
   setLiveScan(on: boolean) {
     if (on && timeline.mode === 'archive') { this.toast('Live sweep is not available in archive mode'); return; }
@@ -841,7 +884,7 @@ export class App {
     const k = W / cssW; // CSS px → backbuffer px
     const h = this.hud;
     const visible = (e: HTMLElement) => e.style.display !== 'none' && e.offsetParent !== null;
-    if (h.legend.width && h.legend.clientHeight) c.drawImage(h.legend, 0, 0, h.legend.clientWidth * k, h.legend.clientHeight * k);
+    for (const p of h.panes) if (p.legend.style.display !== 'none' && p.legend.width && p.legend.clientHeight) c.drawImage(p.legend, p.legend.offsetLeft * k, p.legend.offsetTop * k, p.legend.clientWidth * k, p.legend.clientHeight * k);
     const text = (e: HTMLElement) => {
       if (!visible(e) || !e.textContent) return;
       const cs = getComputedStyle(e);
@@ -859,12 +902,13 @@ export class App {
       (c as unknown as { letterSpacing: string }).letterSpacing = '0px';
     };
     text(h.time); text(h.maplabel); text(h.strikes); text(h.watchBox);
+    for (const p of h.panes) text(p.label);
     const img = (e: HTMLImageElement | null) => { if (e && e.complete && e.naturalWidth && visible(e)) c.drawImage(e, e.offsetLeft * k, e.offsetTop * k, e.offsetWidth * k, e.offsetHeight * k); };
     const li = h.logo.querySelector('img');
     if (li && li.complete && li.naturalWidth && visible(h.logo)) c.drawImage(li, h.logo.offsetLeft * k, h.logo.offsetTop * k, li.offsetWidth * k, li.offsetHeight * k);
     img(h.overlay);
     // Graphics-output recording with "include cursor": draw the pointer where the mouse is over the map.
-    if (this.recordCanvas === out && settings.bool('config.videoGDICursor') && this.mouse) drawCursor(c, this.mouse[0] * k, this.mouse[1] * k, k);
+    if (this.recordCanvas === out && settings.bool('config.videoGDICursor') && this.mouse) { const [ox, oy] = this.paneCorner(this.mousePane); drawCursor(c, (ox + this.mouse[0]) * k, (oy + this.mouse[1]) * k, k); }
     if (settings.bool('ext.config.brandWatermark')) {
       const tile = watermarkTile(k);
       if (tile) { const [x, y] = this.brandPos(tile.width / k, tile.height / k, cssW, ov.clientHeight); c.drawImage(tile, x * k, y * k); }
@@ -1058,7 +1102,8 @@ export class App {
       const l = this.roads.labels[i];
       const [x, y, front] = this.renderer.camera.project(lonLatToXYZ(l.lon, l.lat));
       if (el.textContent !== l.name) { el.textContent = l.name; Object.assign(el.style, css); }
-      el.style.display = front ? '' : 'none';
+      // Screen-space labels belong to pane 0: one whose point lies outside it is hidden, not drawn over another pane.
+      el.style.display = front && this.inPane(x, y) ? '' : 'none';
       el.style.left = `${x + l.dx}px`; el.style.top = `${y + l.dy}px`;
     });
   }
@@ -1084,30 +1129,33 @@ export class App {
 
   private wireInput() {
     const cv = this.canvas, cam = this.renderer.camera;
-    let drag: null | { mode: 'pan' | 'tilt' | 'zoom' | 'box' | 'tele' | 'section'; x: number; y: number; moved: boolean; button: number; ctrl: boolean } = null;
+    // Drag positions are relative to the pane the drag began in (`ox`, `oy`: its corner), also once the pointer leaves it.
+    let drag: null | { mode: 'pan' | 'tilt' | 'zoom' | 'box' | 'tele' | 'section'; x: number; y: number; moved: boolean; button: number; ctrl: boolean; pane: number; ox: number; oy: number } = null;
     let sectionHandle: 'a' | 'b' | null = null;
     let boxEl: HTMLDivElement | null = null;
     cv.addEventListener('contextmenu', (e) => e.preventDefault());
     cv.addEventListener('mousedown', (e) => {
       this.poke();
       const ctrl = e.ctrlKey;
-      if (this.tool === 'telestrate' && e.button === 0) { drag = { mode: 'tele', x: e.offsetX, y: e.offsetY, moved: false, button: 0, ctrl }; this.annotations.telestration.push([]); return; }
+      const { pane, x, y } = this.paneXY(e.offsetX, e.offsetY);
+      const start = { x, y, moved: false, ctrl, pane, ox: e.offsetX - x, oy: e.offsetY - y };
+      if (this.tool === 'telestrate' && e.button === 0) { drag = { mode: 'tele', button: 0, ...start }; this.annotations.telestration.push([]); return; }
       // Cross-section: the tool places A (drag to B, or click twice); an end point handle drags whatever tool is active.
-      const handle = e.button === 0 && !this.nexrad.section.placing ? this.nexrad.section.handleAt(e.offsetX, e.offsetY) : null;
+      const handle = e.button === 0 && !this.nexrad.section.placing ? this.nexrad.section.handleAt(x, y) : null;
       if (handle || (this.tool === 'section' && e.button === 0)) {
-        const ll = cam.pick(e.offsetX, e.offsetY);
+        const ll = cam.pick(x, y);
         if (!handle && ll) this.nexrad.section.press(ll);
         sectionHandle = handle;
-        drag = { mode: 'section', x: e.offsetX, y: e.offsetY, moved: false, button: 0, ctrl };
+        drag = { mode: 'section', button: 0, ...start };
         return;
       }
       const mode = e.button === 0 ? (ctrl && !settings.bool('config.generalCameraDisableTiltSwivel') ? 'tilt' : 'pan') : e.button === 2 ? (ctrl ? 'box' : 'zoom') : 'pan';
-      drag = { mode, x: e.offsetX, y: e.offsetY, moved: false, button: e.button, ctrl };
+      drag = { mode, button: e.button, ...start };
     });
     window.addEventListener('mousemove', (e) => {
-      const rect = cv.getBoundingClientRect();
-      const x = e.clientX - rect.left, y = e.clientY - rect.top;
       if (!drag) return;
+      const rect = cv.getBoundingClientRect();
+      const x = e.clientX - rect.left - drag.ox, y = e.clientY - rect.top - drag.oy;
       const dx = x - drag.x, dy = y - drag.y;
       if (Math.abs(dx) + Math.abs(dy) > 2) drag.moved = true;
       this.poke();
@@ -1126,7 +1174,7 @@ export class App {
         drag.x = x; drag.y = y;
       } else if (drag.mode === 'box') {
         if (!boxEl) { boxEl = document.createElement('div'); boxEl.style.cssText = 'position:absolute;border:1px dashed #fff;background:rgba(80,140,255,.15);pointer-events:none'; document.getElementById('overlay')!.appendChild(boxEl); }
-        boxEl.style.left = `${Math.min(x, drag.x)}px`; boxEl.style.top = `${Math.min(y, drag.y)}px`; boxEl.style.width = `${Math.abs(dx)}px`; boxEl.style.height = `${Math.abs(dy)}px`;
+        boxEl.style.left = `${Math.min(x, drag.x) + drag.ox}px`; boxEl.style.top = `${Math.min(y, drag.y) + drag.oy}px`; boxEl.style.width = `${Math.abs(dx)}px`; boxEl.style.height = `${Math.abs(dy)}px`;
       } else if (drag.mode === 'tele') {
         const ll = cam.pick(x, y);
         if (ll) { this.annotations.telestration[this.annotations.telestration.length - 1].push(ll); this.annotations.dirty = true; }
@@ -1138,8 +1186,8 @@ export class App {
     window.addEventListener('mouseup', (e) => {
       if (!drag) return;
       const rect = cv.getBoundingClientRect();
-      const x = e.clientX - rect.left, y = e.clientY - rect.top;
       const d = drag; drag = null;
+      const x = e.clientX - rect.left - d.ox, y = e.clientY - rect.top - d.oy;
       if (d.mode === 'section') {
         const ll = cam.pick(x, y);
         if (!sectionHandle && ll && this.nexrad.section.release(ll, d.moved)) { this.tool = null; this.canvas.style.cursor = ''; }
@@ -1153,11 +1201,11 @@ export class App {
         if (ll && frac > 0.01) cam.flyTo({ lon: ll[0], lat: ll[1], z: cam.target.z * frac }, settings.num('config.generalZoomBoxCameraFlyDuration'), this.flyOpts());
         return;
       }
-      if (!d.moved && e.target === cv) this.click(x, y, d.button, d.ctrl, e.clientX, e.clientY);
+      if (!d.moved && e.target === cv) this.click(x, y, d.button, d.ctrl, e.clientX, e.clientY, d.pane);
     });
     cv.addEventListener('dblclick', (e) => {
       if (settings.num('config.clickZoom') !== 1) return;
-      const ll = cam.pick(e.offsetX, e.offsetY);
+      const at = this.paneXY(e.offsetX, e.offsetY), ll = cam.pick(at.x, at.y);
       if (ll) cam.flyTo({ lon: ll[0], lat: ll[1], z: cam.target.z / 2.5 }, settings.num('config.generalZoomBoxCameraFlyDuration'), this.flyOpts());
     });
     cv.addEventListener('wheel', (e) => {
@@ -1167,7 +1215,7 @@ export class App {
       if (!settings.bool('settings.generalZoomMessage')) { settings.set('settings.generalZoomMessage', true); this.toast('Zoom: wheel or right-drag; Ctrl+right-drag draws a zoom box; Ctrl+left-drag tilts the view.'); }
       const t = cam.target;
       const k = Math.pow(1.0018, e.deltaY * settings.num('config.generalCameraZoomSensitivity'));
-      const ll = cam.pick(e.offsetX, e.offsetY);
+      const at = this.paneXY(e.offsetX, e.offsetY), ll = cam.pick(at.x, at.y);
       const z = t.z * k;
       if (ll && k < 1) {
         let dl = ll[0] - t.lon; if (dl > 180) dl -= 360; else if (dl < -180) dl += 360;
@@ -1175,23 +1223,25 @@ export class App {
       } else cam.setView({ z });
     }, { passive: false });
     cv.addEventListener('mousemove', (e) => {
-      this.mouse = [e.offsetX, e.offsetY];
+      const { pane, x, y } = this.paneXY(e.offsetX, e.offsetY);
+      this.mouse = [x, y]; this.mousePane = pane;
       this.sites.mouse = this.mouse;
-      if (settings.num('config.generalMapMode') === 2) { this.renderer.probeRequest = { x: e.offsetX, y: e.offsetY }; this.cpuProbe = this.objectInfo(e.offsetX, e.offsetY); }
-      if (this.tool === 'radial' && this.annotations.radialOrigin) { const ll = cam.pick(e.offsetX, e.offsetY); if (ll) { this.annotations.radial = ll; this.annotations.dirty = true; } }
-      if (this.tool === 'section' && this.nexrad.section.placing?.clicked) { const ll = cam.pick(e.offsetX, e.offsetY); if (ll) this.nexrad.section.move(ll); }
-      if (settings.num('config.generalMapMode') === 1) this.rollover(e.offsetX, e.offsetY);
+      if (settings.num('config.generalMapMode') === 2) { this.renderer.probeRequest = { x, y }; this.cpuProbe = this.objectInfo(x, y); }
+      if (this.tool === 'radial' && this.annotations.radialOrigin) { const ll = cam.pick(x, y); if (ll) { this.annotations.radial = ll; this.annotations.dirty = true; } }
+      if (this.tool === 'section' && this.nexrad.section.placing?.clicked) { const ll = cam.pick(x, y); if (ll) this.nexrad.section.move(ll); }
+      if (settings.num('config.generalMapMode') === 1) this.rollover(x, y);
       if (this.roadNaming && settings.num('config.roadLabelMode') !== 1) {
-        const hit = this.roads.nameAt(e.offsetX, e.offsetY), tip = this.hud.roadTip;
+        const hit = this.roads.nameAt(x, y), tip = this.hud.roadTip;
         tip.style.display = hit ? '' : 'none';
         if (hit) { if (tip.textContent !== hit.name) { tip.textContent = hit.name; Object.assign(tip.style, textCss('RoadLabels')); } tip.style.left = `${e.offsetX + 12}px`; tip.style.top = `${e.offsetY - 22}px`; }
       }
       this.poke();
     });
-    cv.addEventListener('mouseleave', () => { this.mouse = null; this.sites.mouse = null; this.hud.probe.style.display = 'none'; this.hud.cross.style.display = 'none'; this.hud.tip.style.display = 'none'; });
+    cv.addEventListener('mouseleave', () => { this.mouse = null; this.sites.mouse = null; for (const p of this.hud.panes) { p.probe.style.display = 'none'; p.cross.style.display = 'none'; } this.hud.tip.style.display = 'none'; });
   }
 
-  private click(x: number, y: number, button: number, ctrl: boolean, cx: number, cy: number) {
+  /** A click at a pane-relative point of `pane` (`cx`, `cy`: the page position, for menus). */
+  private click(x: number, y: number, button: number, ctrl: boolean, cx: number, cy: number, pane = 0) {
     const cam = this.renderer.camera;
     const ll = cam.pick(x, y);
     if (ll) this.lastClickLL = ll;
@@ -1201,7 +1251,7 @@ export class App {
       if (hit) { this.roads.labels.push({ lon: hit.lon, lat: hit.lat, name: hit.name, dx: 8, dy: -10 }); this.roads.saveLabels(); return; }
     }
     if (ll && (this.tool === 'vrShear' || this.tool === 'sounding')) {
-      if (this.tool === 'sounding') { this.tool = null; openSounding(ll[0], ll[1]); } else if (this.nexrad.tools.shearClick(ll)) this.tool = null;
+      if (this.tool === 'sounding') { this.tool = null; openSounding(ll[0], ll[1]); } else if (this.nexrad.tools.shearClick(ll, pane)) this.tool = null;
       if (!this.tool) this.canvas.style.cursor = '';
       return;
     }
@@ -1288,7 +1338,8 @@ export class App {
     if (!text && this.lightning.enabled() && settings.bool('settings.lightningRenderingRollover')) { const f = this.lightning.nearest(x, y); if (f) text = `Lightning flash ${Math.round((timeline.t - f.t) / 60e3)} min ago\nEnergy ${(f.e * 1e15).toFixed(0)} fJ`; }
     tip.style.display = text ? '' : 'none';
     tip.textContent = text;
-    tip.style.left = `${x + 14}px`; tip.style.top = `${y + 10}px`;
+    const [ox, oy] = this.paneCorner(this.mousePane);
+    tip.style.left = `${ox + x + 14}px`; tip.style.top = `${oy + y + 10}px`;
   }
 
   /** Text of the topmost vector/station object under the cursor (layers implementing probeAt). */
@@ -1306,16 +1357,25 @@ export class App {
     return null;
   }
 
-  private showProbe(p: { kind: string; value: number; layer: string } | null) {
-    const pr = this.hud.probe;
-    const beam = this.mouse ? this.nexrad.tools.beamProbe(this.mouse[0], this.mouse[1]) : [];
-    if ((!p && !this.cpuProbe && !beam.length) || !this.mouse || settings.num('config.generalMapMode') !== 2) { pr.style.display = 'none'; return; }
+  /** Probe readouts: each pane shows what it draws at the pointer's map point (the same pane-relative pixel). */
+  private showProbe(results: (ProbeResult | null)[]) {
+    this.hud.panes.forEach((h, pane) => {
+      const pr = h.probe, text = pane < panes.count ? this.probeLines(results[pane] ?? null, pane) : '';
+      if (!text || !this.mouse) { pr.style.display = 'none'; return; }
+      const [ox, oy] = this.paneCorner(pane);
+      pr.style.whiteSpace = 'pre';
+      pr.textContent = text;
+      pr.style.display = '';
+      pr.style.left = `${ox + this.mouse[0] + 14}px`; pr.style.top = `${oy + this.mouse[1] - 26}px`;
+    });
+  }
+  /** Readout of one pane: objects under the pointer, the probed layer's value as that pane draws it, and its beam geometry. */
+  private probeLines(p: ProbeResult | null, pane: number): string {
+    if (!this.mouse || settings.num('config.generalMapMode') !== 2) return '';
+    const beam = this.nexrad.tools.beamProbe(this.mouse[0], this.mouse[1], pane);
     const layer = p ? (this.layers.get(p.layer) as MapLayer | undefined) : undefined;
-    const raster = p ? layer?.probeText(p.value) ?? p.value.toFixed(3) : '';
-    pr.style.whiteSpace = 'pre';
-    pr.textContent = [this.cpuProbe?.join('\n'), raster, ...beam].filter(Boolean).join('\n');
-    pr.style.display = '';
-    pr.style.left = `${this.mouse[0] + 14}px`; pr.style.top = `${this.mouse[1] - 26}px`;
+    const raster = p ? layer?.probeText(p.value, pane) ?? p.value.toFixed(3) : '';
+    return [this.cpuProbe?.join('\n'), raster, ...beam].filter(Boolean).join('\n');
   }
 
   private wireKeys() {
@@ -1332,6 +1392,7 @@ export class App {
       else if (e.altKey && k === 'l') { e.preventDefault(); this.toggleRoadNaming(); }
       else if (e.altKey && (k === 'v' || k === 's')) { e.preventDefault(); this.startMeasure(k === 'v' ? 'vrShear' : 'sounding'); }
       else if (e.altKey && k === 'x') { e.preventDefault(); this.startMeasure('section'); }
+      else if (e.altKey && k === 'p') { e.preventDefault(); this.cyclePanes(); }
       else if (e.altKey && /^f(\d{1,2})$/.test(k)) { e.preventDefault(); this.applyScene(Number(k.slice(1)) - 1); }
       else if (!e.ctrlKey && !e.altKey && k === 'r') settings.set('settings.nexradSitesOn', !settings.bool('settings.nexradSitesOn'));
       else if (k === ' ' && !e.ctrlKey) { e.preventDefault(); this.clearTelestration(); }
@@ -1342,7 +1403,7 @@ export class App {
   }
 
   // ------------------------------------------------------------------------------------------- frame loop
-  private legendKey = '';
+  private legendKeys: string[] = [];
   private mapLabelText = '';
   private brandDpr = 0;
   private textStyleKey = '';
@@ -1557,19 +1618,43 @@ export class App {
       const wp = settings.arr<number>('config.guiSevereWatchTextPosition');
       h.watchBox.style.left = `${wp[0]}px`; h.watchBox.style.top = `${wp[1]}px`;
     }
-    // Legends.
-    const legends: LegendSpec[] = settings.bool('config.noLegend') ? [] : [...this.layers.values()].flatMap((l) => ('legends' in l && (l as MapLayer).enabled() ? (l as MapLayer).legends() : []));
-    const key = legends.map((l) => `${l.id}${l.palette.name}${l.low}${l.high}${l.extra?.length}${l.note ?? ''}`).join('|') + this.renderer.flashRow + h.legend.clientWidth;
-    if (key !== this.legendKey) { perfMark('legend'); this.legendKey = key; drawLegends(h.legend, legends, this.renderer.flashRow, devicePixelRatio || 1); }
+    // Panes: each has a legend strip across its top (pane 0: every layer's legends; the others: those of the layers
+    // that differ from pane to pane), a caption naming what NEXRAD shows in it, and the dividers.
+    const [paneW, paneH] = this.paneCss(), multi = panes.count > 1;
+    h.dividers.forEach((d, i) => {
+      const on = i === 0 ? panes.grid.cols > 1 : panes.grid.rows > 1;
+      const css = !on ? 'display:none' : i === 0 ? `left:${paneW - 1}px;top:0;width:2px;height:${paneH * panes.grid.rows}px` : `left:0;top:${paneH - 1}px;height:2px;width:${paneW * panes.grid.cols}px`;
+      if (d.dataset.css !== css) { d.dataset.css = css; d.style.cssText = css; }
+    });
+    h.panes.forEach((hp, pane) => {
+      const cv = hp.legend, shown = pane < panes.count;
+      cv.style.display = shown ? '' : 'none';
+      hp.label.style.display = shown && multi && this.nexrad.enabled() ? '' : 'none';
+      if (!shown) { this.legendKeys[pane] = ''; return; }
+      const [ox, oy] = this.paneCorner(pane);
+      const width = multi ? `${paneW}px` : '100%';
+      if (cv.style.width !== width) cv.style.width = width;
+      cv.style.left = `${ox}px`; cv.style.top = `${oy}px`;
+      const legends: LegendSpec[] = settings.bool('config.noLegend') ? [] : [...this.layers.values()].flatMap((l) => ('legends' in l && (l as MapLayer).enabled() && (pane === 0 || (l as Drawable).perPane) ? (l as MapLayer).legends(pane) : []));
+      const key = legends.map((l) => `${l.id}${l.palette.name}${l.low}${l.high}${l.extra?.length}${l.note ?? ''}`).join('|') + this.renderer.flashRow + cv.clientWidth;
+      if (key !== this.legendKeys[pane]) { perfMark('legend'); this.legendKeys[pane] = key; drawLegends(cv, legends, this.renderer.flashRow, devicePixelRatio || 1); }
+      if (hp.label.style.display === 'none') return;
+      const text = this.nexrad.paneLabel(pane);
+      if (hp.label.textContent !== text) hp.label.textContent = text;
+      hp.label.style.right = `${cv.parentElement!.clientWidth - (ox + paneW) + 6}px`; hp.label.style.top = `${oy + paneH - 26}px`;
+    });
     // Lightning count box.
     const showStrikes = this.lightning.enabled() && settings.bool('settings.lightningRenderingFlashCountBox');
     h.strikes.style.display = showStrikes ? '' : 'none';
     if (showStrikes && now % 500 < 20) h.strikes.textContent = `${this.lightning.countInView()} Strikes`;
-    // Probe crosshair.
+    // Crosshairs: the probe crosshair under the pointer, and the linked cursor at the same map point of every other pane.
     const probe = settings.num('config.generalMapMode') === 2 && this.mouse;
-    h.cross.style.display = probe && settings.bool('settings.generalProbeModeCrosshair') ? '' : 'none';
-    if (probe && this.mouse) { h.cross.style.left = `${this.mouse[0]}px`; h.cross.style.top = `${this.mouse[1]}px`; }
-    if (!probe) h.probe.style.display = 'none';
+    h.panes.forEach((hp, pane) => {
+      const on = !!this.mouse && pane < panes.count && (pane !== this.mousePane || (!!probe && settings.bool('settings.generalProbeModeCrosshair')));
+      hp.cross.style.display = on ? '' : 'none';
+      if (on) { const [ox, oy] = this.paneCorner(pane); hp.cross.style.left = `${ox + this.mouse![0]}px`; hp.cross.style.top = `${oy + this.mouse![1]}px`; }
+      if (!probe) hp.probe.style.display = 'none';
+    });
     // Warning info box with leader line.
     const a = this.selectedAlert;
     h.svg.textContent = '';
@@ -1579,7 +1664,7 @@ export class App {
       h.info.textContent = this.warnings.infoLines(a).join('\n');
       if (!h.info.style.left) { const p = settings.arr<number>('config.guiSevereWarningsTextPosition'); h.info.style.left = `${p[0]}px`; h.info.style.top = `${p[1]}px`; }
       const anchor = this.warnings.screenAnchor(a);
-      if (anchor && settings.bool('settings.severeWarningsInfoBoxLine')) {
+      if (anchor && this.inPane(anchor[0], anchor[1]) && settings.bool('settings.severeWarningsInfoBoxLine')) {
         const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
         line.setAttribute('x1', String(h.info.offsetLeft + h.info.offsetWidth / 2)); line.setAttribute('y1', String(h.info.offsetTop + h.info.offsetHeight));
         line.setAttribute('x2', String(anchor[0])); line.setAttribute('y2', String(anchor[1]));
@@ -1591,7 +1676,7 @@ export class App {
     const tk = ['MapTimestamp', 'ProbeFont', 'RolloverFont'].map((n) => (hasTextStyle(n) ? JSON.stringify(textStyle(n)) : '')).join('|');
     if (tk !== this.textStyleKey) {
       this.textStyleKey = tk;
-      for (const [el, n] of [[h.time, 'MapTimestamp'], [h.probe, 'ProbeFont'], [h.tip, 'RolloverFont']] as [HTMLElement, string][]) {
+      for (const [el, n] of [[h.time, 'MapTimestamp'], ...h.panes.map((p) => [p.probe, 'ProbeFont']), [h.tip, 'RolloverFont']] as [HTMLElement, string][]) {
         if (hasTextStyle(n)) Object.assign(el.style, textCss(n)); else for (const k of ['fontFamily', 'fontSize', 'fontWeight', 'fontStyle', 'color', 'letterSpacing', 'textShadow', 'background', 'padding', 'animation'] as const) el.style[k] = '';
       }
     }
