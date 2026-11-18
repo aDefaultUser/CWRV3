@@ -265,7 +265,7 @@ export class CustomRadarLayer extends MapLayer {
       key = `${id}|${sweepIdx}|${JSON.stringify(params)}`;
       if (v.key === key) { v.req = undefined; return; } // already built; an older request in flight is superseded
       if (v.req === key) return;
-      if (sweepIdx < 0) { v.error = 'product not in this volume'; this.dropSweep(v); v.key = key; v.req = undefined; return; }
+      if (sweepIdx < 0) { v.error = 'not available for this volume'; this.dropSweep(v); v.key = key; v.req = undefined; return; }
       v.req = key;
       const res = await pool.for(this.id).run('l2.product', { url: v.url, live: false, sweep: sweepIdx, product, params }, v.url);
       if (v.req !== key) return; // a newer request for this volume replaced this one

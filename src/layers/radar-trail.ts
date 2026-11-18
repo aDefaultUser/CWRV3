@@ -64,7 +64,7 @@ export class RadarTrail {
 
   /** The request of one volume's product, or null when the volume lacks it (no such tilt). */
   private requestOf(f: TrailHost['l2'][number], product: number, id: string) {
-    const info = this.host.siteInfo()!, sweep = product >= 11 ? 0 : this.host.sweepFor(f.meta!, product);
+    const info = this.host.siteInfo()!, sweep = this.host.sweepFor(f.meta!, product);
     if (sweep === null) return null;
     const p = this.host.algorithmParams(f.t);
     const params: L2BuildParams = { ...p, envIsotherms: hailEnvironment(product, p.isothermAuto, { lon: info.lon, lat: info.lat, elevM: info.elevFt * 0.3048 }, f.t) };

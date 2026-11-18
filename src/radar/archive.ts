@@ -46,6 +46,8 @@ export async function listL3Archive(site: string, code: string, fromMs: number, 
 
 export const IEM_ATTR = 'https://mesonet.agron.iastate.edu/geojson/nexrad_attr.php';
 export const iemAttrUrl = (t: number) => `${IEM_ATTR}?valid=${new Date(t).toISOString().slice(0, 19)}Z`;
+/** The service refuses earlier times. */
+export const IEM_ATTR_SINCE = Date.UTC(2000, 0, 1);
 
 interface IemAttr { nexrad: string; storm_id: string; azimuth: number; range: number; tvs: string; meso: string; posh: number; poh: number; max_size: number; vil: number; max_dbz: number; top: number; drct: number; sknt: number; valid: string }
 const pad = (v: number, n: number) => String(Math.round(v)).padStart(n);

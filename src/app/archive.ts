@@ -19,9 +19,11 @@ export interface ArchivePreset { name: string; t: number; site: string; view?: V
 
 /**
  * Built-in events; each was checked to have Level 2 volumes in the public archive at this time. Level 3, MRMS,
- * ProbSevere and GOES-R products exist only for the later ones and show as not available otherwise.
+ * ProbSevere and GOES-R products exist only for the later ones and show as not available otherwise; 1999 has
+ * warnings and watches but no storm reports, outlooks or storm attributes at IEM.
  */
 export const BUILTIN_PRESETS: readonly ArchivePreset[] = [
+  { name: '1999-05-03 Bridge Creek–Moore, OK tornado', t: Date.UTC(1999, 4, 3, 23, 30), site: 'KTLX' },
   { name: '2011-04-27 Tuscaloosa–Birmingham, AL tornado', t: Date.UTC(2011, 3, 27, 22, 30), site: 'KBMX' },
   { name: '2013-05-20 Moore, OK tornado', t: Date.UTC(2013, 4, 20, 20, 30), site: 'KTLX' },
   { name: '2021-12-10 Mayfield, KY tornado', t: Date.UTC(2021, 11, 11, 3, 40), site: 'KPAH' },

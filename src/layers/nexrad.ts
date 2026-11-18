@@ -24,7 +24,7 @@ import { ChunkFeed } from '../radar/chunks';
 import { loadPref, savePref, prefObject } from '../app/persist';
 import { matchVolume, overlayFiles, LISTING_LAG_MAX_MS } from '../radar/overlay-match';
 import { RadarTools } from './radar-tools';
-import { AWS_L3, IEM_DS, iemAttrUrl, iemStormProducts, l3ArchiveCode, l3ArchiveCodes, listL3Archive } from '../radar/archive';
+import { AWS_L3, IEM_ATTR_SINCE, IEM_DS, iemAttrUrl, iemStormProducts, l3ArchiveCode, l3ArchiveCodes, listL3Archive } from '../radar/archive';
 import { fetchJson } from '../data/net';
 import { archiveCache } from '../data/iem';
 import { CrossSection } from './cross-section';
@@ -376,7 +376,8 @@ export class NexradLayer extends MapLayer {
   }
 
   sweepFor(meta: L2Meta, product: number): number | null {
-    if (product >= 11) return 0;
+    // Column ZDR/KDP need dual-pol moments; the other volume products need reflectivity only.
+    if (product >= 11) return (product === 17 || product === 18) && !meta.sweeps.some((s) => s.moments.includes('RHO')) ? null : 0;
     const need = l2Moment(product);
     const showSplit = settings.bool('settings.nexradLevel2ShowSplitCuts');
     const cands = meta.sweeps.filter((s) => need && s.moments.includes(need));
@@ -424,7 +425,7 @@ export class NexradLayer extends MapLayer {
       key = `${id}|${sweepIdx}|${JSON.stringify(params)}|${meta.sweeps.length}|${meta.sweeps[meta.sweeps.length - 1]?.radials}|${rolling?.url ?? ''}`;
       if (f.key === key) { f.req = undefined; return; } // already built (or known unavailable); an older request in flight is superseded
       if (f.req === key) return;
-      if (sweepIdx === null) { f.error = 'product not in this volume'; this.dropSweep(f); f.key = key; f.req = undefined; this.updateL2Status(); return; }
+      if (sweepIdx === null) { f.error = 'not available for this volume'; this.dropSweep(f); f.key = key; f.req = undefined; this.updateL2Status(); return; }
       f.req = key;
       const res = composite
         ? await pool.for(this.id).run('l2.composite', { url: f.file.url, live: f.file.live, chunks: f.file.chunks, base: settings.num('settings.nexradLevel2LiveCompositeCAPPIBase'), top: settings.num('settings.nexradLevel2LiveCompositeCAPPITop'), selectiveMax: settings.bool('settings.nexradLevel2LiveCompositeSelectiveMaximum') }, f.file.url)
@@ -662,7 +663,7 @@ export class NexradLayer extends MapLayer {
    * the asked time, so the products are stored under the volume time they report and matched like Level 3 files.
    */
   private async readIemAttributes(site: string, dsList: string[], frames: number[], current: () => boolean) {
-    const todo = frames.filter((t) => !this.stormRead.has(`iem@${t}`));
+    const todo = frames.filter((t) => t >= IEM_ATTR_SINCE && !this.stormRead.has(`iem@${t}`));
     const reader = async () => {
       for (let t = todo.pop(); t !== undefined && current(); t = todo.pop()) {
         let gj: Parameters<typeof iemStormProducts>[0];

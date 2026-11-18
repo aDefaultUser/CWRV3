@@ -156,6 +156,14 @@ describe('RadarTrail', () => {
     expect(TRAIL_PRODUCTS).toContain(trail.product());
   });
 
+  it('skips volumes the host has no sweep for (column products on pre-dual-pol volumes)', () => {
+    settings.set('ext.settings.nexradTrailProduct', 17);
+    const { h: hs } = host({ sweepFor: (_m, p) => (p === 17 ? null : 0) }), { r, ctx } = fakeGpu(), trail = new RadarTrail(r, hs);
+    trail.prepass(ctx);
+    expect(h.runs).toHaveLength(0);
+    expect(trail.target).toBeNull();
+  });
+
   it('never mixes sites: a site change drops the blend and discards results of the old site', async () => {
     const { h: hs, setSite } = host(), { r, ctx } = fakeGpu(), trail = new RadarTrail(r, hs);
     trail.prepass(ctx); h.runs[0].resolve(result()); await flush();

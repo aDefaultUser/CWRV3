@@ -122,14 +122,15 @@ async function loadVolume(url: string, live: boolean, job: JobClock, chunks?: st
   const hit = volumes.get(url);
   if (hit && !live) { volumes.delete(url); volumes.set(url, hit); return hit; }
   const bytes = await fetchBytes(url, { cache: live ? 'none' : 'immutable' });
-  // Archive volumes before mid-2016 are whole-file gzip (…_V06.gz).
+  // Archive volumes before mid-2016 are whole-file gzip (…_V06.gz, or without a version before 2008).
   const plain = bytes[0] === 0x1f && bytes[1] === 0x8b ? await gunzip(bytes) : bytes;
   return job.time(() => {
     let buf = plain;
     // tgftp serves whole volumes compressed with bzip2 when the name ends in .bz2 but the content is still
     // an AR2V file with bzip2 records; a fully compressed file starts with "BZh".
     if (buf[0] === 0x42 && buf[1] === 0x5a && buf[2] === 0x68) buf = bunzip2(buf);
-    const d = new Archive2Decoder();
+    // ARCHIVE2 volumes (before about 2004) leave the header's site blank; the file name holds the requested radar.
+    const d = new Archive2Decoder(/\/([A-Z]{4})\d{8}_\d{6}[^/]*$/.exec(url)?.[1]);
     d.feed(buf);
     return cacheVolume(url, d.volume(), bytes.length);
   });

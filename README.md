@@ -152,17 +152,24 @@ Probe reads the displayed value under the pointer.
   satellite are loaded for it, the status bar shows **ARCHIVE yyyy-mm-dd HH:MMZ** (click it to reopen the dialog) and
   names the enabled layers that have nothing for that time. "◀ One loop" / "One loop ▶" move the time by the loop
   length (Loop Length still sets how much is loaded), Live (or CWRV3 menu → Return to live data) goes back to current
-  data. The mode and time are kept across a reload. Event presets hold a name, time, radar site and map view: four
-  built-in events (2011-04-27 Tuscaloosa–Birmingham KBMX, 2013-05-20 Moore KTLX, 2021-12-10 Mayfield KPAH, 2024-05-06
-  Barnsdall KINX; each checked to have Level 2 volumes) and your own (Save current as…, Delete). What is shown in
-  archive mode:
+  data. The mode and time are kept across a reload. Event presets hold a name, time, radar site and map view: five
+  built-in events (1999-05-03 Bridge Creek–Moore KTLX, 2011-04-27 Tuscaloosa–Birmingham KBMX, 2013-05-20 Moore KTLX,
+  2021-12-10 Mayfield KPAH, 2024-05-06 Barnsdall KINX; each checked to have Level 2 volumes) and your own (Save
+  current as…, Delete). What is shown in archive mode:
   * NEXRAD Level 2 from the AWS archive only (the gzip volumes of the years before mid-2016 included), no live sweep.
-    Only volumes in the Message 31 format (from about 2008) are decoded; older volumes (Message 1) are not. Level 3 products from the Unidata Level 3 archive bucket (2020-03-30 on); where the archive has no
+    Volumes before Message 31 (1991 to 2008) are decoded from their Message 1 radials: reflectivity at 1 km gates,
+    velocity and spectrum width at 250 m gates, 1° radials (each sweep cut to one turn), no dual-pol, so ZDR, CC, PHI,
+    KDP and the ZDR/KDP columns show "not available for this volume". The site position comes from the radar site
+    table, and cuts of volumes without a VCP record (before about 2005) from the VCP's cut list, or from their
+    moments for a VCP not in it. Doppler gates the legacy RDA (before about 2006) placed behind the antenna are
+    dropped; its ranges are otherwise used as recorded. The bucket holds these years as whole-file gzip (no .Z
+    files were found in the listings checked).
+    Level 3 products from the Unidata Level 3 archive bucket (2020-03-30 on); where the archive has no
     digital base reflectivity or velocity (N?Q / N?U, from 2022–23), their super-resolution successors (N?B / N?G) are
     drawn and named in the status line. Storm attributes are matched per volume as in live mode: storm tracks,
     mesocyclones, melting layer and the automatic storm motion from the archived Level 3 products, and what the
     archive does not hold for the period (TVS, hail and the storm-cell table always; cells and mesocyclones before
-    2020) from IEM's storm attributes, stored under the volume time IEM reports for them.
+    2020) from IEM's storm attributes (2000 on), stored under the volume time IEM reports for them.
   * Warnings: IEM storm-based warning polygons (Tornado, Severe Thunderstorm, Flash Flood, Special Marine, Snow
     Squall, Extreme Wind), each version drawn only from when it took effect until an update, cancellation or expiry
     replaced it. Hail, wind, tornado and damage tags are those of the issuance and are shown on the issued polygon
@@ -347,7 +354,7 @@ profiles from `api/1/nws/bufkit.json`, and for archive replay `api/1/vtec/sbw_in
 
 | Part | Lines |
 | --- | ---: |
-| TypeScript / JavaScript | 20,752 |
+| TypeScript / JavaScript | 20,832 |
 | WGSL shaders | 788 |
-| **Total functional** | **21,540** |
+| **Total functional** | **21,620** |
 | CSS (separate) | 175 |

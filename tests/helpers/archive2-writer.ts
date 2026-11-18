@@ -1,6 +1,7 @@
 // Synthetic Archive II writer for tests: a volume header, a metadata record carrying the VCP (message 5) and
 // uncompressed message 31 records, with the fields at the offsets the decoder reads (ICD 2620002 / 2620010). Records
-// are not bzip2-compressed, which the file format allows and the decoder accepts.
+// are not bzip2-compressed, which the file format allows and the decoder accepts. writeLegacyArchive2 writes the
+// message 1 volumes of the years before message 31.
 export interface SynthMoment {
   name: 'REF' | 'VEL' | 'SW' | 'ZDR' | 'PHI' | 'RHO';
   gates: number; firstM?: number; spacingM?: number; scale: number; offset: number; word?: 8 | 16;
@@ -122,4 +123,58 @@ export function splitSailsVolume(gates = 40): SynthVolume {
       { elevation: 8.0, radials: 360, moments: moments(8, all, gates - 12) },
     ],
   };
+}
+
+/**
+ * A message 1 cut (the format before message 31): reflectivity at 1 km gates and/or velocity and spectrum width at
+ * 250 m gates, one radial per fixed 2432-byte frame (ICD 2620002 message 1, as Py-ART and MetPy read it).
+ */
+export interface SynthLegacyCut {
+  elevation: number; radials: number; az0?: number;
+  /** Azimuth step per radial; legacy sweeps are not exactly 1° and overrun one turn (default 0.985). */
+  step?: number;
+  ref?: { gates: number; firstM?: number };
+  /** `res` 2 = 0.5 m/s velocity steps, 4 = 1 m/s. */
+  doppler?: { gates: number; firstM?: number; nyquist: number; res?: 2 | 4 };
+  /** Raw code of a gate of moment 0 (REF), 1 (VEL) or 2 (SW). */
+  code: (moment: number, radial: number, gate: number) => number;
+}
+export interface SynthLegacyVolume { header: 'ARCHIVE2.' | 'AR2V0001.'; site: string; timeMs: number; vcp: number; cuts: SynthLegacyCut[] }
+
+const angleCode = (deg: number) => Math.round((deg * 32768) / 180 / 8) * 8;
+
+function legacyRadial(v: SynthLegacyVolume, cut: SynthLegacyCut, elNum: number, r: number, status: number, timeMs: number): Uint8Array {
+  const p = new Uint8Array(2400), dv = new DataView(p.buffer);
+  const ref = cut.ref, dop = cut.doppler;
+  dv.setUint32(0, timeMs % MS_DAY); dv.setUint16(4, Math.floor(timeMs / MS_DAY) + 1);
+  dv.setInt16(6, dop ? 1480 : 4660); dv.setUint16(8, angleCode(((cut.az0 ?? 0.5) + r * (cut.step ?? 0.985)) % 360)); dv.setUint16(10, r + 1);
+  dv.setUint16(12, status); dv.setUint16(14, angleCode(cut.elevation)); dv.setUint16(16, elNum);
+  dv.setInt16(18, ref?.firstM ?? 0); dv.setInt16(20, dop?.firstM ?? -375); dv.setUint16(22, 1000); dv.setUint16(24, 250);
+  dv.setUint16(26, ref?.gates ?? 0); dv.setUint16(28, dop?.gates ?? 0);
+  const refPtr = 100, velPtr = 100 + (ref?.gates ?? 0), swPtr = velPtr + (dop?.gates ?? 0);
+  if (ref) dv.setUint16(36, refPtr);
+  if (dop) { dv.setUint16(38, velPtr); dv.setUint16(40, swPtr); dv.setUint16(42, dop.res ?? 2); dv.setInt16(60, Math.round(dop.nyquist * 100)); }
+  dv.setUint16(44, v.vcp);
+  for (let g = 0; g < (ref?.gates ?? 0); g++) p[refPtr + g] = cut.code(0, r, g);
+  for (let g = 0; g < (dop?.gates ?? 0); g++) { p[velPtr + g] = cut.code(1, r, g); p[swPtr + g] = cut.code(2, r, g); }
+  return message(1, p, 2432);
+}
+
+/**
+ * A legacy Archive II file: the volume header (ARCHIVE2 leaves the site blank), an all-zero message 5 frame as some
+ * 2005 files carry, an RDA status frame, then the radials of each cut.
+ */
+export function writeLegacyArchive2(v: SynthLegacyVolume): Uint8Array {
+  const header = new Uint8Array(24), hd = new DataView(header.buffer);
+  ascii(header, 0, `${v.header}001`); hd.setUint32(12, Math.floor(v.timeMs / MS_DAY) + 1); hd.setUint32(16, v.timeMs % MS_DAY);
+  if (v.header === 'AR2V0001.') ascii(header, 20, v.site);
+  const frames = [header, message(5, new Uint8Array(2400), 2432), message(2, new Uint8Array(96), 2432)];
+  v.cuts.forEach((cut, ci) => {
+    for (let r = 0; r < cut.radials; r++) {
+      const first = r === 0, last = r === cut.radials - 1;
+      const status = first ? (ci === 0 ? 3 : 0) : last ? (ci === v.cuts.length - 1 ? 4 : 2) : 1;
+      frames.push(legacyRadial(v, cut, ci + 1, r, status, v.timeMs + ci * 20000 + r * 50));
+    }
+  });
+  return concat(frames);
 }
