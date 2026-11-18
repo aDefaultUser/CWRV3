@@ -41,6 +41,12 @@ Probe reads the displayed value under the pointer.
   newest available frame and follows newer frames as they arrive.
 * Level 2 download volumes is how many of the newest volumes are fetched; max memory volumes is how many are kept as
   new scans arrive (lowering it drops the oldest at once).
+* Storm attributes (storm tracks and the storm-cell table, TVS, hail, mesocyclone and melting-layer overlays) and the
+  automatic storm motion are read per volume from the rotating TGFTP Level 3 files and drawn only over the radar
+  volume they belong to: matched by volume start time (within 2 min; Level 3 SAILS/MRLE cuts by their volume scan
+  number). A frame without them, such as the live volume still being scanned or an archived loop older than TGFTP
+  keeps (about 250 files per product, 28–46 h at the busy sites checked), shows "No storm attributes for HH:MMZ" at
+  the radar. Automatic storm-relative velocity uses each volume's own vector, or the manual one where it has none.
 * Extended GOES-R Data → Product "Level 2 Product": cloud-top height (`ABI-L2-ACHA`, CONUS / Full Disk /
   Mesoscale), cloud-top temperature (`ABI-L2-ACHT`, Full Disk / Mesoscale; not produced for CONUS) and fire/hot spot
   with fire radiative power (`ABI-L2-FDC`, CONUS / Full Disk / Mesoscale) from GOES-19 or GOES-18. Cloud-top values
@@ -183,7 +189,7 @@ Mesonet, NASA GIBS imagery and AWS Terrain Tiles. Bundled GIS layers come from N
 
 | Part | Lines |
 | --- | ---: |
-| TypeScript / JavaScript | 17,307 |
+| TypeScript / JavaScript | 17,407 |
 | WGSL shaders | 689 |
-| **Total functional** | **17,996** |
+| **Total functional** | **18,096** |
 | CSS (separate) | 174 |

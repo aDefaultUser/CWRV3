@@ -4,12 +4,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 type Run = { task: string; args: any; resolve: (v: unknown) => void; reject: (e: Error) => void };
-const h = vi.hoisted(() => ({ runs: [] as Run[], textures: [] as { destroyed: boolean; destroy(): void; format: string }[], radarDraws: [] as any[], holdLists: false, lists: [] as { url: string; resolve: (t: string) => void }[] }));
+const h = vi.hoisted(() => ({ runs: [] as Run[], textures: [] as { destroyed: boolean; destroy(): void; format: string }[], radarDraws: [] as any[], holdLists: false, lists: [] as { url: string; resolve: (t: string) => void }[], dirs: {} as Record<string, string> }));
 
 vi.mock('../src/workers/pool', () => { const run = vi.fn((task: string, args: unknown) => new Promise((resolve, reject) => h.runs.push({ task, args, resolve, reject }))); return { pool: { run, for: () => ({ run }) } }; });
 const LISTING = '<a href="KTST20261116_060000_V06">v</a>';
-// Directory listings resolve at once, or wait for the test while `holdLists` is set.
-vi.mock('../src/data/net', async (orig) => ({ ...(await orig<object>()), fetchText: vi.fn((url: string) => (h.holdLists ? new Promise((resolve) => h.lists.push({ url, resolve })) : Promise.resolve(LISTING))) }));
+// Directory listings (`dirs` by URL, else LISTING) resolve at once, or wait for the test while `holdLists` is set.
+vi.mock('../src/data/net', async (orig) => ({ ...(await orig<object>()), fetchText: vi.fn((url: string) => (h.holdLists ? new Promise((resolve) => h.lists.push({ url, resolve })) : Promise.resolve(h.dirs[url] ?? LISTING))) }));
 vi.mock('../src/render/raster', async (orig) => ({
   ...(await orig<object>()),
   RadarDraw: class { calls: any[] = []; constructor() { h.radarDraws.push(this); } draw(_c: unknown, p: unknown) { this.calls.push(p); } invalidate() {} },
@@ -30,6 +30,7 @@ import { NexradLayer } from '../src/layers/nexrad';
 import { settings } from '../src/settings/store';
 import { PRODUCTS } from '../src/generated/products-catalog';
 import { RADAR_SITES } from '../src/generated/radar-sites';
+import { timeline } from '../src/app/timeline';
 
 const DBZ = PRODUCTS.level2[0].unit;
 
@@ -45,7 +46,7 @@ const last = (task: string) => pending(task)[pending(task).length - 1];
 let snapshot: ReturnType<typeof settings.exportDocument>;
 beforeEach(() => {
   snapshot = settings.exportDocument();
-  h.runs.length = 0; h.textures.length = 0; h.radarDraws.length = 0; h.holdLists = false; h.lists.length = 0;
+  h.runs.length = 0; h.textures.length = 0; h.radarDraws.length = 0; h.holdLists = false; h.lists.length = 0; h.dirs = {};
   settings.set('settings.nexradPrecipitationTyping', false);
 });
 afterEach(() => settings.importDocument(snapshot));
@@ -191,16 +192,6 @@ describe('NEXRAD Level 2 sweeps', () => {
     expect(layer.l2[0].sweep?.id ?? '').not.toMatch(/\|true\|/);
   });
 
-  it('drops storm overlays fetched for the previous site', async () => {
-    settings.set('settings.nexradSiteICAO', 'KTLX');
-    settings.set('layerState.NEXRADTVSIconsOn', true);
-    const layer = new NexradLayer(renderer, {} as never);
-    const refresh = (layer as any).refreshOverlays('KTLX');
-    settings.set('settings.nexradSiteICAO', 'KFWS'); layer.freeAll();
-    for (const r of pending('l3')) r.resolve({ tvs: [{ x: 1, y: 1 }], etvs: [] });
-    await refresh;
-    expect(layer.overlays.tvs).toEqual([]);
-  });
 });
 
 describe('custom radar environment and storm motion', () => {
@@ -466,8 +457,28 @@ describe('custom radar selections made while data loads', () => {
 
 describe('automatic storm motion', () => {
   const MANUAL = () => ({ speedKt: settings.num('settings.nexradStormMotionSpeed'), fromDeg: settings.num('settings.nexradStormMotionAzimuth') });
-  /** A 56rm0 product with a vector (tenths of knots and degrees) and its volume time. */
-  const srm = (speedKt: number, fromDeg: number, volumeTimeMs = Date.now()) => ({ p: [0, 0, 0, 0, 0, 0, speedKt * 10, fromDeg * 10], volumeTimeMs });
+  /** A 56rm0 product with a vector (tenths of knots and degrees; hw50 as observed on TGFTP) and its volume time. */
+  const srm = (speedKt: number, fromDeg: number, volumeTimeMs: number) => ({ p: [-32768, -32768, 5, -66, 64, -1, 7663, speedKt * 10, fromDeg * 10, 0], volumeTimeMs });
+  const MON = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+  const listed = (t: number) => { const d = new Date(t), p = (n: number) => String(n).padStart(2, '0'); return `${p(d.getUTCDate())}-${MON[d.getUTCMonth()]}-${d.getUTCFullYear()} ${p(d.getUTCHours())}:${p(d.getUTCMinutes())}`; };
+  const T0 = Math.floor(Date.now() / 60e3) * 60e3 - 15 * 60e3; // whole minutes inside the loop window
+  let file = 0;
+  /** Lists one new 56rm0 file at `site` (listed a minute after `volumeMs`) and returns the pending read once requested. */
+  const offer = async (layer: NexradLayer, site: string, volumeMs: number) => {
+    const name = `sn.${String(++file).padStart(4, '0')}`;
+    h.dirs[`https://tgftp.nws.noaa.gov/SL.us008001/DF.of/DC.radar/DS.56rm0/SI.${site.toLowerCase()}/`] = `<a href="${name}">${name}</a></td><td align="right">${listed(volumeMs + 60e3)}  </td>`;
+    const done = (layer as any).refreshOverlays(site) as Promise<void>;
+    await flush();
+    const req = last('l3');
+    expect(req.args.url).toContain(`DS.56rm0/SI.${site.toLowerCase()}/${name}`);
+    return { req, done };
+  };
+  /** One overlay refresh whose new motion file reads as `value` (an Error: the read fails). */
+  const read = async (layer: NexradLayer, site: string, value: unknown, volumeMs = (value as { volumeTimeMs?: number })?.volumeTimeMs ?? T0) => {
+    const { req, done } = await offer(layer, site, volumeMs);
+    if (value instanceof Error) req.reject(value); else req.resolve(value);
+    await done;
+  };
   const setup = () => {
     settings.set('settings.nexradSiteICAO', 'KTLX');
     settings.set('layerState.NEXRADOn', false);
@@ -480,43 +491,81 @@ describe('automatic storm motion', () => {
     layer.autoMotionListeners.add(() => told++);
     return { layer, told: () => told };
   };
-  /** One overlay refresh whose motion read returns `value` (an Error: the read fails). */
-  const read = async (layer: NexradLayer, site: string, value: unknown) => {
-    const done = (layer as any).refreshOverlays(site);
-    const req = last('l3');
-    expect(req.args.url).toContain(`DS.56rm0/SI.${site.toLowerCase()}/`);
-    if (value instanceof Error) req.reject(value); else req.resolve(value);
-    await done;
-  };
 
-  it("never keeps the previous site's vector: site change, failed, empty, invalid, old and late reads", async () => {
+  it("keeps each volume's own vector and never the previous site's: site change, failed, empty, invalid and late reads", async () => {
     const { layer, told } = setup();
-    await read(layer, 'KTLX', srm(30, 240));
-    expect(layer.autoMotion).toMatchObject({ speedKt: 30, fromDeg: 240, site: 'KTLX' });
+    const t1 = T0, t2 = T0 + 5 * 60e3;
+    await read(layer, 'KTLX', srm(30, 240, t1));
+    await read(layer, 'KTLX', srm(35, 250, t2));
+    expect(layer.motionFor(t1 + 800)).toEqual({ speedKt: 30, fromDeg: 240 }); // L3 volume times lead Level 2 by < 1 s
+    expect(layer.motionFor(t2)).toEqual({ speedKt: 35, fromDeg: 250 });
+    expect(layer.stormMotion(t1 + 2.5 * 60e3)).toEqual(MANUAL()); // between volumes: neither neighbour's vector
+    expect(layer.autoMotion).toMatchObject({ speedKt: 35, fromDeg: 250, site: 'KTLX', timeMs: t2 }); // the newest
     expect(layer.l2Identity()).toMatch(/,auto$/);
-    expect(told()).toBe(1);
-    const late = (layer as any).refreshOverlays('KTLX');
-    const lateReq = last('l3');
+    expect(told()).toBe(2);
+
+    const late = await offer(layer, 'KTLX', t2 + 5 * 60e3);
     settings.set('settings.nexradSiteICAO', 'KFWS'); layer.freeAll();
     expect(layer.autoMotion).toBeNull();
-    expect(told()).toBe(2);
-    expect(layer.stormMotion()).toEqual(MANUAL());
-    lateReq.resolve(srm(30, 240)); await late; // KTLX's vector arrives after the switch
+    expect(layer.motionFor(t2)).toBeNull();
+    expect(layer.stormMotion(t2)).toEqual(MANUAL());
+    late.req.resolve(srm(30, 240, t2 + 5 * 60e3)); await late.done; // KTLX's vector arrives after the switch
     expect(layer.autoMotion).toBeNull();
+    expect(layer.motionFor(t2 + 5 * 60e3)).toBeNull();
     await read(layer, 'KFWS', null);
     await read(layer, 'KFWS', new Error('404'));
+    await read(layer, 'KFWS', { p: [0, 0, 0, 0, 0, 0, 0, 250, 2000, 0] }); // no volume time: never labelled with another
     expect(layer.autoMotion).toBeNull();
-    expect(told()).toBe(2);
-    await read(layer, 'KFWS', srm(25, 200));
+    expect(told()).toBe(3);
+    await read(layer, 'KFWS', srm(200, 200, t1)); // out of range
+    expect(layer.motionFor(t1)).toBeNull();
+    await read(layer, 'KFWS', srm(25, 200, t2));
     expect(layer.autoMotion).toMatchObject({ speedKt: 25, fromDeg: 200, site: 'KFWS' });
-    await read(layer, 'KFWS', srm(200, 200)); // out of range
+    await read(layer, 'KFWS', { p: null, volumeTimeMs: t2 + 5 * 60e3 }); // the newest volume has no vector
     expect(layer.autoMotion).toBeNull();
-    await read(layer, 'KFWS', srm(25, 200));
-    await read(layer, 'KFWS', { p: null }); // no vector in the product
-    expect(layer.autoMotion).toBeNull();
-    await read(layer, 'KFWS', srm(25, 200, Date.now() - 25 * 60e3)); // the newest product is 25 min old
-    expect(layer.autoMotion).toBeNull();
-    expect(told()).toBe(6);
+    expect(layer.motionFor(t2)).toEqual({ speedKt: 25, fromDeg: 200 }); // its own volume keeps it
+    expect(told()).toBe(5);
+  });
+
+  it('has no wall-clock age limit per volume; only the newest vector for live consumers expires', async () => {
+    const { layer } = setup();
+    const old = T0 - 30 * 60e3;
+    await read(layer, 'KTLX', srm(30, 240, old));
+    expect(layer.autoMotion).toBeNull(); // 45 min old: not a current vector for the custom radar
+    expect(layer.stormMotion(old)).toEqual({ speedKt: 30, fromDeg: 240 }); // but still that volume's own vector
+  });
+
+  it('builds storm-relative velocity of each volume with its own vector and rebuilds only the volume whose vector arrives', async () => {
+    const { layer } = setup();
+    settings.set('layerState.NEXRADOn', true);
+    const t1 = T0, t2 = T0 + 5 * 60e3;
+    const frames = [t1, t2].map((t, i) => ({ t, file: { t, url: `https://x/KTLX${i}`, live: false, name: `KTLX${i}` } }));
+    layer.l2 = frames as never;
+    await read(layer, 'KTLX', srm(30, 240, t1));
+    for (const f of frames) { void (layer as any).loadL2(f); last('l2.meta').resolve({ ...lowVolume, volumeTimeMs: f.t }); await flush(); }
+    const builds = pending('l2.product');
+    expect(builds.map((r) => r.args.params.stormMotion)).toEqual([{ speedKt: 30, fromDeg: 240 }, MANUAL()]);
+    for (const r of builds) r.resolve({ sweep: sweep(7) });
+    await flush();
+    expect(layer.l2.every((f) => f.sweep)).toBe(true);
+    expect(layer.l2[0].key).toContain('"stormMotion":{"speedKt":30,"fromDeg":240}'); // the request key names the motion used
+    const shown = () => h.radarDraws[h.radarDraws.length - 3].calls.length;
+
+    await read(layer, 'KTLX', srm(35, 250, t2)); // t2's own vector arrives later
+    expect(h.textures[1].destroyed).toBe(true); // the manual-vector build is not shown as t2's automatic one
+    expect(h.textures[0].destroyed).toBe(false);
+    const rebuild = pending('l2.product').slice(builds.length);
+    expect(rebuild.map((r) => r.args.url)).toEqual(['https://x/KTLX1']);
+    expect(rebuild[0].args.params.stormMotion).toEqual({ speedKt: 35, fromDeg: 250 });
+    rebuild[0].resolve({ sweep: sweep(7) }); await flush();
+    const before = shown();
+    const t = timeline.t;
+    timeline.t = t2; layer.draw(ctx); timeline.t = t;
+    expect(shown()).toBe(before + 1);
+    expect(layer.stormMotion()).toEqual({ speedKt: 35, fromDeg: 250 }); // the shown volume's vector (manual tracks)
+
+    settings.set('settings.nexradStormMotionCustom', true); layer.reloadProducts(); await flush(); // manual option
+    expect(pending('l2.product').slice(-2).map((r) => r.args.params.stormMotion)).toEqual([MANUAL(), MANUAL()]);
     expect(layer.stormMotion()).toEqual(MANUAL());
   });
 
