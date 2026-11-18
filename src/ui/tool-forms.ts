@@ -12,6 +12,7 @@ import { closeDialog } from './dialogs';
 import { pool } from '../workers/pool';
 import { abortAll } from '../data/net';
 import { loadPref, savePref, isRecord } from '../app/persist';
+import { alertPoints, unlockAudio, requestNotify } from '../app/alerts';
 
 const act = (run: (el: HTMLElement) => void): BindingMap[string] => ({ kind: 'action', run });
 
@@ -239,7 +240,39 @@ export function toolFormBindings(app: App): Record<string, BindingMap> {
     'TFrmAdvisories.LV': { kind: 'list', items: () => [{ label: 'Event | AWIPS Code | Effective | Area | Expires | Ends', disabled: true }, ...app.zoneAlerts.items.map((a) => ({ label: a.row }))], selected: () => app.zoneAlerts.sel + 1, select: (i) => { app.zoneAlerts.sel = i - 1; } },
     'TFrmAdvisories.M': { kind: 'status', text: () => app.zoneAlerts.items[app.zoneAlerts.sel]?.text ?? app.zoneAlerts.status },
   };
-  return { TFrmDownloader: downloader, TFrmAdvisories: advisories, TFrmCustomRadar: custom, TFrmGOESLoader: goesLoader, TFrmTextAnnotation: annotations, TFrmSequencer: sequencer, TFrmLabelDBEdit: labelDbForm, TFrmGPSConnection: gpsForm, TComSetupFrm: setup, TComTrmSetForm: trm };
+  // Storm alerts: triggers, outputs and locations (GPS + named points added with a map click).
+  let pointSel = -1;
+  const imperial = () => settings.bool('config.distanceMeasureImperial');
+  const flag = (k: string) => ({ kind: 'custom' as const, get: () => settings.bool(`ext.config.alerts${k}`), set: (v: boolean) => settings.set(`ext.config.alerts${k}`, !!v) });
+  const stormAlerts: BindingMap = {
+    // Tones need an audio context and OS notifications a permission: both are obtained during the enabling click.
+    'TFrmStormAlerts.chkSound': { ...flag('Sound'), set: (v: boolean) => { if (v) unlockAudio(); settings.set('ext.config.alertsSound', !!v); } },
+    'TFrmStormAlerts.chkNotify': { ...flag('Notify'), set: (v: boolean) => {
+      settings.set('ext.config.alertsNotify', !!v);
+      if (v) void requestNotify().then((ok) => { if (!ok) { settings.set('ext.config.alertsNotify', false); app.toast('OS notifications are blocked or unsupported by the browser'); } });
+    } },
+    'TFrmStormAlerts.chkOn': { ...flag('On'), set: (v: boolean) => { if (v && settings.bool('ext.config.alertsSound')) unlockAudio(); settings.set('ext.config.alertsOn', !!v); if (v) void app.alerts.poll(); } },
+    'TFrmStormAlerts.btnTest': act(() => app.alerts.test()),
+    'TFrmStormAlerts.lblRadius': { kind: 'status', text: () => `Radius (${imperial() ? 'mi' : 'km'}):` },
+    'TFrmStormAlerts.seRadius': { kind: 'custom', get: () => Math.round((settings.num('ext.config.alertsRadiusKm') / (imperial() ? 1.609344 : 1)) * 10) / 10, set: (v: number) => settings.set('ext.config.alertsRadiusKm', Number(v) * (imperial() ? 1.609344 : 1)) },
+    'TFrmStormAlerts.lstPoints': { kind: 'list', items: () => alertPoints.list.map((p) => ({ label: `${p.name}  (${p.lat.toFixed(3)}, ${p.lon.toFixed(3)})` })), selected: () => pointSel,
+      select: (i, dbl) => { pointSel = i; const p = alertPoints.list[i]; if (p && dbl) app.renderer.camera.flyTo({ lon: p.lon, lat: p.lat }, settings.num('config.generalCameraFlyDuration')); } },
+    'TFrmStormAlerts.btnAdd': act(async () => {
+      const name = await app.prompt('New alert point', 'Name (then click the map to place it):', `Point ${alertPoints.list.length + 1}`);
+      if (name) app.pickOnMap('annotate', `Click the map to place "${name}"`, (ll) => { alertPoints.add({ name, lon: ll[0], lat: ll[1] }); pointSel = alertPoints.list.length - 1; void app.alerts.poll(); });
+    }),
+    'TFrmStormAlerts.btnRename': act(async () => {
+      const p = alertPoints.list[pointSel];
+      if (!p) { app.toast('Select an alert point first'); return; }
+      const name = await app.prompt('Rename alert point', 'Name:', p.name);
+      if (name) alertPoints.rename(pointSel, name);
+    }),
+    'TFrmStormAlerts.btnRemove': act(() => { if (pointSel >= 0) { alertPoints.remove(pointSel); pointSel = -1; } else app.toast('Select an alert point first'); }),
+    'TFrmStormAlerts.lblGps': { kind: 'status', text: () => { const f = app.gps.fix; return app.gps.connected && f.lat !== null ? `GPS ${f.lat.toFixed(3)}, ${f.lon!.toFixed(3)}` : 'GPS not connected (GIS ▸ Connect GPS…)'; } },
+    'TFrmStormAlerts.mmStatus': { kind: 'status', text: () => app.alerts.status.replace(/; /g, '\n') },
+    'TFrmStormAlerts.mmLast': { kind: 'status', text: () => (app.alerts.last.length ? app.alerts.last.join('\n') : 'No alerts yet.') },
+  };
+  return { TFrmDownloader: downloader, TFrmAdvisories: advisories, TFrmCustomRadar: custom, TFrmGOESLoader: goesLoader, TFrmTextAnnotation: annotations, TFrmSequencer: sequencer, TFrmLabelDBEdit: labelDbForm, TFrmGPSConnection: gpsForm, TComSetupFrm: setup, TComTrmSetForm: trm, TFrmStormAlerts: stormAlerts };
 }
 
 /** CRProds popup (custom radar product menu): item name → product index 0–7; the two headers are disabled. */

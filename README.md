@@ -46,6 +46,27 @@ Probe reads the displayed value under the pointer.
   with fire radiative power (`ABI-L2-FDC`, CONUS / Full Disk / Mesoscale) from GOES-19 or GOES-18. Cloud-top values
   are drawn for good-quality pixels only (product DQF 0); fires are points coloured by power, probe them for
   category, power, temperature and area.
+* MRMS → ProbSevere v3 (Options… for the dialog): NOAA's operational ProbSevere v3 storm objects (MRMS v12.3 and
+  later), outlined (optionally filled) and coloured by the selected probability (any severe, tornado, hail or wind),
+  with a minimum-probability filter, % labels, 30-minute motion arrows, opacity and line width. Files come about every
+  2 minutes; the file drawn is the newest one at or before the displayed time and at most 2.5 minutes older (the newest
+  file stays current for 6 minutes until its successor is due); otherwise nothing is drawn and the status says so.
+  Interact rollover and Probe show all four probabilities, MESH, maximum low-level azimuthal shear, motion, object ID,
+  valid time and a sparkline of the selected probability over the last hour for that object.
+* CWRV3 → Storm alerts…: alerts for the GPS position (when connected) and named alert points (Add… then click the
+  map; rename/remove in the dialog) within a radius in the distance units (miles or km). Triggers, each optional: a
+  new NWS Tornado, Severe Thunderstorm, Flash Flood, Snow Squall or Extreme Wind warning whose polygon contains a
+  location or lies within the radius; ProbSevere tornado/hail/wind probability at or above its threshold for an
+  object within the radius; a NEXRAD TVS within the radius (the selected site's Level 3 overlays, so storm tracks or
+  TVS icons must be on); and a storm (NEXRAD cell motion, or ProbSevere motion for objects above a minimum
+  probability) projected to come within the radius in N minutes. Each event alerts once per location and again only
+  on an upgrade (a warning update that adds tornado observed, a damage threat, PDS or an emergency; a ProbSevere
+  probability reaching a higher 10 % band). Only the newest live data is checked (active NWS alerts polled every
+  minute, the newest ProbSevere file when under 10 minutes old, NEXRAD products under 15 minutes old), never the
+  displayed loop frame, and never with fixture or benchmark data. Outputs, each optional: on-screen message, tones
+  synthesised in the browser (a different pattern per alert type; one tone per check, the most severe), speech and
+  OS notifications (permission is asked when the option is turned on). Test alert sends a sample through the enabled
+  outputs. Browsers start audio only after a click, so after a reload tones resume with the first click on the page.
 * F8 (or CWRV3 → Advanced → Performance panel) shows the global frame rate and times, GPU pass time where the adapter
   supports timestamp queries, total tracked texture memory and the JS heap (N/A where the browser does not report
   it), and one row per layer or owner with its decode jobs, texture uploads, live texture memory and status. Each layer's decode time excludes network, queueing and transfer, shown beside
@@ -76,7 +97,8 @@ the production build; Level 2 runs use the fixed KTLX archive volumes listed in 
 Every preference is saved in the browser's `localStorage` under the `cwrv3.` prefix. Each setting is its own record,
 `cwrv3.setting/<id>` holding the JSON value; the other user state (styles, text styles, style library, presets,
 viewpoints, scene and layer presets, layer order, RGB recipes, model configurations, palettes loaded from files,
-placefile and shapefile lists, road labels, dialog options, GPS serial options) uses one key per preference.
+placefile and shapefile lists, road labels, dialog options, GPS serial options, storm alert points) uses one key per
+preference.
 Large user files (shapefiles, custom background, logo, overlay image) are kept in Cache Storage
 (`cwrv3-user-files`); downloaded public data is cached in `cwrv3-data-v1`.
 
@@ -152,7 +174,8 @@ measurements.
 
 ## Data sources
 
-NOAA Open Data on AWS (MRMS, HRRR, RAP, GFS, NBM, GOES ABI/GLM including the ABI L2+ cloud-top height, cloud-top
+NOAA Open Data on AWS (MRMS including the ProbSevere v3 storm objects, with the NCEP MRMS real-time directory as a
+fallback, HRRR, RAP, GFS, NBM, GOES ABI/GLM including the ABI L2+ cloud-top height, cloud-top
 temperature and fire/hot spot products, NEXRAD Level 2 archive and real-time chunks), NWS
 TGFTP (Level 2/3, NDFD, text products), api.weather.gov, Aviation Weather Center, SPC, WPC, CPC, NHC, NDBC, USGS
 earthquakes, NASA FIRMS, NOAA water data, the US Drought Monitor (University of Nebraska–Lincoln), Iowa Environmental
@@ -183,7 +206,7 @@ Mesonet, NASA GIBS imagery and AWS Terrain Tiles. Bundled GIS layers come from N
 
 | Part | Lines |
 | --- | ---: |
-| TypeScript / JavaScript | 17,307 |
+| TypeScript / JavaScript | 17,842 |
 | WGSL shaders | 689 |
-| **Total functional** | **17,996** |
+| **Total functional** | **18,531** |
 | CSS (separate) | 174 |

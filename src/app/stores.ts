@@ -34,7 +34,7 @@ export const scenePresets = {
   remove(i: number) { this.list.splice(i, 1); return save('scenePresets', this.list); },
 };
 
-export const DEFAULT_ORDER = ['basemap', 'customBackground', 'surfaceFill', 'satellite', 'satelliteExtended', 'satelliteL2', 'goesManual', 'modelFill', 'ndfd', 'winter', 'miscDiff', 'meso', 'mrms', 'nationalRadar', 'nexrad', 'customRadar', 'modelFill2', 'severeParam', 'drought', 'cpc', 'wpc', 'spcOutlook', 'fireOutlook', 'surface', 'modelContours', 'modelVectors', 'gis', 'userShapes', 'roads', 'advisories', 'warnings', 'mesoDiscussions', 'tropical', 'rivers', 'fires', 'quakes', 'lsr', 'metar', 'marine', 'lightning', 'placefiles', 'radarSites', 'cities', 'annotations'];
+export const DEFAULT_ORDER = ['basemap', 'customBackground', 'surfaceFill', 'satellite', 'satelliteExtended', 'satelliteL2', 'goesManual', 'modelFill', 'ndfd', 'winter', 'miscDiff', 'meso', 'mrms', 'nationalRadar', 'nexrad', 'customRadar', 'modelFill2', 'severeParam', 'drought', 'cpc', 'wpc', 'spcOutlook', 'fireOutlook', 'surface', 'modelContours', 'modelVectors', 'gis', 'userShapes', 'roads', 'advisories', 'warnings', 'probSevere', 'mesoDiscussions', 'tropical', 'rivers', 'fires', 'quakes', 'lsr', 'metar', 'marine', 'lightning', 'placefiles', 'radarSites', 'cities', 'annotations'];
 export const layerOrder = {
   list: (() => { const l = load<string[]>('layerOrder', DEFAULT_ORDER); return [...l.filter((x) => DEFAULT_ORDER.includes(x)), ...DEFAULT_ORDER.filter((x) => !l.includes(x))]; })(),
   set(l: string[]) { this.list = l; return save('layerOrder', l); },

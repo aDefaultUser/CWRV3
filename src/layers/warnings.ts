@@ -43,7 +43,7 @@ export interface Alert {
 const API = 'https://api.weather.gov';
 const ms = (s: string | null | undefined) => (s ? Date.parse(s) : NaN);
 
-function parseAlert(f: any): Alert {
+export function parseAlert(f: any): Alert {
   const p = f.properties;
   const ev: string = p.event;
   const type = WARN_TYPES.find((w) => w.event === ev) ?? null;

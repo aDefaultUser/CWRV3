@@ -7,6 +7,7 @@ import type { BindingMap, Binding } from '../ui/form';
 import type { GlyphAtlas } from '../render/prims';
 import { settings } from '../settings/store';
 import { MrmsLayer, MRMS } from './mrms';
+import { ProbSevereLayer } from './probsevere';
 import { OutlookLayer, MdLayer, LsrLayer, AdvisoryLayer, familiesForDay, normalizeFamily, LSR_TYPES, advisoryStyles, saveAdvisoryStyles, eventColor } from './nwsspc';
 import type { MenuAction } from '../ui/dialogs';
 import { pool } from '../workers/pool';
@@ -39,11 +40,12 @@ export const custom = (get: () => unknown, set: (v: any) => void, items?: () => 
 
 function mrmsSection(c: SectionCtx): Section {
   const layer = new MrmsLayer(c.r);
+  const ps = new ProbSevereLayer(c.r, c.atlas);
   const cats = () => [...new Set(MRMS.map((p) => p.category))];
   const cur = () => layer.product();
   const inCat = () => MRMS.filter((p) => p.category === cur().category);
   return {
-    tab: 'MRMS', frame: 'TMRMSLayersFrame', layers: [layer], watch: ['layerState.MRMS', 'settings.mrms', 'ext.settings.mrms'],
+    tab: 'MRMS', frame: 'TMRMSLayersFrame', layers: [layer, ps], watch: ['layerState.MRMS', 'settings.mrms', 'ext.settings.mrms', 'ext.layerState.ProbSevere'],
     bindings: (app) => ({
       TMRMSLayersFrame: {
         'TMRMSLayersFrame.sSlider1': bool('layerState.MRMSOn'),
@@ -57,6 +59,13 @@ function mrmsSection(c: SectionCtx): Section {
         'TMRMSLayersFrame.mapMode0': toggle('settings.mrmsPrecipTyping'),
         'TMRMSLayersFrame.sBitBtn1': toggle('settings.mrmsTimelineConstrain'),
         'TMRMSLayersFrame.sLabelFX2': status(() => layer.statusText),
+        'TMRMSLayersFrame.psLabel': toggle('ext.layerState.ProbSevereOn'),
+        'TMRMSLayersFrame.psType': combo('ext.settings.probSevereType'),
+        'TMRMSLayersFrame.psOptions': act(() => app.dialog('TFrmProbSevere')),
+      },
+      TFrmProbSevere: {
+        'TFrmProbSevere.cbType': combo('ext.settings.probSevereType'),
+        'TFrmProbSevere.mmStatus': status(() => ps.statusText().replace(/; /g, '\n')),
       },
     }),
   };

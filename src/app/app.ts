@@ -51,6 +51,8 @@ import { XSECTIONS } from '../generated/products-expanded';
 import { FramePacer, fpsLimit } from './pacer';
 import { pref, prefObject, loadPref, savePref, isArray, isBool, onSaveFailure, describeStorageError, DATA_CACHE, storeUserFile, userFileUrl } from './persist';
 import { anisotropyOf } from '../render/mips';
+import { AlertCenter, fetchActiveWarnings, nexradStorms } from './alerts';
+import type { ProbSevereLayer } from '../sections/probsevere';
 
 type Tool = null | 'line' | 'path' | 'radial' | 'motion' | 'manualTrack' | 'light' | 'telestrate' | 'annotate' | 'labelPlace';
 
@@ -64,6 +66,7 @@ export class App {
   warnings!: WarningsLayer;
   lightning!: LightningLayer;
   annotations!: AnnotationLayer;
+  alerts!: AlertCenter;
   sites!: SiteLabelLayer;
   roads!: RoadsLayer;
   bindings!: Record<string, BindingMap>;
@@ -165,6 +168,7 @@ export class App {
       l.onStatus = () => this.updateStatusBar();
     }
     this.layers.set('basemap', this.tiles);
+    this.startAlerts();
     this.tiles.onChange = () => this.poke();
     this.nexrad.onTilts = () => this.renderTilts();
     this.applyCameraSettings(true);
@@ -209,6 +213,20 @@ export class App {
     if (settings.bool('config.playViewpointsAtStart')) this.toggleViewPlay();
     if (settings.bool('config.generalLaunchFullscreen')) document.documentElement.requestFullscreen?.().catch(() => {});
     requestAnimationFrame((t) => this.loop(t));
+  }
+
+  /** Storm alerts over the newest live data; ProbSevere keeps its newest file loaded while the alerts need it. */
+  private startAlerts() {
+    const ps = this.layers.get('probSevere') as ProbSevereLayer;
+    this.alerts = new AlertCenter({
+      warnings: fetchActiveWarnings, probSevere: () => ps.latestLive(), storms: () => nexradStorms(this.nexrad),
+      gps: () => { const f = this.gps.fix; return this.gps.connected && f.lat !== null && f.lon !== null ? { name: 'GPS position', lon: f.lon, lat: f.lat } : null; },
+      live: () => timeline.anchor === null && !this.nexrad.fixture,
+    });
+    const needPs = () => { ps.keepLatest = settings.bool('ext.config.alertsOn') && (settings.bool('ext.config.alertsProbSevere') || settings.bool('ext.config.alertsArrival')); };
+    needPs();
+    settings.on('ext.config.alerts', () => { needPs(); this.refreshLayer('probSevere'); });
+    this.alerts.start();
   }
 
   formControls(form: string): string[] { return formDef(form).controls.filter((c) => !c.nonvisual).map((c) => c.id.replace(/^ui\./, '')); }
