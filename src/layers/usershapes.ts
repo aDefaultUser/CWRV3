@@ -18,6 +18,7 @@ const CACHE = USER_FILES_CACHE;
 
 export class UserShapesLayer extends VectorLayer {
   readonly id = 'userShapes';
+  readonly archive = 'static';
   readonly title = 'User shapefiles';
   items: UserShape[] = [];
   selected = -1;

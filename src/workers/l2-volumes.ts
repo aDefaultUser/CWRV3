@@ -2,6 +2,7 @@
 // built on them (metadata, products, live composite, volume packs).
 import { Archive2Decoder, type L2Volume } from '../decode/archive2';
 import { bunzip2 } from '../decode/bzip2';
+import { gunzip } from '../decode/zip';
 import { fetchBytes } from '../data/net';
 import { recodeVolume, buildProduct, liveComposite, SweepCache, type BuilderSweep, type L2BuildParams, type L2ProductSweep, type VolumeMoment } from '../radar/l2products';
 import { buildVolumePack } from '../radar/volume-pack';
@@ -121,8 +122,10 @@ async function loadVolume(url: string, live: boolean, job: JobClock, chunks?: st
   const hit = volumes.get(url);
   if (hit && !live) { volumes.delete(url); volumes.set(url, hit); return hit; }
   const bytes = await fetchBytes(url, { cache: live ? 'none' : 'immutable' });
+  // Archive volumes before mid-2016 are whole-file gzip (…_V06.gz).
+  const plain = bytes[0] === 0x1f && bytes[1] === 0x8b ? await gunzip(bytes) : bytes;
   return job.time(() => {
-    let buf = bytes;
+    let buf = plain;
     // tgftp serves whole volumes compressed with bzip2 when the name ends in .bz2 but the content is still
     // an AR2V file with bzip2 records; a fully compressed file starts with "BZh".
     if (buf[0] === 0x42 && buf[1] === 0x5a && buf[2] === 0x68) buf = bunzip2(buf);

@@ -24,6 +24,7 @@ function toPolylines(ls: LS, style: (cls: number) => number): Polyline[] {
 
 export class GisLayer extends MapLayer {
   readonly id = 'gis';
+  readonly archive = 'static';
   readonly title = 'GIS boundaries';
   private lines: LineSet;
   ready = false;
@@ -77,6 +78,7 @@ const SHIELD_SCALE = 0.95; // CSS px per blank pixel
 
 export class RoadsLayer extends MapLayer {
   readonly id = 'roads';
+  readonly archive = 'static';
   readonly title = 'Roads';
   private lines: LineSet; private sprites: SpriteSet; private spriteAtlas: SpriteAtlas;
   private shieldList: Shield[] = [];
@@ -232,6 +234,7 @@ export function shieldFlash(ms: number): number {
 export interface City { n: string; lon: number; lat: number; pop: number; rank: number; lrank: number; cap: number; cc: string; fixed?: boolean; zoom?: 0 | 1 | 2 }
 export class CityLayer extends MapLayer {
   readonly id = 'cities';
+  readonly archive = 'static';
   readonly title = 'City labels';
   private text: TextSet;
   private base: City[] = [];
@@ -294,6 +297,7 @@ export class CityLayer extends MapLayer {
 // ------------------------------------------------------------------------------------------- radar sites
 export class SiteLabelLayer extends MapLayer {
   readonly id = 'radarSites';
+  readonly archive = 'static';
   readonly title = 'Radar site labels';
   private text: TextSet; private dots: PointSet;
   mouse: [number, number] | null = null;

@@ -11,7 +11,7 @@ import { pool } from '../workers/pool';
 import { XPRODUCTS } from '../generated/products-expanded';
 import type { ProjParams } from '../render/raster';
 import { ptypeAt, ptypeLabel, dominantTime, type PtypeState, type PtypeTex } from '../render/ptype';
-import type { LegendSpec } from '../layers/base';
+import { NOT_AVAILABLE, type LegendSpec } from '../layers/base';
 import { getPalette } from '../palettes/library';
 
 export const MRMS_BUCKET = 'https://noaa-mrms-pds.s3.amazonaws.com';
@@ -47,10 +47,13 @@ interface Loaded { tex: GPUTexture; proj: ProjParams; bounds: [number, number, n
 
 export class MrmsLayer extends GridLayer {
   readonly id = 'mrms';
+  readonly archive = 'resolver';
   readonly title = 'MRMS';
   private store: FrameStore<Loaded>;
   private index: { prod: number; at: number; entries: { t: number; key: string }[] } | null = null;
   private loadedProduct = -1;
+  /** Timeline key (mode, archive time) the index and frames belong to. */
+  private loadedKey = '';
   private readonly onPtype = () => { this.rd.invalidate(); this.sync(); };
   /** P-type state of the frame drawn last (legend/status text). */
   private ptypeShown: PtypeState<PtypeTex> | null = null;
@@ -100,22 +103,27 @@ export class MrmsLayer extends GridLayer {
   async refresh() {
     if (!this.enabled()) { this.statusText = 'Status: Awaiting activation...'; this.setStatus('off', ''); this.publishTimeline(); return; }
     const p = this.product();
-    if (p.index !== this.loadedProduct) { this.store.clear(); this.frames = []; this.loadedProduct = p.index; this.index = null; }
+    const key = timeline.key;
+    if (p.index !== this.loadedProduct || key !== this.loadedKey) { this.store.clear(); this.frames = []; this.loadedProduct = p.index; this.loadedKey = key; this.index = null; }
     // Re-read the index when it is older than the product's refresh minutes.
     if (!this.index || this.index.prod !== p.index || Date.now() - this.index.at > p.refreshMin * 60e3) {
       this.statusText = 'Status: Loading MRMS index...';
       this.setStatus('loading', this.statusText);
-      try { this.index = { prod: p.index, at: Date.now(), entries: await this.listIndex(p) }; }
-      catch (e) { this.statusText = 'Status: Error loading chosen product.'; this.setStatus('error', `MRMS index: ${(e as Error).message}`); return; }
+      let entries: { t: number; key: string }[];
+      try { entries = await this.listIndex(p); }
+      catch (e) { if (this.loadedProduct === p.index && this.loadedKey === key) { this.statusText = 'Status: Error loading chosen product.'; this.setStatus('error', `MRMS index: ${(e as Error).message}`); } return; }
+      if (this.loadedProduct !== p.index || this.loadedKey !== key) return; // product, mode or archive time changed while listing
+      this.index = { prod: p.index, at: Date.now(), entries };
     }
-    if (this.loadedProduct !== p.index) return; // product switched while listing (back-fill aborts)
-    this.store.setWanted(pickMrmsFrames(this.index.entries, mrmsFrameCount(), timeline.loopStart));
+    const wanted = pickMrmsFrames(this.index.entries.filter((e) => e.t <= timeline.loopEnd + 60e3), mrmsFrameCount(), timeline.loopStart);
+    this.store.setWanted(wanted);
+    if (!wanted.length && timeline.mode === 'archive') { this.statusText = `Status: ${p.label} is ${NOT_AVAILABLE}.`; this.setStatus('unavailable', NOT_AVAILABLE); this.publishTimeline(); return; }
     this.sync();
   }
 
   private async listIndex(p: MrmsProduct) {
     const dir = mrmsDir(p);
-    const days = new Set([timeline.loopStart, Date.now()].map((t) => new Date(t).toISOString().slice(0, 10).replace(/-/g, '')));
+    const days = new Set([timeline.loopStart, timeline.loopEnd].map((t) => new Date(t).toISOString().slice(0, 10).replace(/-/g, '')));
     const out: { t: number; key: string }[] = [];
     for (const day of days) {
       const { objects } = await listS3(MRMS_BUCKET, `CONUS/${dir}/${day}/`, { maxPages: 4 });

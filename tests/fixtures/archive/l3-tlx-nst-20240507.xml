@@ -1,0 +1,2 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Name>unidata-nexrad-level3</Name><Prefix>TLX_NST_2024_05_07_00_0</Prefix><IsTruncated>false</IsTruncated><Contents><Key>TLX_NST_2024_05_07_00_00_47</Key><Size>6428</Size></Contents><Contents><Key>TLX_NST_2024_05_07_00_07_09</Key><Size>6156</Size></Contents></ListBucketResult>

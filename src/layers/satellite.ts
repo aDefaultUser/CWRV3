@@ -2,7 +2,7 @@
 // NetCDF from the public NOAA bucket, single bands with band palettes and the two built-in multispectral
 // recipes of (True Color from bands 1/2/3, IR/VIS sandwich from bands 2/14).
 import type { DrawContext, Renderer } from '../render/renderer';
-import { MapLayer, type LegendSpec } from './base';
+import { MapLayer, NOT_AVAILABLE, type LegendSpec } from './base';
 import { FrameStore } from './frames';
 import { bracket, timeline } from '../app/timeline';
 import { settings } from '../settings/store';
@@ -29,7 +29,14 @@ export interface SatConfig { id: string; title: string; enabled: () => boolean; 
 const DOMAIN_PRODUCT = ['ABI-L2-CMIPC', 'ABI-L2-CMIPF', 'ABI-L2-CMIPM', 'ABI-L2-CMIPM'];
 const DOMAIN_TAG = ['CMIPC', 'CMIPF', 'CMIPM1', 'CMIPM2'];
 
+/** The satellite that held a GOES-R position at `t`: the settings name today's pair (goes19 East, goes18 West). */
+export function goesAt(platform: 'goes19' | 'goes18', t: number): string {
+  if (platform === 'goes19') return t < Date.UTC(2025, 3, 7, 15) ? 'goes16' : 'goes19';
+  return t < Date.UTC(2023, 0, 4, 18) ? 'goes17' : 'goes18';
+}
+
 export class SatelliteLayer extends MapLayer {
+  readonly archive = 'window';
   readonly id: string; readonly title: string;
   private stores = new Map<number, FrameStore<BandFrame>>();
   private draw_: RasterDraw;
@@ -64,14 +71,15 @@ export class SatelliteLayer extends MapLayer {
     const counts = bands.map((b) => this.store(b).counts());
     const ready = Math.min(...counts.map((c) => c.ready)), total = Math.max(...bands.map((b) => this.store(b).frames.length));
     const err = counts.reduce((s, c) => s + c.error, 0);
-    this.setStatus(ready ? 'ready' : err ? 'error' : 'loading', `${this.cfg.platform().toUpperCase()} ${DOMAIN_TAG[this.cfg.domain()]} band ${bands.join('+')}: ${ready}/${total}${err ? `, ${err} failed` : ''}`, { frames: ready });
+    this.setStatus(ready ? 'ready' : err ? 'error' : 'loading', `${goesAt(this.cfg.platform(), timeline.loopEnd).toUpperCase()} ${DOMAIN_TAG[this.cfg.domain()]} band ${bands.join('+')}: ${ready}/${total}${err ? `, ${err} failed` : ''}`, { frames: ready });
   }
 
   async refresh() {
     if (!this.enabled()) { this.setStatus('off', ''); return; }
-    const sig = `${this.cfg.platform()}|${this.cfg.domain()}|${this.cfg.bands().join(',')}|${settings.num('config.performanceMode')}`;
+    const sat = goesAt(this.cfg.platform(), timeline.loopEnd);
+    const sig = `${timeline.key}|${sat}|${this.cfg.domain()}|${this.cfg.bands().join(',')}|${settings.num('config.performanceMode')}`;
     if (sig !== this.sig) { for (const s of this.stores.values()) s.clear(); this.stores.clear(); this.sig = sig; }
-    const bucket = `https://noaa-${this.cfg.platform()}.s3.amazonaws.com`;
+    const bucket = `https://noaa-${sat}.s3.amazonaws.com`;
     const product = DOMAIN_PRODUCT[this.cfg.domain()], tag = DOMAIN_TAG[this.cfg.domain()];
     const hours: number[] = [];
     for (let t = Math.floor(timeline.loopStart / 3600e3) * 3600e3; t <= timeline.loopEnd; t += 3600e3) hours.push(t);
@@ -90,6 +98,8 @@ export class SatelliteLayer extends MapLayer {
         }
       }));
     } catch (e) { this.setStatus('error', `GOES listing failed: ${(e as Error).message}`); return; }
+    if (sig !== this.sig) return; // the selection, mode or archive time changed while listing
+    if (!files.length && timeline.mode === 'archive') { this.setStatus('unavailable', NOT_AVAILABLE); return; }
     for (const band of this.cfg.bands()) {
       let fs = thinGoesFiles(files.filter((f) => f.band === band && f.t >= timeline.loopStart - 10 * 60e3).sort((a, b) => a.t - b.t), this.cfg.domain());
       fs = fs.slice(-this.cfg.maxFrames());

@@ -1,5 +1,6 @@
 // Main timeline: loop window, frame stepping, playback with frame times, loop-time clamps and end delay.
 import { settings } from '../settings/store';
+import { loadPref, savePref } from './persist';
 
 export type TimelineListener = () => void;
 export type TimelineController = 'general' | 'nexrad-l2' | 'nexrad-l3' | 'mrms' | 'model';
@@ -9,6 +10,8 @@ export type TimelineController = 'general' | 'nexrad-l2' | 'nexrad-l3' | 'mrms' 
  * its "Wrap timeline to … loop" option is on; the Model timeline owns it only while selected (TimelineSelect = 1).
  */
 const OWNERS: Exclude<TimelineController, 'general'>[] = ['model', 'nexrad-l2', 'nexrad-l3', 'mrms'];
+
+const ARCHIVE_PREF = 'archiveTime';
 
 export class Timeline {
   /** Current map time (epoch ms). */
@@ -24,8 +27,12 @@ export class Timeline {
   frames: number[] = [];
   /** Owner of the frames and of the frame time (resolved from the offers; never set directly). */
   controller: TimelineController = 'general';
-  /** When set, "now" for the loop window (fixed archive data in benchmarks and recorded-reference playback). */
+  /** When set, "now" for the loop window: the archive time, or fixed data in benchmarks and recorded references. */
   anchor: number | null = null;
+  /** Archive (historical replay) time in epoch ms, or null in live mode; persisted, so a reload keeps the mode. */
+  archive: number | null = null;
+  /** Bumped whenever the mode or the archive time changes: a result requested under another epoch is discarded. */
+  epoch = 0;
   private listeners = new Set<TimelineListener>();
   private offers = new Map<TimelineController, number[]>();
   /** Start of the current end-of-loop hold (performance time), or null; its length is read when checked. */
@@ -37,12 +44,29 @@ export class Timeline {
   private live = true;
 
   constructor(private clock: () => number = () => performance.now()) {
+    this.archive = this.anchor = loadPref<number | null>(ARCHIVE_PREF, null, (v) => v === null || (typeof v === 'number' && Number.isFinite(v)));
     settings.on('ext.layerState.TimelineSelect', () => this.resolve());
     settings.on('ext.layerState.LoopLength', () => this.resolve());
   }
 
   on(fn: TimelineListener) { this.listeners.add(fn); return () => this.listeners.delete(fn); }
   emit() { for (const f of this.listeners) f(); }
+
+  get mode(): 'live' | 'archive' { return this.archive === null ? 'live' : 'archive'; }
+  /** "Now" for data selection: the anchor (archive time) or the wall clock. Fetch throttles keep the wall clock. */
+  now() { return this.anchor ?? Date.now(); }
+  /** Part of every cache and throttle key, so data loaded in one mode or archive time is never served in another. */
+  get key() { return this.archive === null ? 'live' : `archive@${this.archive}`; }
+  /** Enters archive mode at `t` (epoch ms), moves the archive time, or returns to live data (null). */
+  setArchive(t: number | null) {
+    if (t !== null && !Number.isFinite(t)) return;
+    if (t === this.archive) return;
+    this.archive = this.anchor = t;
+    this.epoch++;
+    savePref(ARCHIVE_PREF, t, 'archive time');
+    this.playing = false; this.live = true; this.resetPlayback();
+    this.resolve();
+  }
 
   get loopHours() { return settings.num('ext.layerState.LoopLength'); }
   /** True while following the newest available frame (Last). */
@@ -73,7 +97,7 @@ export class Timeline {
     let owner: TimelineController = 'general', own: number[] | null = null;
     for (const o of OWNERS) {
       const offered = this.offers.get(o);
-      if (!offered) continue;
+      if (!offered || (o === 'model' && this.archive !== null)) continue; // forecast valid times never own an archive replay
       const frames = o === 'model' ? (settings.num('ext.layerState.TimelineSelect') === 1 ? offered : [])
         : offered.filter((x) => x >= this.loopStart - 10 * 60e3 && x <= now + 60e3);
       if (frames.length) { owner = o; own = frames; break; }

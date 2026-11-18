@@ -8,6 +8,7 @@ import { settings } from '../settings/store';
 import { pool } from '../workers/pool';
 import { timeline } from '../app/timeline';
 import { XPRODUCTS } from '../generated/products-expanded';
+import { NOT_AVAILABLE } from '../layers/base';
 import { severeFrameTime } from './meso-math';
 
 export const MESO = XPRODUCTS.meso;
@@ -25,12 +26,13 @@ export function rapValidTimes(nowMs: number, startMs: number): number[] {
 interface Pending { valid: number; key: string }
 
 abstract class RapLayer extends GridLayer {
+  readonly archive = 'window';
   protected loading = new Set<string>();
   protected keys = new Set<string>();
   protected cache = new Map<string, GridFrame & { extra?: unknown }>();
   protected abstract frameKey(valid: number): string;
   protected abstract load(p: Pending): Promise<GridFrame & { extra?: unknown }>;
-  protected wanted(): Pending[] { return rapValidTimes(timeline.anchor ?? Date.now(), timeline.loopStart).map((v) => ({ valid: v, key: this.frameKey(v) })); }
+  protected wanted(): Pending[] { return rapValidTimes(timeline.now(), timeline.loopStart).map((v) => ({ valid: v, key: this.frameKey(v) })); }
   async refresh() {
     if (!this.enabled()) { this.setStatus('off', ''); return; }
     const want = this.wanted();
@@ -53,6 +55,7 @@ abstract class RapLayer extends GridLayer {
     await Promise.all([run(), run()]);
     const ready = want.filter((w) => this.cache.has(w.key)).length;
     if (!errors) this.setStatus(ready ? 'ready' : 'loading', `${this.title}: ${ready}/${want.length} frames`);
+    else if (!ready && timeline.mode === 'archive') this.setStatus('unavailable', NOT_AVAILABLE); // the RAP archive does not reach this time
   }
   protected publish() { this.frames = [...this.cache.values()].filter((f) => this.keys.has(f.key)).sort((a, b) => a.t - b.t); }
 }

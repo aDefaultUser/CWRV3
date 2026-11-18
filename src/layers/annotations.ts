@@ -15,6 +15,7 @@ export const fmtDist = (km: number) => (settings.bool('config.distanceMeasureImp
 
 export class AnnotationLayer extends MapLayer {
   readonly id = 'annotations';
+  readonly archive = 'static';
   readonly title = 'Annotations';
   private lines: LineSet; private pts: PointSet; private text: TextSet;
   measure: [number, number][] = [];

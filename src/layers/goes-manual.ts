@@ -25,6 +25,7 @@ export function fixedGridMismatch(a: FixedGrid, b: FixedGrid): string[] {
 
 export class GoesManualLayer extends MapLayer {
   readonly id = 'goesManual';
+  readonly archive = 'static';
   readonly title = 'GOES-R manual files';
   frames: ManualFrame[] = [];
   frame = 0;

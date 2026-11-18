@@ -23,6 +23,7 @@ export function worldFileBounds(text: string, w: number, h: number): [number, nu
 
 export class CustomBackgroundLayer extends MapLayer {
   readonly id = 'customBackground';
+  readonly archive = 'static';
   readonly title = 'Custom background';
   private tex: GPUTexture | null = null;
   private bounds: [number, number, number, number] | null = null;

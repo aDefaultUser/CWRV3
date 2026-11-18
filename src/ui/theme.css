@@ -97,6 +97,7 @@ button, select, input { font: inherit; color: inherit; }
 /* ---- status bar ---- */
 #statusbar { display: flex; background: linear-gradient(#262629, #19191c); border-top: 1px solid var(--edge); align-items: stretch; }
 #statusbar > div { flex: 0 1 auto; min-width: 0; border-right: 1px solid var(--edge); padding: 5px 5px 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; color: var(--textDim); }
+#statusbar > div.archive { flex: 0 0 auto; padding: 5px 9px 0; background: #e8a51e; color: #17130a; font-weight: 600; cursor: pointer; }
 #statusbar .gauge { flex: 0 1 190px; min-width: 60px; margin: 3px 6px; width: 190px; height: 18px; border: 1px solid #5a5a5d; background: #141417; padding: 0; }
 #statusbar .gauge > div { height: 100%; width: 0; background: linear-gradient(#3fd27a, #1e8a4b); }
 

@@ -5,6 +5,8 @@
 import { fetchJson } from '../data/net';
 import { gcDistanceKm } from '../gis/geodesy';
 import { listL3 } from '../radar/sources';
+import { l3ArchiveCode, listL3Archive } from '../radar/archive';
+import { timeline } from '../app/timeline';
 import { pool } from '../workers/pool';
 import { windComponents, standardPressure, KT, type Level } from './sounding-math';
 
@@ -143,9 +145,12 @@ export function parseVad(pages: string[][]): Level[] {
 
 /** The newest VAD wind profile of a radar valid at or before `timeMs` (up to three products tried, newest first). */
 export async function vadSounding(site: { id: string; name: string; lat: number; lon: number }, lon: number, lat: number, timeMs: number): Promise<Sounding> {
-  const files = (await listL3(site.id, '48vwp')).filter((f) => f.t <= timeMs + 10 * 60e3).slice(-3).reverse();
+  // An archive time reads the Level 3 archive (files named by volume time); live reads the rotating TGFTP files.
+  const archive = timeline.mode === 'archive';
+  const listed = archive ? await listL3Archive(site.id, l3ArchiveCode('48vwp')!, timeMs - 3600e3, timeMs) : await listL3(site.id, '48vwp');
+  const files = listed.filter((f) => f.t <= timeMs + 10 * 60e3).slice(-3).reverse();
   for (const f of files) {
-    const p = await pool.for('sounding').run<{ volumeTimeMs: number; pages: string[][] }>('l3', { url: f.url, live: true });
+    const p = await pool.for('sounding').run<{ volumeTimeMs: number; pages: string[][] }>('l3', { url: f.url, live: !archive });
     if (!(p.volumeTimeMs <= timeMs)) continue;
     const levels = parseVad(p.pages);
     if (levels.length >= 2) return { source: 'VAD', station: site.id, name: site.name, lat: site.lat, lon: site.lon, validMs: p.volumeTimeMs, runMs: null, fhour: null, distKm: gcDistanceKm(lon, lat, site.lon, site.lat), url: f.url, levels };
