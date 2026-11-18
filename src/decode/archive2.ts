@@ -1,5 +1,8 @@
-// NEXRAD Archive II decoder (ROC ICD 2620010 file format; ICD 2620002 message 31 / message 5 layouts).
+// NEXRAD Archive II decoder (ROC ICD 2620010 file format; ICD 2620002 message 31 / message 5 layouts). Volumes from
+// before message 31 (until about 2008) hold message 1 radials; that layout follows ICD 2620002 as read by Py-ART
+// (pyart/io/nexrad_level2.py, MSG_1) and MetPy (metpy/io/nexrad.py, Level2File.msg1_fmt).
 import { bunzip2 } from './bzip2';
+import { RADAR_SITES } from '../generated/radar-sites';
 
 export const MOMENT_NAMES = ['REF', 'VEL', 'SW', 'ZDR', 'PHI', 'RHO', 'CFP'] as const;
 export type MomentName = (typeof MOMENT_NAMES)[number];
@@ -38,7 +41,7 @@ export interface L2Sweep {
   /** RDA elevation number (1-based); split cuts and SAILS/MRLE rescans are separate sweeps. */
   elevationNumber: number;
   elevation: number; // mean measured elevation, deg
-  nominalElevation: number | null; // from VCP when available
+  nominalElevation: number | null; // from VCP when available (inferred for message 1 volumes without one)
   cut: VcpCut | null;
   azimuthSpacing: number; // deg
   nyquist: number | null; // m/s
@@ -64,11 +67,25 @@ export interface L2Volume {
 
 const dateMs = (mjd: number, ms: number) => (mjd - 1) * 86400000 + ms;
 
+/**
+ * Cuts (angle/waveform) of the VCPs flown before message 5 was archived, as the message 5 records of 2007–08 volumes
+ * give them.
+ */
+const LEGACY_VCPS: Record<number, string> = {
+  11: '0.4834/1 0.4834/2 1.4502/1 1.4502/2 2.4170/4 3.3838/4 4.3066/4 5.3174/4 6.1963/4 7.5146/3 8.7012/3 10.0195/3 11.9971/3 14.0186/3 16.6992/3 19.5117/3',
+  12: '0.4834/1 0.4834/2 0.8789/1 0.8789/2 1.3184/1 1.3184/2 1.8018/4 2.4170/4 3.1201/4 3.9990/4 5.0977/4 6.4160/4 7.9980/3 10.0195/3 12.4805/3 15.6006/3 19.5117/3',
+  21: '0.4834/1 0.4834/2 1.4502/1 1.4502/2 2.4170/4 3.3838/4 4.3066/4 6.0205/4 9.8877/3 14.5898/3 19.5117/3',
+  32: '0.4834/1 0.4834/2 1.4941/1 1.4941/2 2.5049/4 3.5156/4 4.4824/4',
+  121: '0.4834/1 0.4834/2 0.4834/2 0.4834/2 1.4502/1 1.4502/2 1.4502/2 1.4502/2 2.4170/4 2.4170/3 2.4170/3 3.3838/4 3.3838/3 3.3838/3 4.3066/4 4.3066/3 6.0205/4 9.8877/3 14.5898/3 19.5117/3',
+};
+
 interface RadialAcc {
   azimuths: number[]; elevations: number[]; times: number[];
   azSpacing: number; nyquist: number | null; unambKm: number | null;
   moments: Map<MomentName, { gates: number; first: number; spacing: number; scale: number; offset: number; word: 8 | 16; rows: (Uint8Array | Uint16Array | null)[] }>;
   complete: boolean;
+  /** Azimuth turned since the first radial (message 1 sweeps, which overrun one revolution). */
+  turned: number;
   /** The sweep built from these radials; cleared when a radial (or the VCP) arrives. */
   built: L2Sweep | null;
 }
@@ -81,15 +98,21 @@ export class Archive2Decoder {
   heightM: number | null = null;
   vcpNumber: number | null = null;
   vcp: VcpInfo | null = null;
+  /** Message 1 radials seen: the volume has no site metadata and may have no VCP record. */
+  private legacy = false;
   private sweeps = new Map<number, RadialAcc>();
+
+  /** `requestedSite`: the radar the file was requested for, used when the header leaves the site blank (ARCHIVE2). */
+  constructor(private requestedSite = '') {}
 
   /** Feeds a whole Archive II file or a chunk (S chunks carry the 24-byte volume header). */
   feed(buf: Uint8Array): void {
     let p = 0;
-    if (buf.length >= 24 && buf[0] === 0x41 && buf[1] === 0x52 && buf[2] === 0x32 && buf[3] === 0x56) { // "AR2V"
+    const head = String.fromCharCode(...buf.subarray(0, 8));
+    if (buf.length >= 24 && (head.startsWith('AR2V') || head === 'ARCHIVE2')) {
       const dv = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
       this.volumeTimeMs = dateMs(dv.getUint32(12), dv.getUint32(16));
-      this.site = String.fromCharCode(...buf.subarray(20, 24)).trim();
+      this.site = String.fromCharCode(...buf.subarray(20, 24)).replace(/[^A-Z0-9]/g, '');
       p = 24;
     }
     const dv = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
@@ -120,6 +143,7 @@ export class Archive2Decoder {
         p += 12 + sizeHw * 2;
         continue;
       }
+      if (type === 1 && sizeHw > 50 && p + 28 + 100 <= d.length) this.msg1(new DataView(d.buffer, d.byteOffset + p + 28, Math.min(sizeHw * 2 - 16, 2404, d.length - p - 28)));
       if (type === 5 && sizeHw > 0 && p + 28 + 22 <= d.length) this.msg5(new DataView(d.buffer, d.byteOffset + p + 28, Math.min(d.length - p - 28, 2404)));
       p += 2432;
     }
@@ -150,6 +174,56 @@ export class Archive2Decoder {
     for (const a of this.sweeps.values()) a.built = null; // cut and nominal elevation come from the VCP
   }
 
+  /**
+   * Message 1 ("digital radar data"): one 1° radial with reflectivity (1 km gates) and/or velocity and spectrum width
+   * (250 m gates) at 0.5 dB / 0.5 or 1 m/s steps; split cuts are a reflectivity-only and a Doppler-only elevation.
+   */
+  private msg1(v: DataView) {
+    const u16 = (o: number) => v.getUint16(o), angle = (o: number) => (u16(o) * 180) / 32768;
+    const az = angle(8), el = ((angle(14) + 180) % 360) - 180, elNum = u16(16), status = u16(12) & 0xf;
+    if (!(el >= -10 && el <= 90) || !(az < 360) || elNum < 1 || elNum > 32) return;
+    this.legacy = true;
+    const vcp = u16(44);
+    if (this.vcpNumber === null && vcp >= 1 && vcp <= 999) this.vcpNumber = vcp;
+    let acc = this.sweeps.get(elNum);
+    if (!acc) {
+      acc = { azimuths: [], elevations: [], times: [], azSpacing: 1, nyquist: null, unambKm: null, moments: new Map(), complete: false, turned: 0, built: null };
+      this.sweeps.set(elNum, acc);
+    }
+    acc.built = null;
+    if (status === 2 || status === 4) acc.complete = true;
+    // Legacy sweeps run a few radials past one revolution; the overlap repeats the first azimuths and is dropped, so
+    // a sweep is one turn like a message 31 sweep.
+    const n = acc.azimuths.length;
+    if (n) {
+      const step = (((az - acc.azimuths[n - 1]) % 360) + 540) % 360 - 180;
+      if (acc.turned + step >= 359.5) return;
+      acc.turned += step;
+    }
+    acc.azimuths.push(az); acc.elevations.push(el); acc.times.push(dateMs(u16(4), v.getUint32(0)));
+    const doppler = u16(28) > 0;
+    if (doppler) {
+      const nyq = v.getInt16(60) / 100;
+      if (nyq > 0) acc.nyquist = nyq;
+    }
+    if (u16(6)) acc.unambKm = v.getInt16(6) / 10;
+    const add = (name: MomentName, ptr: number, gates: number, firstM: number, spacingM: number, scale: number, offset: number) => {
+      // Legacy RDA Doppler ranges start before the antenna (first gate at -375 m): gates centred behind it are skipped.
+      const skip = firstM < 0 ? Math.ceil(-firstM / spacingM) : 0;
+      if (!ptr || gates <= skip || !spacingM || ptr + gates > v.byteLength) return;
+      let m = acc.moments.get(name);
+      if (!m) { m = { gates: 0, first: firstM + skip * spacingM, spacing: spacingM, scale, offset, word: 8, rows: [] }; acc.moments.set(name, m); }
+      m.gates = Math.max(m.gates, gates - skip);
+      m.rows[n] = new Uint8Array(v.buffer, v.byteOffset + ptr + skip, gates - skip).slice();
+    };
+    add('REF', u16(36), u16(26), v.getInt16(18), u16(22), 2, 66);
+    if (doppler) {
+      const first = v.getInt16(20), spacing = u16(24);
+      add('VEL', u16(38), u16(28), first, spacing, u16(42) === 4 ? 1 : 2, 129);
+      add('SW', u16(40), u16(28), first, spacing, 2, 129);
+    }
+  }
+
   private msg31(v: DataView) {
     const site = String.fromCharCode(v.getUint8(0), v.getUint8(1), v.getUint8(2), v.getUint8(3));
     if (!this.site) this.site = site.trim();
@@ -164,7 +238,7 @@ export class Archive2Decoder {
     if (!(el >= -10 && el <= 90) || !(az >= 0 && az <= 360) || elNum < 1 || elNum > 32) return;
     let acc = this.sweeps.get(elNum);
     if (!acc) {
-      acc = { azimuths: [], elevations: [], times: [], azSpacing: azSpacingCode === 1 ? 0.5 : 1, nyquist: null, unambKm: null, moments: new Map(), complete: false, built: null };
+      acc = { azimuths: [], elevations: [], times: [], azSpacing: azSpacingCode === 1 ? 0.5 : 1, nyquist: null, unambKm: null, moments: new Map(), complete: false, turned: 0, built: null };
       this.sweeps.set(elNum, acc);
     }
     acc.built = null;
@@ -217,7 +291,35 @@ export class Archive2Decoder {
   volume(): L2Volume {
     const nums = [...this.sweeps.keys()].sort((a, b) => a - b);
     const sweeps = nums.map((n) => { const a = this.sweeps.get(n)!; return (a.built ??= this.buildSweep(n, a)); });
-    return { site: this.site, volumeTimeMs: this.volumeTimeMs, lat: this.lat, lon: this.lon, heightM: this.heightM, vcpNumber: this.vcpNumber ?? this.vcp?.pattern ?? null, vcp: this.vcp, sweeps };
+    const site = this.site || this.requestedSite;
+    // Message 1 volumes carry no site location: the radar site table supplies it (ground elevation for the height).
+    const known = this.lat === null ? RADAR_SITES.find((s) => s.id === site) : undefined;
+    return {
+      site, volumeTimeMs: this.volumeTimeMs, lat: this.lat ?? known?.lat ?? null, lon: this.lon ?? known?.lon ?? null,
+      heightM: this.heightM ?? (known ? Math.round(known.elevFt * 0.3048) : null), vcpNumber: this.vcpNumber ?? this.vcp?.pattern ?? null, vcp: this.vcp, sweeps,
+    };
+  }
+
+  /**
+   * The cut of a message 1 sweep when the volume has no VCP record (archived only from about 2005): the cut of the
+   * VCP's definition when the sweep's angle and moments agree with it, otherwise inferred from the moments (a
+   * reflectivity-only sweep is the surveillance half of a split cut, a Doppler-only sweep right after one its Doppler
+   * half at the same angle, anything else a batch cut at its most frequent measured angle).
+   */
+  private legacyCut(n: number, a: RadialAcc): VcpCut {
+    const angle = (x: RadialAcc) => {
+      const count = new Map<number, number>();
+      for (const e of x.elevations) count.set(e, (count.get(e) ?? 0) + 1);
+      return [...count].reduce((best, c) => (c[1] > best[1] ? c : best), [0, 0])[0];
+    };
+    // As waveforms: 1 surveillance only, 2 Doppler only (halves of a split cut), 3 both (batch, contiguous Doppler).
+    const kind = (x: RadialAcc | undefined) => (!x ? 0 : x.moments.has('VEL') ? (x.moments.has('REF') ? 3 : 2) : 1);
+    const cut = (elevation: number, waveform: number): VcpCut => ({ elevation, waveform, superRes: 0, sails: false, sailsSeq: 0, mrle: false, mrleSeq: 0, mpda: false, baseTilt: false });
+    const def = LEGACY_VCPS[this.vcpNumber ?? 0]?.split(' ')[n - 1]?.split('/').map(Number);
+    if (def && Math.abs(angle(a) - def[0]) < 0.25 && kind(a) === Math.min(def[1], 3)) return cut(def[0], def[1]);
+    const prev = this.sweeps.get(n - 1);
+    const pair = kind(a) === 2 && kind(prev) === 1 && Math.abs(angle(a) - angle(prev!)) < 0.5;
+    return cut(Math.round(angle(pair ? prev! : a) * 100) / 100, pair ? 2 : kind(a) === 1 ? 1 : 4);
   }
 
   private buildSweep(n: number, a: RadialAcc): L2Sweep {
@@ -228,7 +330,7 @@ export class Archive2Decoder {
       for (let r = 0; r < radials; r++) { const row = m.rows[r]; if (row) raw.set(row, r * m.gates); }
       moments[name] = { name, gates: m.gates, firstGateM: m.first, gateSpacingM: m.spacing, scale: m.scale, offset: m.offset, wordSize: m.word, raw };
     }
-    const cut = this.vcp?.cuts[n - 1] ?? null;
+    const cut = this.vcp?.cuts[n - 1] ?? (this.legacy && !this.vcp ? this.legacyCut(n, a) : null);
     const elevations = Float32Array.from(a.elevations);
     return {
       elevationNumber: n, elevation: elevations.reduce((s, x) => s + x, 0) / Math.max(1, radials), nominalElevation: cut?.elevation ?? null,
@@ -238,8 +340,8 @@ export class Archive2Decoder {
   }
 }
 
-export function decodeArchive2(buf: Uint8Array): L2Volume {
-  const d = new Archive2Decoder();
+export function decodeArchive2(buf: Uint8Array, requestedSite = ''): L2Volume {
+  const d = new Archive2Decoder(requestedSite);
   d.feed(buf);
   return d.volume();
 }

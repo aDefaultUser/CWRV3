@@ -45,7 +45,8 @@ export async function listL2(site: string, source: 2 | 3 | 4, custom: string, si
     const out: L2File[] = [];
     for (const d of days) {
       const { objects } = await listS3(AWS_L2, `${d}/${S}/`, { maxPages: 2 });
-      for (const o of objects) if (!/_MDM$/.test(o.key) && /_V\d\d(\.gz)?$/.test(o.key)) out.push({ t: nameTime(o.key), url: `${AWS_L2}/${o.key}`, live: false, name: o.key.split('/').pop()! });
+      // Volumes before 2008 have no version suffix ("KTLX19990503_233134.gz").
+      for (const o of objects) if (/\/[A-Z]{4}\d{8}_\d{6}(_V\d\d)?(\.gz)?$/.test(o.key)) out.push({ t: nameTime(o.key), url: `${AWS_L2}/${o.key}`, live: false, name: o.key.split('/').pop()! });
     }
     return out.filter((f) => f.t >= sinceMs - 10 * 60e3 && f.t <= untilMs).sort((a, b) => a.t - b.t);
   }

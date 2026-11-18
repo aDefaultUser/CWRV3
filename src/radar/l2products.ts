@@ -52,7 +52,11 @@ export function recodeSweep(s: L2Sweep): BuilderSweep {
     }
     out.ref = { ...km(m.REF), codes };
   }
-  if (m.VEL && m.VEL.wordSize === 8) out.vel = { ...km(m.VEL), codes: m.VEL.raw as Uint8Array };
+  if (m.VEL && m.VEL.wordSize === 8) {
+    // Builder codes are 0.5 m/s steps; 1 m/s velocity (a legacy resolution option) is requantised to them.
+    const v = m.VEL, raw = v.raw as Uint8Array;
+    out.vel = { ...km(v), codes: v.scale === 2 && v.offset === 129 ? raw : raw.map((r) => (r <= 1 ? r : clamp(roundEven(((r - v.offset) / v.scale) * 2 + 129), 2, 255))) };
+  }
   if (m.SW && m.SW.wordSize === 8) out.sw = { ...km(m.SW), codes: m.SW.raw as Uint8Array };
   if (m.RHO && m.RHO.wordSize === 8) out.rho = { ...km(m.RHO), codes: m.RHO.raw as Uint8Array };
   if (m.ZDR) {
@@ -572,6 +576,8 @@ export const COLUMN_RANGE: Record<17 | 18 | 19, { low: number; high: number }> =
 export function volumetric(product: 11 | 12 | 13 | 14 | 15 | 16 | 17 | 18 | 19, sweeps: BuilderSweep[], p: VolumetricParams, cache = new SweepCache()): VolumetricGrid | null {
   const kept = volumetricSweeps(sweeps);
   if (kept.length < 3) return null;
+  // ZDR and KDP columns need dual-pol moments (volumes before 2011–13 have none).
+  if ((product === 17 || product === 18) && !kept.some((s) => s.rho && (product === 17 ? s.zdr ?? s.zdr16 : s.phi))) return null;
   const range = refGrid(kept), { gates, firstKm, gateKm } = range;
   const ref = stackSweeps(kept, 'REF', range, cache);
   const dbz = (k: number, b: number, g: number) => { const c = ref.code(k, b, g); return c ? c - 31 : NaN; };

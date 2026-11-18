@@ -167,6 +167,14 @@ describe('archive listings', () => {
       ['KTLX20130520_202058_V06.gz', utc('2013-05-20T20:20:58Z')], ['KTLX20130520_202511_V06.gz', utc('2013-05-20T20:25:11Z')], ['KTLX20130520_202928_V06.gz', utc('2013-05-20T20:29:28Z')]]);
   });
 
+  it('accepts the unversioned volumes before 2008', async () => {
+    stubS3({ '1999/05/03/KTLX/': fx('l2-ktlx-19990503.xml') });
+    const until = utc('1999-05-03T23:35:00Z');
+    expect((await listL2('KTLX', 3, '', until - 1200e3, until)).map((f) => [f.name, f.t])).toEqual([
+      ['KTLX19990503_231633.gz', utc('1999-05-03T23:16:33Z')], ['KTLX19990503_232134.gz', utc('1999-05-03T23:21:34Z')],
+      ['KTLX19990503_232635.gz', utc('1999-05-03T23:26:35Z')], ['KTLX19990503_233134.gz', utc('1999-05-03T23:31:34Z')]]);
+  });
+
   it('parses Level 3 archive keys and lists by day prefix', async () => {
     expect(parseL3Key('TLX_N0B_2024_05_06_22_03_20')).toEqual({ site: 'TLX', code: 'N0B', t: utc('2024-05-06T22:03:20Z') });
     expect(parseL3Key('TLX_N0B_2024_05_06_22_03')).toBeNull();
