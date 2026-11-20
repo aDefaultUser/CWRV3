@@ -18,7 +18,7 @@ import { SurfaceLayer, SurfaceFillLayer } from '../layers/surface';
 import { NexradLayer } from '../layers/nexrad';
 import { AnnotationLayer, gcDistanceKm, bearingDeg } from '../layers/annotations';
 import { cityImpacts, frontLine, impactText, type CityPt } from './tracks';
-import { formatDateTime, zoneClock } from '../util/datefmt';
+import { formatDateTime, zoneClock, dateFormat } from '../util/datefmt';
 import type { MapLayer, LegendSpec } from '../layers/base';
 import { renderForm, formMenus, formDef, keyboardClick, type BindingMap, type MenuNode } from '../ui/form';
 import { openDialog, closeDialog, isOpen, showMenu, toast as toastFn, promptBox, drag, refreshDialogs, type MenuAction } from '../ui/dialogs';
@@ -212,8 +212,8 @@ export class App {
     onStyleChange(() => { for (const l of this.layers.values()) (l as { styleChanged?: () => void }).styleChanged?.(); this.poke(); });
     this.wireInput();
     this.wireKeys();
-    await Promise.all([gis.load(), this.roads.load(), cities.load(), this.customBg.load()]);
-    this.restoreRoadDownloads();
+    // The prebuilt map assets load while the first frames draw and the data requests go out; each layer draws once ready.
+    const staticAssets = Promise.all([gis.load(), this.roads.load(), cities.load(), this.customBg.load()]);
     void this.restoreUserImages();
     this.roads.rebuildLabels();
     timeline.refreshWindow();
@@ -233,6 +233,8 @@ export class App {
     if (settings.bool('config.playViewpointsAtStart')) this.toggleViewPlay();
     if (settings.bool('config.generalLaunchFullscreen')) document.documentElement.requestFullscreen?.().catch(() => {});
     requestAnimationFrame((t) => this.loop(t));
+    await staticAssets;
+    this.restoreRoadDownloads(); // added to the loaded primary roads
   }
 
   /** Storm alerts over the newest live data; ProbSevere keeps its newest file loaded while the alerts need it. */
@@ -1520,7 +1522,7 @@ export class App {
   }
 
   /** City ETA list (manual track, tracking mode) and the storm-cell info box with SCIT severity colours. */
-  private updateTrackHud() {
+  private updateTrackHud(lh: number) {
     const h = this.hud;
     const mt = this.annotations.manualTrack?.done ? this.annotations.manualTrack : null;
     const cell = this.trackedCell();
@@ -1539,7 +1541,6 @@ export class App {
     rows = rows.slice(0, Math.max(0, settings.num('settings.nexradManualTracksImpactedCitiesMaxCount')));
     const listText = rows.length ? [title, ...rows.map((r) => `${r.name.padEnd(18)} ${impactText(r.at, now, countdown, fmt)}`)].join('\n') : '';
     const key = `${listText}|${cell?.c.id}|${this.cellInfoMore}|${cell ? JSON.stringify(cell.c) : ''}`;
-    const lh = h.legend.clientHeight;
     for (const [box, k] of [[h.cityList, 'config.guiCityListTextPosition'], [h.cell, 'config.guiStormCellInfoTextPosition']] as const) {
       const p = settings.arr<number>(k), left = `${p[0]}px`, top = `${p[1] + lh}px`;
       if (box.style.left !== left || box.style.top !== top) { box.style.left = left; box.style.top = top; }
@@ -1577,7 +1578,10 @@ export class App {
 
   private updateHud(now: number) {
     const h = this.hud;
-    this.updateTrackHud();
+    // Layout values are read before this frame's style writes, so reading them does not force a layout.
+    const legendH = h.legend.clientHeight, overlayW = h.legend.parentElement!.clientWidth, overlayH = h.legend.parentElement!.clientHeight;
+    const legendW = h.panes.map((p) => p.legend.clientWidth);
+    this.updateTrackHud(legendH);
     if (this.roads.labels.length || this.roadLabelEls.length) this.updateRoadLabels();
     // Timestamp label.
     // Settings → map timestamp and the sidebar Timestamps → Main timeline toggle both gate the label.
@@ -1590,19 +1594,19 @@ export class App {
       const d = new Date(zc.ms), asUtc = !local || zc.utc;
       // Built-in format, or the user's date-time format (Settings → Logo/Timestamps); the zone abbreviation is optional.
       const fmt = settings.str('ext.config.dateTimeFormat').trim(), zone = settings.bool('ext.config.timestampShowZone');
-      const zoneName = zone ? (zc.zone ?? new Intl.DateTimeFormat('en-US', { timeZone: asUtc ? 'UTC' : undefined, timeZoneName: 'short' }).formatToParts(d).find((p) => p.type === 'timeZoneName')?.value ?? '') : '';
+      const zoneName = zone ? (zc.zone ?? dateFormat('en-US', { timeZone: asUtc ? 'UTC' : undefined, timeZoneName: 'short' }).formatToParts(d).find((p) => p.type === 'timeZoneName')?.value ?? '') : '';
       // Display mode (TimestampLabel/DisplayMode): 0 date and time, 1 time only, 2 date and time with the data age.
       const mode = settings.num('config.labelIncTimestamp');
       const tz = asUtc ? 'UTC' : undefined;
       let text = fmt
         ? formatDateTime(d.getTime(), fmt, asUtc)
         : mode === 1
-          ? new Intl.DateTimeFormat('en-US', { timeZone: tz, hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: true }).format(d)
-          : new Intl.DateTimeFormat('en-US', { timeZone: tz, month: '2-digit', day: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: true }).format(d).replace(',', '');
+          ? dateFormat('en-US', { timeZone: tz, hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: true }).format(d)
+          : dateFormat('en-US', { timeZone: tz, month: '2-digit', day: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: true }).format(d).replace(',', '');
       if (mode === 2 && timeline.mode === 'live') { const age = Math.round((Date.now() - timeline.t) / 60e3); text += age > 0 ? ` (${age} min ago)` : ' (now)'; }
-      h.time.textContent = zoneName ? `${text} ${zoneName}` : text;
+      const label = zoneName ? `${text} ${zoneName}` : text;
+      if (h.time.textContent !== label) h.time.textContent = label;
       const off = settings.arr<number>('config.labelOffset');
-      const legendH = h.legend.clientHeight;
       h.time.style.left = `${10 + off[0]}px`; h.time.style.top = `${(settings.bool('config.labelFasten') ? 8 : legendH + 8) + off[1]}px`;
       h.time.style.zIndex = settings.bool('config.labelOnTop') ? '5' : '1';
     }
@@ -1612,7 +1616,7 @@ export class App {
     if (ml) { h.maplabel.style.left = h.time.style.left; h.maplabel.style.top = `${(parseFloat(h.time.style.top) || 8) + 30}px`; }
     // Severe watch text box at General/SevereWatchBoxPosition: watches in effect at map time.
     const wl = this.warnings.watchesAt(timeline.t);
-    const wt = wl.length ? wl.slice(0, 6).map((a) => `${a.event}${a.etn ? ` #${Number(a.etn)}` : ''} until ${new Date(a.ends).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}`).join('\n') + (wl.length > 6 ? `\n+${wl.length - 6} more` : '') : '';
+    const wt = wl.length ? wl.slice(0, 6).map((a) => `${a.event}${a.etn ? ` #${Number(a.etn)}` : ''} until ${dateFormat([], { hour: 'numeric', minute: '2-digit' }).format(a.ends)}`).join('\n') + (wl.length > 6 ? `\n+${wl.length - 6} more` : '') : '';
     if (wt !== this.watchText) {
       this.watchText = wt; h.watchBox.textContent = wt; h.watchBox.style.display = wt ? '' : 'none';
       const wp = settings.arr<number>('config.guiSevereWatchTextPosition');
@@ -1636,12 +1640,12 @@ export class App {
       if (cv.style.width !== width) cv.style.width = width;
       cv.style.left = `${ox}px`; cv.style.top = `${oy}px`;
       const legends: LegendSpec[] = settings.bool('config.noLegend') ? [] : [...this.layers.values()].flatMap((l) => ('legends' in l && (l as MapLayer).enabled() && (pane === 0 || (l as Drawable).perPane) ? (l as MapLayer).legends(pane) : []));
-      const key = legends.map((l) => `${l.id}${l.palette.name}${l.low}${l.high}${l.extra?.length}${l.note ?? ''}`).join('|') + this.renderer.flashRow + cv.clientWidth;
+      const key = legends.map((l) => `${l.id}${l.palette.name}${l.low}${l.high}${l.extra?.length}${l.note ?? ''}`).join('|') + this.renderer.flashRow + legendW[pane];
       if (key !== this.legendKeys[pane]) { perfMark('legend'); this.legendKeys[pane] = key; drawLegends(cv, legends, this.renderer.flashRow, devicePixelRatio || 1); }
       if (hp.label.style.display === 'none') return;
       const text = this.nexrad.paneLabel(pane);
       if (hp.label.textContent !== text) hp.label.textContent = text;
-      hp.label.style.right = `${cv.parentElement!.clientWidth - (ox + paneW) + 6}px`; hp.label.style.top = `${oy + paneH - 26}px`;
+      hp.label.style.right = `${overlayW - (ox + paneW) + 6}px`; hp.label.style.top = `${oy + paneH - 26}px`;
     });
     // Lightning count box.
     const showStrikes = this.lightning.enabled() && settings.bool('settings.lightningRenderingFlashCountBox');
@@ -1657,7 +1661,7 @@ export class App {
     });
     // Warning info box with leader line.
     const a = this.selectedAlert;
-    h.svg.textContent = '';
+    if (h.svg.firstChild) h.svg.textContent = '';
     if (a && this.warnings.activeAt(timeline.t).includes(a)) {
       h.info.style.display = '';
       h.info.style.borderColor = `rgb(${a.type!.color.join(',')})`;
@@ -1686,8 +1690,7 @@ export class App {
     if (showBrand) {
       const dpr = devicePixelRatio || 1;
       if (this.brandDpr !== dpr) { const t = watermarkTile(dpr); if (t) { this.brandDpr = dpr; h.brand.width = t.width; h.brand.height = t.height; h.brand.getContext('2d')!.drawImage(t, 0, 0); h.brand.style.width = `${t.width / dpr}px`; h.brand.style.height = `${t.height / dpr}px`; } }
-      const ov = h.brand.parentElement!;
-      const [x, y] = this.brandPos(h.brand.width / dpr, h.brand.height / dpr, ov.clientWidth, ov.clientHeight);
+      const [x, y] = this.brandPos(h.brand.width / dpr, h.brand.height / dpr, overlayW, overlayH);
       h.brand.style.left = `${x}px`; h.brand.style.top = `${y}px`;
     }
     // Logo (custom only; no vendor logo is shipped) and PNG overlay.

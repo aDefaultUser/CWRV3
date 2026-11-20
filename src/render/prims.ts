@@ -2,6 +2,7 @@
 import type { Renderer, DrawContext } from './renderer';
 import { lonLatToXYZ } from './camera';
 import { textStyle } from '../app/styles';
+import { tessellate, type LineInput } from '../gis/tessellate';
 
 export type Color = [number, number, number, number]; // 0..255 RGBA
 export interface LineStyle {
@@ -11,9 +12,7 @@ export interface LineStyle {
   /** 0 solid, 1 stretch, 2 round, 3 hard (default 3 when `dash` > 0). */ dashMode?: number; dashSpeed?: number;
   offset?: [number, number]; additive?: boolean;
 }
-export interface Polyline { coords: ArrayLike<number>; style: number; height?: number } // lon/lat interleaved
-
-const MAX_STEP_DEG = 0.75;
+export type Polyline = LineInput; // lon/lat interleaved
 
 /** Instanced screen-space polylines on the globe. */
 export class LineSet {
@@ -38,31 +37,12 @@ export class LineSet {
     else this.r.gpu.device.queue.writeBuffer(this.styleBuf, 0, f);
   }
 
-  setLines(lines: Polyline[]) {
-    let n = 0;
-    for (const l of lines) for (let i = 0; i + 3 < l.coords.length; i += 2) {
-      const dl = Math.abs(l.coords[i + 2] - l.coords[i]), db = Math.abs(l.coords[i + 3] - l.coords[i + 1]);
-      n += Math.max(1, Math.ceil(Math.max(Math.min(dl, 360 - dl), db) / MAX_STEP_DEG));
-    }
-    const f = new Float32Array(Math.max(1, n) * 8);
-    let k = 0;
-    for (const l of lines) {
-      const rr = 1 + (l.height ?? 0.000004);
-      for (let i = 0; i + 3 < l.coords.length; i += 2) {
-        let lo0 = l.coords[i], la0 = l.coords[i + 1], lo1 = l.coords[i + 2];
-        const la1 = l.coords[i + 3];
-        if (lo1 - lo0 > 180) lo1 -= 360; else if (lo0 - lo1 > 180) lo1 += 360; // shortest way across the antimeridian
-        const steps = Math.max(1, Math.ceil(Math.max(Math.abs(lo1 - lo0), Math.abs(la1 - la0)) / MAX_STEP_DEG));
-        let a = lonLatToXYZ(lo0, la0, rr);
-        for (let s = 1; s <= steps; s++) {
-          const b = lonLatToXYZ(lo0 + ((lo1 - lo0) * s) / steps, la0 + ((la1 - la0) * s) / steps, rr);
-          f.set([a[0], a[1], a[2], l.style, b[0], b[1], b[2], 0], k * 8);
-          a = b; k++;
-        }
-        void la0;
-      }
-    }
-    this.count = k;
+  setLines(lines: Polyline[]) { this.setTessellated(tessellate(lines)); }
+
+  /** Segments built by tessellate() (here or in the decode worker). */
+  setTessellated(segs: Float32Array) {
+    const f = segs.length ? segs : new Float32Array(8);
+    this.count = segs.length / 8;
     if (!this.segBuf || this.segBuf.size < f.byteLength) { this.segBuf?.destroy(); this.segBuf = this.r.gpu.buffer(f, GPUBufferUsage.STORAGE); this.bg = null; }
     else this.r.gpu.device.queue.writeBuffer(this.segBuf, 0, f);
   }
@@ -199,10 +179,13 @@ export class TextSet {
   labels: Label[] = [];
   alpha = new Float32Array(1);
   widths: number[] = [];
+  /** Declutter set of these labels (see declutter()); rebuilt after setLabels. */
+  boxes: Declutter | null = null;
   constructor(private r: Renderer, private atlas: GlyphAtlas) {}
 
   setLabels(labels: Label[]) {
     this.labels = labels;
+    this.boxes = null;
     const st = this.style ? textStyle(this.style) : null;
     if (st) {
       const font = `${st.italic ? 'italic ' : ''}${st.bold ? '700' : '500'} 30px "${st.font}", "Noto Sans", "DejaVu Sans", sans-serif`;
@@ -234,10 +217,14 @@ export class TextSet {
         f.set([xyz[0], xyz[1], xyz[2], li, 0, 0, 0, 0, x + 2 * s - px, y + 8 * s - py, total + 4 * s + px * 2, 30 * s + py * 2, ...c4(st.boxColor), 0, 0, 0, 0, ...c4(st.boxGradient ? st.boxColor2 : st.boxColor), 0, 0, 0, 0, 0, 0, 4 + (st.boxGradient ? 2 : 0), 1, 0, 0, 0, 0], k * GL);
         k++;
       }
+      // Colours and effects are the same for every glyph of the label: written per glyph without new arrays.
+      const tail = new Float32Array([...c4(l.color), ...c4(l.halo), ...color2, ...glow, ...fx, ...gofs]);
       for (const ch of chars) {
-        const g = this.atlas.glyph(ch);
-        f.set([xyz[0], xyz[1], xyz[2], li, g.u / ATLAS, g.v / ATLAS, g.w / ATLAS, CELL_H / ATLAS, x, y, g.w * s, CELL_H * s,
-          ...c4(l.color), ...c4(l.halo), ...color2, ...glow, ...fx, ...gofs], k * GL);
+        const g = this.atlas.glyph(ch), o = k * GL;
+        f[o] = xyz[0]; f[o + 1] = xyz[1]; f[o + 2] = xyz[2]; f[o + 3] = li;
+        f[o + 4] = g.u / ATLAS; f[o + 5] = g.v / ATLAS; f[o + 6] = g.w / ATLAS; f[o + 7] = CELL_H / ATLAS;
+        f[o + 8] = x; f[o + 9] = y; f[o + 10] = g.w * s; f[o + 11] = CELL_H * s;
+        f.set(tail, o + 12);
         x += (g.w - 8 - Math.ceil(this.atlas.spec.glow)) * s + sp;
         k++;
       }
@@ -267,29 +254,88 @@ export class TextSet {
 
 /** Screen-space declutter: greedy by priority; returns per-label target visibility. */
 export function declutter(r: Renderer, ts: TextSet, spacingPx: number, filter?: (i: number) => boolean): Uint8Array {
-  return declutterBoxes(r, ts.labels.map((l, i) => ({ lon: l.lon, lat: l.lat, w: ts.widths[i] ?? 40, h: l.size, priority: l.priority })), spacingPx, filter);
+  ts.boxes ??= new Declutter(ts.labels.map((l, i) => ({ lon: l.lon, lat: l.lat, w: ts.widths[i] ?? 40, h: l.size, priority: l.priority })));
+  return ts.boxes.run(r, spacingPx, filter);
 }
 
 /** Greedy declutter of screen boxes anchored bottom-centre at lon/lat, highest priority first. */
-export function declutterBoxes(r: Renderer, items: { lon: number; lat: number; w: number; h: number; priority?: number; spacing?: number }[], spacingPx: number, filter?: (i: number) => boolean): Uint8Array {
-  const vis = new Uint8Array(items.length);
-  const order = items.map((_, i) => i).sort((a, b) => (items[b].priority ?? 0) - (items[a].priority ?? 0));
-  const boxes: number[] = [];
-  const cam = r.camera;
-  for (const i of order) {
-    if (filter && !filter(i)) continue;
-    const l = items[i];
-    const [x, y, front] = cam.project(lonLatToXYZ(l.lon, l.lat));
-    if (!front || x < -50 || y < -20 || x > cam.width + 50 || y > cam.height + 20) continue;
-    const w = l.w, h = l.h, sp = l.spacing ?? spacingPx;
-    const x0 = x - w / 2 - sp / 2, x1 = x + w / 2 + sp / 2, y0 = y - h - sp / 4, y1 = y + sp / 4;
-    let hit = false;
-    for (let k = 0; k < boxes.length; k += 4) if (x0 < boxes[k + 2] && x1 > boxes[k] && y0 < boxes[k + 3] && y1 > boxes[k + 1]) { hit = true; break; }
-    if (hit) continue;
-    boxes.push(x0, y0, x1, y1);
-    vis[i] = 1;
+export function declutterBoxes(r: Renderer, items: DeclutterItem[], spacingPx: number, filter?: (i: number) => boolean): Uint8Array {
+  return new Declutter(items).run(r, spacingPx, filter);
+}
+
+export interface DeclutterItem { lon: number; lat: number; w: number; h: number; priority?: number; spacing?: number }
+const CELL = 64, MARGIN = 256;
+/**
+ * Declutter of a fixed item set, run every frame: the world positions and the priority order are computed once, and
+ * placed boxes are found through a screen grid, so a frame costs one projection per item and a few box tests.
+ */
+export class Declutter {
+  private xyz: Float64Array; private w: Float64Array; private h: Float64Array; private sp: Float64Array;
+  private order: Uint32Array;
+  private vis: Uint8Array;
+  private boxes = new Float64Array(256);
+  private next = new Int32Array(64);
+  private head = new Int32Array(0);
+  constructor(items: readonly DeclutterItem[]) {
+    const n = items.length;
+    this.xyz = new Float64Array(n * 3); this.w = new Float64Array(n); this.h = new Float64Array(n); this.sp = new Float64Array(n);
+    items.forEach((l, i) => {
+      const p = lonLatToXYZ(l.lon, l.lat);
+      this.xyz[i * 3] = p[0]; this.xyz[i * 3 + 1] = p[1]; this.xyz[i * 3 + 2] = p[2];
+      this.w[i] = l.w; this.h[i] = l.h; this.sp[i] = l.spacing ?? NaN;
+    });
+    // Stable sort: equal priorities keep their item order.
+    this.order = Uint32Array.from(items.map((_, i) => i).sort((a, b) => (items[b].priority ?? 0) - (items[a].priority ?? 0)));
+    this.vis = new Uint8Array(n);
   }
-  return vis;
+  /** Per-item visibility for the current camera (the returned array is reused by the next run). */
+  run(r: Renderer, spacingPx: number, filter?: (i: number) => boolean): Uint8Array {
+    const vis = this.vis.fill(0), cam = r.camera, m = cam.viewProj, e = cam.eye, W = cam.width, H = cam.height, xyz = this.xyz;
+    const cols = Math.ceil((W + 2 * MARGIN) / CELL), rows = Math.ceil((H + 2 * MARGIN) / CELL);
+    if (this.head.length < cols * rows) this.head = new Int32Array(cols * rows);
+    this.head.fill(-1, 0, cols * rows);
+    const cx = (x: number) => Math.min(cols - 1, Math.max(0, Math.floor((x + MARGIN) / CELL)));
+    const cy = (y: number) => Math.min(rows - 1, Math.max(0, Math.floor((y + MARGIN) / CELL)));
+    let placed = 0;
+    this.links = 0;
+    for (const i of this.order) {
+      if (filter && !filter(i)) continue;
+      const px = xyz[i * 3], py = xyz[i * 3 + 1], pz = xyz[i * 3 + 2];
+      const cw = m[3] * px + m[7] * py + m[11] * pz + m[15];
+      if (cw <= 0 || (e[0] - px) * px + (e[1] - py) * py + (e[2] - pz) * pz <= 0) continue; // behind the camera or the horizon
+      const x = ((m[0] * px + m[4] * py + m[8] * pz + m[12]) / cw * 0.5 + 0.5) * W;
+      const y = (1 - ((m[1] * px + m[5] * py + m[9] * pz + m[13]) / cw * 0.5 + 0.5)) * H;
+      if (x < -50 || y < -20 || x > W + 50 || y > H + 20) continue;
+      const w = this.w[i], h = this.h[i], sp = Number.isNaN(this.sp[i]) ? spacingPx : this.sp[i];
+      const x0 = x - w / 2 - sp / 2, x1 = x + w / 2 + sp / 2, y0 = y - h - sp / 4, y1 = y + sp / 4;
+      const c0 = cx(x0), c1 = cx(x1), r0 = cy(y0), r1 = cy(y1);
+      if (this.hits(x0, y0, x1, y1, c0, c1, r0, r1, cols)) continue;
+      if (this.boxes.length < (placed + 1) * 4) { const b = new Float64Array(this.boxes.length * 2); b.set(this.boxes); this.boxes = b; }
+      const k = placed * 4;
+      this.boxes[k] = x0; this.boxes[k + 1] = y0; this.boxes[k + 2] = x1; this.boxes[k + 3] = y1;
+      for (let rr = r0; rr <= r1; rr++) for (let c = c0; c <= c1; c++) this.link(rr * cols + c, placed);
+      placed++;
+      vis[i] = 1;
+    }
+    return vis;
+  }
+  /** Linked lists of the boxes in each grid cell: `head` per cell, then (box, next) pairs. */
+  private links = 0;
+  private link(cell: number, box: number) {
+    if (this.next.length < (this.links + 1) * 2) { const n = new Int32Array(this.next.length * 2); n.set(this.next); this.next = n; }
+    this.next[this.links * 2] = box; this.next[this.links * 2 + 1] = this.head[cell];
+    this.head[cell] = this.links++;
+  }
+  private hits(x0: number, y0: number, x1: number, y1: number, c0: number, c1: number, r0: number, r1: number, cols: number) {
+    const b = this.boxes, nx = this.next;
+    for (let rr = r0; rr <= r1; rr++) for (let c = c0; c <= c1; c++) {
+      for (let l = this.head[rr * cols + c]; l >= 0; l = nx[l * 2 + 1]) {
+        const k = nx[l * 2] * 4;
+        if (x0 < b[k + 2] && x1 > b[k] && y0 < b[k + 3] && y1 > b[k + 1]) return true;
+      }
+    }
+    return false;
+  }
 }
 
 // ------------------------------------------------------------------------------------------- sprites

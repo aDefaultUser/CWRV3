@@ -55,18 +55,32 @@ export class Gpu {
     this.dummyArray = d.createTexture({ size: [1, 1, 1], format: 'rgba8unorm', usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST, dimension: '2d' });
   }
 
+  /** CSS size of the canvas, kept by a ResizeObserver so that a frame does not force a layout to read it. */
+  private css: [number, number] | null = null;
+  private observer: ResizeObserver | null = null;
+
   /** Resizes the backbuffer to CSS size × DPR (or the fixed size). Returns true when it changed. */
   resize(): boolean {
+    if (!this.observer && typeof ResizeObserver !== 'undefined') {
+      this.observer = new ResizeObserver((entries) => { const r = entries[entries.length - 1].contentRect; this.css = [r.width, r.height]; });
+      this.observer.observe(this.canvas);
+    }
     const dpr = window.devicePixelRatio || 1;
-    const r = this.canvas.getBoundingClientRect();
-    const [w, h] = this.fixedSize ?? [Math.max(1, Math.round(r.width * dpr)), Math.max(1, Math.round(r.height * dpr))];
+    // Until the observer has seen the canvas laid out (it reports 0 × 0 while detached), the size is read directly.
+    let css = this.css && this.css[0] > 0 && this.css[1] > 0 ? this.css : null;
+    if (!css) { const r = this.canvas.getBoundingClientRect(); css = [r.width, r.height]; }
+    const [w, h] = this.fixedSize ?? [Math.max(1, Math.round(css[0] * dpr)), Math.max(1, Math.round(css[1] * dpr))];
     const max = this.device.limits.maxTextureDimension2D;
     const W = Math.min(w, max), H = Math.min(h, max);
-    if (W === this.width && H === this.height && dpr === this.dpr && this.msaa) return false;
-    this.width = W; this.height = H; this.dpr = this.fixedSize ? W / Math.max(1, r.width) : dpr;
-    this.canvas.width = W; this.canvas.height = H;
-    this.msaa?.destroy();
-    this.msaa = this.sampleCount > 1 ? this.device.createTexture({ size: [W, H], format: this.format, sampleCount: this.sampleCount, usage: GPUTextureUsage.RENDER_ATTACHMENT }) : null;
+    // Backbuffer pixels per CSS pixel: a fixed size keeps its pixels while the CSS width changes this ratio.
+    const effDpr = this.fixedSize ? W / Math.max(1, css[0]) : dpr;
+    // Assigning the canvas size reallocates its drawing buffer, so it happens only on a real change.
+    const same = W === this.canvas.width && H === this.canvas.height;
+    if (same && W === this.width && H === this.height && effDpr === this.dpr && !!this.msaa === this.sampleCount > 1) return false;
+    this.dpr = effDpr; this.width = W; this.height = H;
+    if (!same) { this.canvas.width = W; this.canvas.height = H; }
+    if (this.msaa && (this.sampleCount === 1 || this.msaa.width !== W || this.msaa.height !== H)) { this.msaa.destroy(); this.msaa = null; }
+    if (this.sampleCount > 1 && !this.msaa) this.msaa = this.device.createTexture({ size: [W, H], format: this.format, sampleCount: this.sampleCount, usage: GPUTextureUsage.RENDER_ATTACHMENT });
     return true;
   }
 

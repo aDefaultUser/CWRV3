@@ -446,7 +446,7 @@ profiles from `api/1/nws/bufkit.json`, and for archive replay `api/1/vtec/sbw_in
 
 | Part | Lines |
 | --- | ---: |
-| TypeScript / JavaScript | 21,779 |
+| TypeScript / JavaScript | 21,894 |
 | WGSL shaders | 921 |
-| **Total functional** | **22,700** |
+| **Total functional** | **22,815** |
 | CSS (separate) | 178 |

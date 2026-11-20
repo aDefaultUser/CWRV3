@@ -1,7 +1,7 @@
 // GIS vector layers from prebuilt public data (public/gis): coastline, lakes, rivers, country, state and county
 // lines, TIGER primary roads with procedural route shields, city labels and radar-site labels.
 import type { DrawContext, Renderer } from '../render/renderer';
-import { LineSet, PointSet, TextSet, GlyphAtlas, SpriteAtlas, SpriteSet, declutter, declutterBoxes, loadImage, SHAPE, type Polyline } from '../render/prims';
+import { LineSet, PointSet, TextSet, GlyphAtlas, SpriteAtlas, SpriteSet, Declutter, declutter, loadImage, SHAPE, type Polyline } from '../render/prims';
 import { linePasses, hasTextStyle } from '../app/styles';
 export const ROAD_STYLES = ['RoadInterstate', 'RoadUS', 'RoadState', 'RoadStreet', 'RoadRamp'];
 import { decodeLineSet, type LineSet as LS } from '../gis/lineset';
@@ -12,6 +12,7 @@ import { RADAR_SITES } from '../generated/radar-sites';
 import { radarStatus } from '../radar/status';
 import { lonLatToXYZ } from '../render/camera';
 import { loadPref, savePref, isArray, isBool } from '../app/persist';
+import { pool } from '../workers/pool';
 
 async function loadSet(name: string): Promise<LS | null> {
   try { const r = await fetch(`${import.meta.env.BASE_URL}gis/${name}`); if (!r.ok) return null; return decodeLineSet(await r.arrayBuffer()); } catch { return null; }
@@ -32,8 +33,6 @@ export class GisLayer extends MapLayer {
   enabled() { const b = settings.num('ext.layerState.MapBase'); return b === 1 || b === 2; }
   async load() {
     this.setStatus('loading', 'Loading GIS…');
-    const [coast, lakes, rivers, countries, states, counties] = await Promise.all(['coast.bin', 'lakes.bin', 'rivers.bin', 'countries.bin', 'states.bin', 'counties.bin'].map(loadSet));
-    if (!coast) { this.setStatus('unavailable', 'GIS assets missing: run npm run gis'); return; }
     this.lines.setStyles([
       { color: [120, 150, 190, 150], width: 1.0 },  // 0 coast
       { color: [100, 140, 190, 110], width: 0.8 },  // 1 lakes
@@ -42,14 +41,14 @@ export class GisLayer extends MapLayer {
       { color: [215, 215, 200, 175], width: 1.15 }, // 4 states
       { color: [180, 180, 170, 70], width: 0.6 },   // 5 counties
     ]);
-    const all: Polyline[] = [];
-    if (counties) all.push(...toPolylines(counties, () => 5));
-    if (rivers) all.push(...toPolylines(rivers, () => 2));
-    if (lakes) all.push(...toPolylines(lakes, () => 1));
-    all.push(...toPolylines(coast, () => 0));
-    if (countries) all.push(...toPolylines(countries, () => 3));
-    if (states) all.push(...toPolylines(states, () => 4));
-    this.lines.setLines(all);
+    // Drawing order: counties first, state and country lines on top.
+    const sets = [['counties.bin', 5], ['rivers.bin', 2], ['lakes.bin', 1], ['coast.bin', 0], ['countries.bin', 3], ['states.bin', 4]] as const;
+    const url = (name: string) => new URL(`${import.meta.env.BASE_URL}gis/${name}`, location.href).href;
+    let res: { segs: Float32Array; missing: string[] };
+    try { res = await pool.for(this.id).run('gis.lines', { sets: sets.map(([name, style]) => ({ url: url(name), style })) }); }
+    catch (e) { this.setStatus('error', `GIS: ${(e as Error).message}`); return; }
+    if (res.missing.includes(url('coast.bin'))) { this.setStatus('unavailable', 'GIS assets missing: run npm run gis'); return; }
+    this.lines.setTessellated(res.segs);
     this.ready = true;
     this.setStatus('ready', `GIS ${this.lines.count} segments`);
   }
@@ -199,6 +198,9 @@ export class RoadsLayer extends MapLayer {
   styleChanged() { this.applyStyles(); this.rebuildLabels(); }
   rebuild() { this.lines.setLines([...(this.primaryRemoved ? [] : this.primary), ...[...this.groups.values()].flatMap((g) => g.lines)]); }
   private appear = new Float64Array(0);
+  /** Declutter set of the shields for the per-class densities in `shieldKey`. */
+  private shieldBoxes: Declutter | null = null;
+  private shieldKey = '';
   tick(_t = 0, now = performance.now()) {
     if (!this.ready) return;
     // Per-class shield density (interstate / US / state route): spacing = 140 px / density.
@@ -208,7 +210,12 @@ export class RoadsLayer extends MapLayer {
     const alphas = [settings.num('config.geoInterstateLabelsAlpha'), settings.num('config.geoUSRouteLabelsAlpha'), settings.num('config.geoStateRouteLabelsAlpha')];
     const z = this.r.camera.zoomScale;
     const list = this.shieldList;
-    const vis = declutterBoxes(this.r, list.map((s) => ({ lon: s.lon, lat: s.lat, w: s.w, h: s.h, priority: 3 - s.cls, spacing: 140 / Math.max(0.2, dens[s.cls] ?? dens[0]) })), spacing, (i) => enabled[list[i].cls] && (list[i].cls === 0 || z < 2.5));
+    const key = dens.join();
+    if (!this.shieldBoxes || key !== this.shieldKey) {
+      this.shieldKey = key;
+      this.shieldBoxes = new Declutter(list.map((s) => ({ lon: s.lon, lat: s.lat, w: s.w, h: s.h, priority: 3 - s.cls, spacing: 140 / Math.max(0.2, dens[s.cls] ?? dens[0]) })));
+    }
+    const vis = this.shieldBoxes.run(this.r, spacing, (i) => enabled[list[i].cls] && (list[i].cls === 0 || z < 2.5));
     if (this.appear.length !== vis.length) this.appear = new Float64Array(vis.length);
     const flash = settings.bool('config.geoInterstateLabelsEffect');
     for (let i = 0; i < vis.length; i++) {
@@ -301,7 +308,8 @@ export class SiteLabelLayer extends MapLayer {
   readonly title = 'Radar site labels';
   private text: TextSet; private dots: PointSet;
   mouse: [number, number] | null = null;
-  constructor(r: Renderer, atlas: GlyphAtlas) { super(r); this.text = new TextSet(r, atlas); this.dots = new PointSet(r); this.rebuild(); }
+  // The labels are built on the first tick with the layer on (tick() sees no scales yet), not at startup.
+  constructor(r: Renderer, atlas: GlyphAtlas) { super(r); this.text = new TextSet(r, atlas); this.dots = new PointSet(r); }
   enabled() { return settings.bool('settings.nexradSitesOn'); }
   sites() { return RADAR_SITES.filter((s) => !(settings.bool('config.radarSites.HideTDWRs') && s.type === 'TDWR')); }
   /** Radar status (api.weather.gov) while site labels or NEXRAD are on; sites reported down are drawn grey and dimmed. */
@@ -311,19 +319,23 @@ export class SiteLabelLayer extends MapLayer {
   }
   /** Label scale near the cursor (MouseProximityScale): up to 1.5× within 250 CSS px, 1× beyond. */
   static proximityScale(d: number) { return 1 + 0.5 * Math.max(0, 1 - d / 250); }
-  private scaleKey = '';
+  /** Label scale of each site when the labels were last built (proximity to the cursor). */
+  private scales = new Float64Array(0);
+  private proximityScales(sites: readonly { lon: number; lat: number }[]) {
+    const near = settings.bool('config.radarSites.MouseProximityScale') && this.mouse ? this.mouse : null;
+    return Float64Array.from(sites, (s) => {
+      if (!near) return 1;
+      const [px, py, front] = this.r.camera.project(lonLatToXYZ(s.lon, s.lat));
+      return front ? SiteLabelLayer.proximityScale(Math.hypot(px - near[0], py - near[1])) : 1;
+    });
+  }
   rebuild() {
     const cur = settings.str('settings.nexradSiteICAO');
     const other = settings.arr<number>('config.radarSites.SitesColor'), curC = settings.arr<number>('config.radarSites.CurrentSiteColor');
     const sites = this.sites();
-    const near = settings.bool('config.radarSites.MouseProximityScale') && this.mouse ? this.mouse : null;
-    const scale = (lon: number, lat: number) => {
-      if (!near) return 1;
-      const [px, py, front] = this.r.camera.project(lonLatToXYZ(lon, lat));
-      return front ? SiteLabelLayer.proximityScale(Math.hypot(px - near[0], py - near[1])) : 1;
-    };
+    const scales = this.scales = this.proximityScales(sites);
     const color = (id: string) => (radarStatus.get(id)?.down ? [140, 140, 140, 255] : id === cur ? [...curC, 255] : [...other, 255]) as [number, number, number, number];
-    this.text.setLabels(sites.map((s) => ({ lon: s.lon, lat: s.lat, text: s.id, size: 11 * settings.num('config.radarSites.Scale') * scale(s.lon, s.lat), color: color(s.id), halo: [0, 0, 0, 170], dx: 6, align: 'left' as const, priority: s.id === cur ? 1e9 : 0 })));
+    this.text.setLabels(sites.map((s, i) => ({ lon: s.lon, lat: s.lat, text: s.id, size: 11 * settings.num('config.radarSites.Scale') * scales[i], color: color(s.id), halo: [0, 0, 0, 170], dx: 6, align: 'left' as const, priority: s.id === cur ? 1e9 : 0 })));
     this.dots.setPoints(sites.map((s) => ({ lon: s.lon, lat: s.lat, size: 5, shape: SHAPE.circle, color: color(s.id) })));
   }
   /** Site under the cursor (CSS px) within 14 px. */
@@ -340,11 +352,9 @@ export class SiteLabelLayer extends MapLayer {
   tick() {
     const sites = this.sites();
     const cur = settings.str('settings.nexradSiteICAO');
-    if (settings.bool('config.radarSites.MouseProximityScale')) {
-      const c = this.r.camera.cur, m = this.mouse;
-      const key = m ? `${Math.round(m[0] / 4)},${Math.round(m[1] / 4)},${c.lon.toFixed(3)},${c.lat.toFixed(3)},${c.z.toFixed(1)}` : '';
-      if (key !== this.scaleKey) { this.scaleKey = key; this.rebuild(); }
-    }
+    // Labels are rebuilt only when a scale changes visibly (not while a drag keeps the cursor on the same map point).
+    const scales = this.proximityScales(sites);
+    if (scales.length !== this.scales.length || scales.some((v, i) => Math.abs(v - this.scales[i]) > 1 / 256)) this.rebuild();
     const base = settings.num('config.radarSites.Alpha'), fadeOut = settings.num('config.radarSites.FadeOutAlpha');
     const prox = settings.bool('config.radarSites.MouseProximityAlpha');
     const pointOnly = settings.bool('config.radarSites.UnselectedSitesPointOnly');

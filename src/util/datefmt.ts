@@ -53,3 +53,12 @@ export function zoneClock(ms: number, override: boolean, offsetHours: number): {
   const sign = offsetHours < 0 ? '−' : '+', a = Math.abs(offsetHours), h = Math.trunc(a), m = Math.round((a - h) * 60);
   return { ms: ms + offsetHours * 3600e3, utc: true, zone: `UTC${sign}${h}${m ? `:${String(m).padStart(2, '0')}` : ''}` };
 }
+
+const formats = new Map<string, Intl.DateTimeFormat>();
+/** A shared Intl.DateTimeFormat per locale and options: constructing one costs far more than formatting with it. */
+export function dateFormat(locale: string | string[], options: Intl.DateTimeFormatOptions): Intl.DateTimeFormat {
+  const key = JSON.stringify([locale, options]);
+  let f = formats.get(key);
+  if (!f) { f = new Intl.DateTimeFormat(locale, options); formats.set(key, f); }
+  return f;
+}

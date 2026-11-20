@@ -21,6 +21,9 @@ import type { LambertGrid } from '../decode/grib2';
 import { packPtype } from '../decode/ptype-pack';
 import { JobClock, runJob, type JobHandler } from './job-clock';
 import { L2_HANDLERS, configureL2 } from './l2-volumes';
+import { decodeLineSet } from '../gis/lineset';
+import { tessellate, type LineInput } from '../gis/tessellate';
+import { windArrows } from '../gis/wind-arrows';
 
 export type { L2Meta, L2SweepMeta } from './l2-volumes';
 
@@ -185,7 +188,7 @@ function roadClass(rttyp: string, mtfcc: string): number {
   return 3;
 }
 
-/** HRRR surface products for one hour: MSLP isolines (mb), 10 m wind samples and a byte-coded fill field. */
+/** HRRR surface products for one hour: MSLP isolines (mb) and their line segments, 10 m wind arrow segments and a byte-coded fill field. */
 async function surface(a: { url: string; mslp?: { interval: number; kernel: number }; wind?: { step: number }; fill?: { field: HrrrField; min: number; max: number; unit: 'F' | 'J' } }, job: JobClock) {
   const fields: HrrrField[] = [];
   if (a.mslp) fields.push('mslp');
@@ -212,6 +215,8 @@ async function surface(a: { url: string; mslp?: { interval: number; kernel: numb
         for (let k = 0; k < l.length; k += 2) { const [lon, lat] = inv(l[k] * 2, l[k + 1] * 2); ll.push(lon, lat); }
         return { level: lv.level, coords: ll };
       }));
+      // Line geometry for the layer (border pass 0 under line pass 1), built once per hour here.
+      out.mslpSegs = tessellate((out.contours as { coords: number[] }[]).flatMap((c) => [{ coords: c.coords, style: 0 }, { coords: c.coords, style: 1 }]));
     }
     if (a.wind && h.fields.u10 && h.fields.v10) {
       const pts: number[] = [];
@@ -219,7 +224,7 @@ async function surface(a: { url: string; mslp?: { interval: number; kernel: numb
         const k = j * g.nx + i; const [lon, lat] = inv(i, j);
         pts.push(lon, lat, h.fields.u10[k], h.fields.v10[k]);
       }
-      out.wind = Float32Array.from(pts);
+      out.windSegs = tessellate(windArrows(Float32Array.from(pts)));
     }
     if (a.fill && h.fields[a.fill.field]) {
       const f = h.fields[a.fill.field]!, codes = new Uint8Array(f.length), span = a.fill.max - a.fill.min;
@@ -449,6 +454,17 @@ const HANDLERS: Record<string, JobHandler> = {
   'goes.l2': goesL2,
   'glm': glm,
   'zipLines': zipLines,
+  // Prebuilt GIS line sets (public/gis), drawn in the given order: ~0.8 M segments, built here, not on the frame thread.
+  'gis.lines': async (a: { sets: { url: string; style: number }[] }, job) => {
+    const sets = await Promise.all(a.sets.map(async (s) => {
+      try { const r = await fetch(s.url); return r.ok ? decodeLineSet(await r.arrayBuffer()) : null; } catch { return null; }
+    }));
+    return job.time(() => {
+      const lines: LineInput[] = [];
+      sets.forEach((ls, i) => { if (ls) for (let k = 0; k + 1 < ls.offsets.length; k++) lines.push({ coords: ls.coords.subarray(ls.offsets[k] * 2, ls.offsets[k + 1] * 2), style: a.sets[i].style }); });
+      return { segs: tessellate(lines), missing: a.sets.filter((_, i) => !sets[i]).map((s) => s.url) };
+    });
+  },
   // JSON of a few MB per file: parsed here, not on the frame thread.
   'probsevere': async (a: { url: string; t: number }, job) => {
     const bytes = await fetchBytes(a.url, { cache: 'immutable', maxBytes: 30e6 });
@@ -466,7 +482,7 @@ const HANDLERS: Record<string, JobHandler> = {
  * processing time as unavailable rather than zero.
  */
 const TIMED = new Set(['grid.all', 'grid.model', 'grib.inventory', 'grid.meso', 'grid.severe', 'grid.diff', 'grid.mrms', 'shapes', 'geojson', 'surface',
-  'l2.meta', 'l2.product', 'l2.composite', 'l2.volume', 'l3', 'mrms', 'hrrr', 'hrrr.ptype', 'grib.point', 'goes', 'goes.l2', 'glm', 'zipLines', 'goes.examine', 'probsevere', 'iem.attrs']);
+  'l2.meta', 'l2.product', 'l2.composite', 'l2.volume', 'l3', 'mrms', 'hrrr', 'hrrr.ptype', 'grib.point', 'goes', 'goes.l2', 'glm', 'zipLines', 'gis.lines', 'goes.examine', 'probsevere', 'iem.attrs']);
 
 function transferables(v: any, out: Transferable[] = [], seen = new Set<any>()): Transferable[] {
   if (!v || typeof v !== 'object' || seen.has(v)) return out;

@@ -10,10 +10,13 @@ import { hrrrUrl, type HrrrField } from '../decode/hrrr';
 import { latestCycle } from '../data/hrrr-service';
 import { parseCodsus, type SurfaceAnalysis } from '../decode/wpc';
 import { LineSet, PointSet, TextSet, GlyphAtlas, SHAPE, declutter, type Polyline, type Label, type PointSpec } from '../render/prims';
+import { WIND_BINS } from '../gis/wind-arrows';
 import { RasterDraw, Lut, lambertProj, type ProjParams } from '../render/raster';
 import { getPalette } from '../palettes/library';
 import { evalPalette } from '../render/palette';
 import { lonLatToXYZ } from '../render/camera';
+
+const NO_SEGS = new Float32Array(0);
 
 const FILL_FIELDS: { field: HrrrField; min: number; max: number; unit: 'F' | 'J'; label: string }[] = [
   { field: 't2m', min: -40, max: 120, unit: 'F', label: '°F' },
@@ -23,7 +26,8 @@ const FILL_FIELDS: { field: HrrrField; min: number; max: number; unit: 'F' | 'J'
   { field: 'mlcape', min: 0, max: 6000, unit: 'J', label: 'J/kg' },
 ];
 
-interface Hour { t: number; contours?: { level: number; coords: number[] }[]; wind?: Float32Array; fill?: GPUTexture; fillIdx?: number; proj?: ProjParams }
+/** One HRRR hour; the line segments (built by the worker) are only uploaded when the shown hour changes. */
+interface Hour { t: number; contours?: { level: number; coords: number[] }[]; mslpSegs?: Float32Array; windSegs?: Float32Array; fill?: GPUTexture; fillIdx?: number; proj?: ProjParams }
 
 export class SurfaceLayer extends MapLayer {
   readonly id = 'surface';
@@ -58,7 +62,7 @@ export class SurfaceLayer extends MapLayer {
     for (const h of hours.slice(-7)) {
       const cur = this.hours.get(h) ?? { t: h };
       this.hours.set(h, cur);
-      const needM = wantM && !cur.contours, needW = wantW && !cur.wind, needF = wantF && (cur.fillIdx !== fillIdx);
+      const needM = wantM && !cur.contours, needW = wantW && !cur.windSegs, needF = wantF && (cur.fillIdx !== fillIdx);
       if (!needM && !needW && !needF) continue;
       const key = `${h}|${needM}|${needW}|${needF}|${fillIdx}`;
       if (this.loading.has(key)) continue;
@@ -70,8 +74,8 @@ export class SurfaceLayer extends MapLayer {
         wind: needW ? { step: 14 } : undefined,
         fill: needF ? { field: ff.field, min: ff.min, max: ff.max, unit: ff.unit } : undefined,
       }).then((res) => {
-        if (res.contours) cur.contours = res.contours;
-        if (res.wind) cur.wind = res.wind;
+        if (res.contours) { cur.contours = res.contours; cur.mslpSegs = res.mslpSegs; }
+        if (res.windSegs) cur.windSegs = res.windSegs;
         if (res.fill) { cur.fill?.destroy(); cur.fill = this.r.gpu.texture2D(res.nx, res.ny, 'r8unorm', res.fill, 1, this.id); cur.fillIdx = fillIdx; cur.proj = lambertProj(res.grid); this.fillDraw.invalidate(); }
         this.lastKey = '';
         this.setStatus('ready', `HRRR ${new Date(h).toISOString().slice(0, 13)}Z loaded`);
@@ -87,10 +91,10 @@ export class SurfaceLayer extends MapLayer {
   }
 
   /** Contour interval changes require re-contouring. */
-  resetContours() { for (const h of this.hours.values()) h.contours = undefined; }
+  resetContours() { for (const h of this.hours.values()) h.contours = h.mslpSegs = undefined; }
 
   private frameAt(t: number) {
-    const frames = [...this.hours.values()].filter((h) => h.contours || h.wind || h.fill).sort((a, b) => a.t - b.t);
+    const frames = [...this.hours.values()].filter((h) => h.contours || h.windSegs || h.fill).sort((a, b) => a.t - b.t);
     return bracket(frames, t, false, 3 * 3600e3).a;
   }
 
@@ -99,7 +103,7 @@ export class SurfaceLayer extends MapLayer {
     const h = this.frameAt(t);
     const cam = this.r.camera;
     const camKey = `${cam.cur.lon.toFixed(3)},${cam.cur.lat.toFixed(3)},${cam.cur.z.toFixed(2)},${cam.cur.swivel.toFixed(1)}`;
-    const key = `${h?.t}|${!!h?.contours}|${!!h?.wind}|${!!this.wpc}|${['MSLPOn', '10mWindVectorsOn', 'FrontsOn', 'CentersOn'].map((k) => +settings.bool('layerState.' + k)).join('')}|${settings.num('settings.generalContourWidth')}|${settings.num('settings.generalContourAlpha')}`;
+    const key = `${h?.t}|${!!h?.contours}|${!!h?.windSegs}|${!!this.wpc}|${['MSLPOn', '10mWindVectorsOn', 'FrontsOn', 'CentersOn'].map((k) => +settings.bool('layerState.' + k)).join('')}|${settings.num('settings.generalContourWidth')}|${settings.num('settings.generalContourAlpha')}`;
     if (key !== this.lastKey) { this.lastKey = key; this.lastCam = ''; this.rebuild(h); }
     if (camKey !== this.lastCam) { this.lastCam = camKey; this.placeFrontSymbols(); }
     if (settings.bool('layerState.MSLPOn')) {
@@ -114,37 +118,19 @@ export class SurfaceLayer extends MapLayer {
     const cc = settings.arr<number>('settings.generalContourColor'), bc = settings.arr<number>('settings.generalContourBorderColor');
     const a = Math.round(settings.num('settings.generalContourAlpha') * 255), w = settings.num('settings.generalContourWidth');
     this.mslpLines.setStyles([{ color: [bc[0], bc[1], bc[2], settings.bool('settings.generalContourBorders') ? a : 0], width: w + 2.2 }, { color: [cc[0], cc[1], cc[2], Math.min(255, a + 60)], width: w }]);
-    const ml: Polyline[] = [], labels: Label[] = [];
-    if (settings.bool('layerState.MSLPOn') && h?.contours) {
-      for (const c of h.contours) {
-        ml.push({ coords: c.coords, style: 0 }, { coords: c.coords, style: 1 });
-        const n = c.coords.length / 2;
-        for (let k = Math.floor(n / 2) % 40; k < n; k += 80) labels.push({ lon: c.coords[k * 2], lat: c.coords[k * 2 + 1], text: c.level.toFixed(0), size: 11, color: [230, 235, 255, 255], halo: [20, 30, 60, 220], priority: 1 });
-      }
+    const labels: Label[] = [];
+    const contours = settings.bool('layerState.MSLPOn') ? h?.contours : undefined;
+    for (const c of contours ?? []) {
+      const n = c.coords.length / 2;
+      for (let k = Math.floor(n / 2) % 40; k < n; k += 80) labels.push({ lon: c.coords[k * 2], lat: c.coords[k * 2 + 1], text: c.level.toFixed(0), size: 11, color: [230, 235, 255, 255], halo: [20, 30, 60, 220], priority: 1 });
     }
-    this.mslpLines.setLines(ml);
+    this.mslpLines.setTessellated((contours && h?.mslpSegs) || NO_SEGS);
     this.mslpText.setLabels(labels);
     // Wind vectors (arrows colored by speed through the 10 m wind palette).
     const pal = getPalette(settings.str('settings.saWindPalette'));
     const alpha = settings.num('settings.saWindAlpha') / 255;
-    const bins = [5, 10, 15, 20, 30, 40, 55, 75];
-    this.windLines.setStyles(bins.map((b) => { const c = evalPalette(pal.frames[0], b); return { color: [c[0], c[1], c[2], Math.round(Math.max(120, c[3]) * alpha)], width: 1.4 }; }));
-    const wl: Polyline[] = [];
-    if (settings.bool('layerState.10mWindVectorsOn') && h?.wind) {
-      const wv = h.wind;
-      for (let i = 0; i < wv.length; i += 4) {
-        const [lon, lat, u, v] = [wv[i], wv[i + 1], wv[i + 2], wv[i + 3]];
-        const mph = Math.hypot(u, v) * 2.23694;
-        if (!(mph > 1)) continue;
-        const L = 0.06 + mph * 0.006, k = Math.cos((lat * Math.PI) / 180);
-        const dx = (u / Math.hypot(u, v)) * L / k, dy = (v / Math.hypot(u, v)) * L;
-        const style = Math.max(0, bins.findIndex((b) => mph <= b));
-        const tipX = lon + dx, tipY = lat + dy;
-        wl.push({ coords: [lon, lat, tipX, tipY], style: style < 0 ? 7 : style });
-        wl.push({ coords: [tipX - dx * 0.35 - dy * 0.2 / k, tipY - dy * 0.35 + dx * 0.2 * k, tipX, tipY, tipX - dx * 0.35 + dy * 0.2 / k, tipY - dy * 0.35 - dx * 0.2 * k], style: style < 0 ? 7 : style });
-      }
-    }
-    this.windLines.setLines(wl);
+    this.windLines.setStyles(WIND_BINS.map((b) => { const c = evalPalette(pal.frames[0], b); return { color: [c[0], c[1], c[2], Math.round(Math.max(120, c[3]) * alpha)], width: 1.4 }; }));
+    this.windLines.setTessellated(settings.bool('layerState.10mWindVectorsOn') && h?.windSegs ? h.windSegs : NO_SEGS);
     // Fronts and centers.
     const fl: Polyline[] = [];
     this.frontLines.setStyles([
