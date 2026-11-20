@@ -212,6 +212,45 @@ fn tintCoord(elev: f32) -> f32 {
 }
 `;
 
+// ------------------------------------------------------------------------------------------- overlay tiles
+// Transparent Web Mercator tiles from an atlas of premultiplied RGBA texels (render/overlay-tiles.ts): radar mosaic
+// tiles at the layer alpha, and coverage-mask tiles (opaque where there is no radar coverage) as a flat tint.
+export const OVERLAY_TILES = COMMON + /* wgsl */ `
+struct OTile { z: f32, x: f32, y: f32, slot: f32, sub: vec4f }; // sub: u0, v0, scale, kind (0 image, 1 coverage mask)
+struct OverlayParams { image: vec4f, mask: vec4f };             // image.x alpha; mask rgb tint, a alpha
+@group(1) @binding(0) var<uniform> P: OverlayParams;
+@group(1) @binding(1) var<storage, read> tiles: array<OTile>;
+@group(1) @binding(2) var atlas: texture_2d_array<f32>;
+@group(1) @binding(3) var samp: sampler;
+struct VO { @builtin(position) pos: vec4f, @location(0) world: vec3f, @location(1) @interpolate(flat) inst: u32, @location(2) uv: vec2f };
+const N = 16u;
+@vertex fn vs(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> VO {
+  let t = tiles[ii];
+  let q = vi % 6u; let cell = vi / 6u;
+  let cx = cell % N; let cy = cell / N;
+  var corners = array(vec2u(0u,0u), vec2u(1u,0u), vec2u(0u,1u), vec2u(0u,1u), vec2u(1u,0u), vec2u(1u,1u)); let corner = corners[q];
+  let uv = vec2f(f32(cx + corner.x), f32(cy + corner.y)) / f32(N);
+  let n = exp2(t.z);
+  let lon = (t.x + uv.x) / n * 360.0 - 180.0;
+  let lat = atan(sinh(PI * (1.0 - 2.0 * (t.y + uv.y) / n))) * DEG;
+  let p = xyzOf(lon, lat);
+  var o: VO; o.pos = toClip(p); o.world = p; o.inst = ii; o.uv = uv; return o;
+}
+@fragment fn fs(v: VO) -> @location(0) vec4f {
+  if (!frontFacing(v.world)) { discard; }
+  let t = tiles[v.inst];
+  let c = textureSampleLevel(atlas, samp, t.sub.xy + v.uv * t.sub.z, i32(t.slot), 0.0);
+  if (t.sub.w > 0.5) {
+    let m = c.a * P.mask.a;
+    if (m <= 0.002) { discard; }
+    return vec4f(P.mask.rgb * m, m);
+  }
+  let o = c * P.image.x;
+  if (o.a <= 0.002) { discard; }
+  return o;
+}
+`;
+
 // ------------------------------------------------------------------------------------------- rasters
 // Projection kinds: 0 regular lat/lon, 1 GOES fixed grid, 2 Lambert conformal.
 export const PROJ = /* wgsl */ `
@@ -258,11 +297,12 @@ fn projUV(P: Proj, ll: vec2f) -> vec3f {
     let x = rho * sin(dl / DEG); let y = -h * rho * cos(dl / DEG);
     i = (x - P.b.x) / P.b.z; j = (y - P.b.y) / P.b.w;
   } else {
-    // Mercator: a: R*cos(LaD), lo1, y1 ; b: -, -, di, dj
+    // Mercator: a: R*cos(LaD), reference longitude, y1 ; b: column of the reference longitude, -, di, dj. A global
+    // grid references its middle column, so every longitude lies within half a turn of it (no antimeridian seam).
     var dl = ll.x - P.a.y;
     if (dl > 180.0) { dl -= 360.0; } if (dl < -180.0) { dl += 360.0; }
     let x = P.a.x * dl / DEG; let y = P.a.x * log(tan(PI / 4.0 + clamp(ll.y, -85.0, 85.0) / DEG / 2.0));
-    i = x / P.b.z; j = (y - P.a.z) / P.b.w;
+    i = x / P.b.z + P.b.x; j = (y - P.a.z) / P.b.w;
   }
   // flip: rows are stored southward (scan bit 0x40 clear).
   if (P.flip > 0.5) { j = -j; }

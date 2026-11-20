@@ -24,8 +24,6 @@ const WW_LEVEL: Record<string, [string, number]> = { Slight: ['#4080FF', 10], Mo
 registerStyleResolver('WW:', (k) => { const h = (WW_LEVEL[k] ?? ['#80C0FF', 5])[0]; const n = parseInt(h.slice(1), 16); const c: Color = [(n >> 16) & 255, (n >> 8) & 255, n & 255, 255]; return { fill: [c[0], c[1], c[2], 110], line: c, width: 1.2, pattern: 0, patternSize: 8, dash: 0, visible: true }; });
 const RIVER: Record<string, Color> = { major: [200, 60, 255, 255], moderate: [255, 0, 0, 255], minor: [255, 150, 0, 255], action: [255, 255, 0, 255], no_flooding: [0, 200, 0, 255], low_threshold: [160, 120, 60, 255], not_defined: [150, 150, 150, 255], obs_not_current: [90, 120, 170, 255], out_of_service: [80, 80, 80, 255] };
 
-export const wpcOn = () => settings.bool('layerState.WPCQPFOn') || settings.bool('layerState.WPCExcessiveRainfallOutlookOn') || settings.bool('layerState.WPCWinterPrecipitationProbabilitiesOn');
-
 export function forecastLayers(r: Renderer, atlas: GlyphAtlas) {
   const qpf = new ShapeLayer(r, atlas, {
     id: 'wpc', title: 'WPC QPF', enabled: () => settings.bool('layerState.WPCQPFOn'),

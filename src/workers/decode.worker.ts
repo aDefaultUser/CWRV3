@@ -5,6 +5,7 @@ import { decodeGrib2, scanGribMessages, type GribField } from '../decode/grib2';
 import { gunzip, inflateZlib, unzip } from '../decode/zip';
 import { readShp, readDbf, simplify } from '../decode/shapefile';
 import { readAbiCmi, readAbiL2, readGlmLcfa, examineAbi, type H5Like, type GoesProjection } from '../decode/goes';
+import { readGmgsi } from '../decode/gmgsi';
 import { gridMap } from '../gis/gridproj';
 import { parseIdx, findIdx, HRRR_FIELDS, type HrrrField } from '../decode/hrrr';
 import { fetchBytes, fetchText, abortAll, type FetchOpts } from '../data/net';
@@ -21,6 +22,8 @@ import type { LambertGrid } from '../decode/grib2';
 import { packPtype } from '../decode/ptype-pack';
 import { JobClock, runJob, type JobHandler } from './job-clock';
 import { L2_HANDLERS, configureL2 } from './l2-volumes';
+import { loadArchive2Wasm } from '../decode/archive2-wasm';
+import archive2WasmUrl from 'virtual:archive2-wasm';
 import { decodeLineSet } from '../gis/lineset';
 import { tessellate, type LineInput } from '../gis/tessellate';
 import { windArrows } from '../gis/wind-arrows';
@@ -29,6 +32,8 @@ export type { L2Meta, L2SweepMeta } from './l2-volumes';
 
 type Req = { id: number; task: string; args: any };
 const scope = self as unknown as DedicatedWorkerGlobalScope;
+// Level 2 decodes wait for this load; a build without the Rust artifact decodes with the TypeScript reference.
+if (archive2WasmUrl) void loadArchive2Wasm(archive2WasmUrl);
 
 // ------------------------------------------------------------------------------------------- Level 3
 function l3Result(p: L3Product) {
@@ -145,6 +150,12 @@ async function goesL2(a: { url: string; factor: number; min: number; max: number
     if (r.kind === 'FDC') return r;
     return { kind: r.kind, ...encodeFixedGrid(r, a.factor, a.min, a.max), good: r.good, marginal: r.marginal, startMs: r.startMs, endMs: r.endMs, platform: r.platform, scene: r.scene };
   });
+}
+
+/** GMGSI global mosaic: block-averaged byte codes on its Mercator grid. Not kept in the data cache (≈7 MB per hour). */
+async function gmgsi(a: { url: string; factor: number }, job: JobClock) {
+  const h = await getH5(), bytes = await fetchBytes(a.url, { maxBytes: 40e6 });
+  return job.time(() => readGmgsi(h, bytes, a.factor));
 }
 
 async function glm(a: { urls: string[] }, job: JobClock) {
@@ -451,6 +462,7 @@ const HANDLERS: Record<string, JobHandler> = {
   },
   'grib.point': gribPoint,
   'goes': goes,
+  'gmgsi': gmgsi,
   'goes.l2': goesL2,
   'glm': glm,
   'zipLines': zipLines,
@@ -482,7 +494,7 @@ const HANDLERS: Record<string, JobHandler> = {
  * processing time as unavailable rather than zero.
  */
 const TIMED = new Set(['grid.all', 'grid.model', 'grib.inventory', 'grid.meso', 'grid.severe', 'grid.diff', 'grid.mrms', 'shapes', 'geojson', 'surface',
-  'l2.meta', 'l2.product', 'l2.composite', 'l2.volume', 'l3', 'mrms', 'hrrr', 'hrrr.ptype', 'grib.point', 'goes', 'goes.l2', 'glm', 'zipLines', 'gis.lines', 'goes.examine', 'probsevere', 'iem.attrs']);
+  'l2.meta', 'l2.product', 'l2.composite', 'l2.volume', 'l3', 'mrms', 'hrrr', 'hrrr.ptype', 'grib.point', 'goes', 'gmgsi', 'goes.l2', 'glm', 'zipLines', 'gis.lines', 'goes.examine', 'probsevere', 'iem.attrs']);
 
 function transferables(v: any, out: Transferable[] = [], seen = new Set<any>()): Transferable[] {
   if (!v || typeof v !== 'object' || seen.has(v)) return out;

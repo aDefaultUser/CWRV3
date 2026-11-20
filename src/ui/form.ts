@@ -5,6 +5,7 @@ import { FORMS } from '../generated/ui-forms';
 import { ANALYSIS_FORMS } from '../generated/ui-forms-analysis';
 import { ARCHIVE_FORMS } from '../generated/ui-forms-archive';
 import { PANE_FORMS } from '../generated/ui-forms-panes';
+import { WORLD_FORMS } from '../generated/ui-forms-world';
 import type { ControlDef, FormDef } from './form-types';
 import { settings, SETTING_DEFS } from '../settings/store';
 
@@ -40,14 +41,13 @@ const ICON_LABELS: Record<string, string> = {
 };
 
 export const formDef = (name: string): FormDef => {
-  const f = FORMS.find((x) => x.form === name) ?? ANALYSIS_FORMS.find((x) => x.form === name) ?? ARCHIVE_FORMS.find((x) => x.form === name) ?? PANE_FORMS.find((x) => x.form === name);
+  const f = FORMS.find((x) => x.form === name) ?? ANALYSIS_FORMS.find((x) => x.form === name) ?? ARCHIVE_FORMS.find((x) => x.form === name) ?? PANE_FORMS.find((x) => x.form === name) ?? WORLD_FORMS.find((x) => x.form === name);
   if (!f) throw new Error(`form ${name} not in catalog`);
   return f;
 };
 
 /** Plain VCL classes of the expanded forms render like their AlphaControls counterparts. */
 const VCL: Record<string, string> = { TCheckBox: 'TsCheckBox', TButton: 'TsButton', TPanel: 'TsPanel', TLabel: 'TsLabel', TMemo: 'TsMemo', TCheckListBox: 'TsCheckListBox', TListView: 'TsListView', TListBox: 'TsListBox', TEdit: 'TsEdit', TComboBox: 'TsComboBox', TTrackBar: 'TsTrackBar', TPageControl: 'TsPageControl', TTabSheet: 'TsTabSheet', TGroupBox: 'TsGroupBox', TRadioButton: 'TsRadioButton', TSpinEdit: 'TsSpinEdit', TBitBtn: 'TsBitBtn', TSpeedButton: 'TsSpeedButton', TBevel: 'TsBevel', TRadioGroup: 'TsRadioGroup', TUpDown: 'TsUpDown' };
-export const normCls = (cls: string) => VCL[cls] ?? cls;
 const CONTAINERS = new Set(['TsPanel', 'TsGroupBox', 'TsTabSheet', 'TsPageControl', 'TsToolBar', 'TsFrameBar', 'TsRadioGroup']);
 const MENU = new Set(['TPopupMenu', 'TMenuItem']);
 const SKIP = new Set(['TsAlphaImageList', 'TImageList', 'TShape', 'TsImage', 'TsStatusBar']);

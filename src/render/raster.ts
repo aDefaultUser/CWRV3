@@ -7,7 +7,6 @@ import { toHalf } from './gpu';
 import { perfMark } from '../perf/meter';
 
 export interface ProjParams { kind: 0 | 1 | 2 | 3 | 4; nx: number; ny: number; flip?: boolean; a: number[]; b: number[]; c?: number[] }
-export const NO_PROJ: ProjParams = { kind: 0, nx: 1, ny: 1, a: [0, 0, 0, 0], b: [0, 0, 0, 0] };
 
 export function latLonProj(la1: number, lo1: number, la2: number, lo2: number, nx: number, ny: number): ProjParams {
   return { kind: 0, nx, ny, a: [la1, lo1, la2, lo2], b: [0, 0, 0, 0] };

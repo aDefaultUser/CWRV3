@@ -105,8 +105,11 @@ export class Archive2Decoder {
   /** `requestedSite`: the radar the file was requested for, used when the header leaves the site blank (ARCHIVE2). */
   constructor(private requestedSite = '') {}
 
-  /** Feeds a whole Archive II file or a chunk (S chunks carry the 24-byte volume header). */
+  /** Feeds a whole Archive II file (optionally whole-file bzip2) or a chunk (S chunks carry the 24-byte volume header). */
   feed(buf: Uint8Array): void {
+    // tgftp serves whole volumes compressed with bzip2 when the name ends in .bz2 but the content is still an AR2V
+    // file with bzip2 records; a fully compressed file starts with "BZh".
+    if (buf[0] === 0x42 && buf[1] === 0x5a && buf[2] === 0x68) buf = bunzip2(buf);
     let p = 0;
     const head = String.fromCharCode(...buf.subarray(0, 8));
     if (buf.length >= 24 && (head.startsWith('AR2V') || head === 'ARCHIVE2')) {
@@ -291,14 +294,11 @@ export class Archive2Decoder {
   volume(): L2Volume {
     const nums = [...this.sweeps.keys()].sort((a, b) => a - b);
     const sweeps = nums.map((n) => { const a = this.sweeps.get(n)!; return (a.built ??= this.buildSweep(n, a)); });
-    const site = this.site || this.requestedSite;
-    // Message 1 volumes carry no site location: the radar site table supplies it (ground elevation for the height).
-    const known = this.lat === null ? RADAR_SITES.find((s) => s.id === site) : undefined;
-    return {
-      site, volumeTimeMs: this.volumeTimeMs, lat: this.lat ?? known?.lat ?? null, lon: this.lon ?? known?.lon ?? null,
-      heightM: this.heightM ?? (known ? Math.round(known.elevFt * 0.3048) : null), vcpNumber: this.vcpNumber ?? this.vcp?.pattern ?? null, vcp: this.vcp, sweeps,
-    };
+    return assembleVolume(this, this.requestedSite, sweeps);
   }
+
+  /** Nothing to free (the WebAssembly decoder's counterpart). */
+  dispose(): void {}
 
   /**
    * The cut of a message 1 sweep when the volume has no VCP record (archived only from about 2005): the cut of the
@@ -314,12 +314,11 @@ export class Archive2Decoder {
     };
     // As waveforms: 1 surveillance only, 2 Doppler only (halves of a split cut), 3 both (batch, contiguous Doppler).
     const kind = (x: RadialAcc | undefined) => (!x ? 0 : x.moments.has('VEL') ? (x.moments.has('REF') ? 3 : 2) : 1);
-    const cut = (elevation: number, waveform: number): VcpCut => ({ elevation, waveform, superRes: 0, sails: false, sailsSeq: 0, mrle: false, mrleSeq: 0, mpda: false, baseTilt: false });
     const def = LEGACY_VCPS[this.vcpNumber ?? 0]?.split(' ')[n - 1]?.split('/').map(Number);
-    if (def && Math.abs(angle(a) - def[0]) < 0.25 && kind(a) === Math.min(def[1], 3)) return cut(def[0], def[1]);
+    if (def && Math.abs(angle(a) - def[0]) < 0.25 && kind(a) === Math.min(def[1], 3)) return plainCut(def[0], def[1]);
     const prev = this.sweeps.get(n - 1);
     const pair = kind(a) === 2 && kind(prev) === 1 && Math.abs(angle(a) - angle(prev!)) < 0.5;
-    return cut(Math.round(angle(pair ? prev! : a) * 100) / 100, pair ? 2 : kind(a) === 1 ? 1 : 4);
+    return plainCut(Math.round(angle(pair ? prev! : a) * 100) / 100, pair ? 2 : kind(a) === 1 ? 1 : 4);
   }
 
   private buildSweep(n: number, a: RadialAcc): L2Sweep {
@@ -338,6 +337,20 @@ export class Archive2Decoder {
       azimuths: Float32Array.from(a.azimuths), elevations, timesMs: Float64Array.from(a.times), moments, complete: a.complete,
     };
   }
+}
+
+/** A cut without supplemental-scan flags (message 1 volumes). */
+export const plainCut = (elevation: number, waveform: number): VcpCut => ({ elevation, waveform, superRes: 0, sails: false, sailsSeq: 0, mrle: false, mrleSeq: 0, mpda: false, baseTilt: false });
+
+/** The volume of decoded header fields and sweeps. */
+export function assembleVolume(h: Pick<L2Volume, 'site' | 'volumeTimeMs' | 'lat' | 'lon' | 'heightM' | 'vcpNumber' | 'vcp'>, requestedSite: string, sweeps: L2Sweep[]): L2Volume {
+  const site = h.site || requestedSite;
+  // Message 1 volumes carry no site location: the radar site table supplies it (ground elevation for the height).
+  const known = h.lat === null ? RADAR_SITES.find((s) => s.id === site) : undefined;
+  return {
+    site, volumeTimeMs: h.volumeTimeMs, lat: h.lat ?? known?.lat ?? null, lon: h.lon ?? known?.lon ?? null,
+    heightM: h.heightM ?? (known ? Math.round(known.elevFt * 0.3048) : null), vcpNumber: h.vcpNumber ?? h.vcp?.pattern ?? null, vcp: h.vcp, sweeps,
+  };
 }
 
 export function decodeArchive2(buf: Uint8Array, requestedSite = ''): L2Volume {

@@ -33,6 +33,11 @@ export interface FetchOpts {
   timeoutMs?: number;
 }
 
+/** A non-success HTTP answer; `retryAfter` is the Retry-After header when the response exposes it (else null). */
+export class HttpError extends Error {
+  constructor(readonly status: number, url: string, readonly retryAfter: string | null) { super(`HTTP ${status} for ${url}`); }
+}
+
 type ProgressFn = (active: number, received: number, total: number) => void;
 let active = 0, received = 0, total = 0;
 const progressListeners = new Set<ProgressFn>();
@@ -69,7 +74,7 @@ async function download(url: string, key: string, o: FetchOpts, signal: AbortSig
   let counted = 0;
   try {
     const r = await fetch(routeUrl(url), { headers, signal });
-    if (!r.ok) throw new Error(`HTTP ${r.status} for ${url}`);
+    if (!r.ok) throw new HttpError(r.status, url, r.headers.get('retry-after'));
     // Bytes of the body to skip and to keep: a 206 must match the request; a 200 means the range was ignored.
     let skip = 0, keep = Infinity;
     if (o.range) {
@@ -117,13 +122,15 @@ export async function fetchBytes(url: string, o: FetchOpts = {}): Promise<Uint8A
   if (o.signal?.aborted) throw abortError();
   // Cache Storage ignores URL fragments, so byte ranges are keyed with a synthetic query parameter.
   const key = o.range ? `${url}${url.includes("?") ? "&" : "?"}cwrv3range=${o.range[0]}-${o.range[1]}` : url;
-  let sh = inflight.get(key);
+  // A growing file and its final immutable version can share a URL but need separate transfers.
+  const transferKey = `${o.cache ?? 'none'}:${key}`;
+  let sh = inflight.get(transferKey);
   if (!sh) {
     const ctl = new AbortController();
     const timer = setTimeout(() => ctl.abort(new DOMException(`timeout after ${o.timeoutMs ?? 90_000} ms: ${url}`, 'TimeoutError')), o.timeoutMs ?? 90_000);
     const s: Shared = { ctl, waiters: 0, promise: download(url, key, o, ctl.signal) };
-    s.promise.finally(() => { clearTimeout(timer); if (inflight.get(key) === s) inflight.delete(key); }).catch(() => {});
-    inflight.set(key, s);
+    s.promise.finally(() => { clearTimeout(timer); if (inflight.get(transferKey) === s) inflight.delete(transferKey); }).catch(() => {});
+    inflight.set(transferKey, s);
     sh = s;
   }
   const shared = sh;
@@ -135,7 +142,7 @@ export async function fetchBytes(url: string, o: FetchOpts = {}): Promise<Uint8A
     const onAbort = () => {
       if (done) return;
       done = true; shared.waiters--;
-      if (shared.waiters <= 0) { shared.ctl.abort(); if (inflight.get(key) === shared) inflight.delete(key); }
+      if (shared.waiters <= 0) { shared.ctl.abort(); if (inflight.get(transferKey) === shared) inflight.delete(transferKey); }
       reject(abortError());
     };
     o.signal!.addEventListener('abort', onAbort, { once: true });

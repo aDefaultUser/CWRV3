@@ -456,14 +456,28 @@ export class NexradLayer extends MapLayer {
     const memory = settings.num('settings.nexradLevel2VolumeCountMemory');
     const wanted = l2Retention(files, memory, this.liveScan && newest.live ? newest : null);
     const keep = new Map(this.l2.map((f) => [f.file.url, f]));
-    const next: L2Frame[] = wanted.map((f) => keep.get(f.url) ?? { t: f.t, file: f });
+    // A live volume takes each new listing of its own URL: it grows, then completes. Its products are requested
+    // again; on completion its metadata is read afresh, so the final chunks reach the worker as a complete volume.
+    const renewed: L2Frame[] = [];
+    const next: L2Frame[] = wanted.map((file) => {
+      const f = keep.get(file.url);
+      if (!f) return { t: file.t, file };
+      if (f.file.live || file.live) {
+        if (f.file.live && !file.live) { f.meta = undefined; this.liveAz = null; }
+        f.file = file;
+        for (const s of slots(f)) s.key = undefined;
+        renewed.push(f);
+      }
+      return f;
+    });
     for (const f of this.l2) if (!next.includes(f)) for (const s of slots(f)) s.sweep?.tex.destroy();
     this.l2 = next;
     this.trimPanes();
-    if (this.liveScan) { const lf = this.l2.find((f) => f.file.live); if (lf) { for (const s of slots(lf)) s.key = undefined; lf.file = { ...newest, live: true }; } }
     // The refresh waits only for the newest volume, so the current scan shows at once and live polls keep their
     // cadence; the older volumes fill in behind it.
-    await this.loadL2(this.l2[this.l2.length - 1]);
+    const last = this.l2[this.l2.length - 1];
+    for (const f of renewed) if (f !== last) void this.loadL2(f);
+    await this.loadL2(last);
     if (gen !== this.gen) return;
     void this.backfillL2(l2Parallel(src, settings.num('settings.nexradLevel2MaxVolumeDownloadCount')));
     this.updateL2Status();
@@ -518,12 +532,13 @@ export class NexradLayer extends MapLayer {
    * A newer read of the volume supersedes this one.
    */
   private async loadL2(f: L2Frame) {
-    const gen = this.gen;
-    const current = () => gen === this.gen && this.l2.includes(f);
+    const gen = this.gen, file = f.file;
+    // A newer listing of the volume (live growth or completion) supersedes this load.
+    const current = () => gen === this.gen && this.l2.includes(f) && f.file === file;
     try {
-      if (!f.meta || f.file.live) {
+      if (!f.meta || file.live) {
         const token = f.metaReq = (f.metaReq ?? 0) + 1;
-        const meta = await pool.for(this.id).run<L2Meta>('l2.meta', { url: f.file.url, live: f.file.live, chunks: f.file.chunks }, f.file.url);
+        const meta = await pool.for(this.id).run<L2Meta>('l2.meta', { url: file.url, live: file.live, chunks: file.chunks }, file.url);
         if (token !== f.metaReq || !current()) return; // a newer read of this volume, or another site
         f.meta = meta;
       }
@@ -547,17 +562,18 @@ export class NexradLayer extends MapLayer {
    */
   private async buildL2(f: L2Frame, pane: number, gen: number) {
     const product = this.product(pane), composite = this.composite(pane), id = this.l2Identity(pane), meta = f.meta!;
-    const s = this.slotFor(f, pane);
-    // The slot is replaced when the pane leaves the layout or its volume the loop.
-    const current = () => gen === this.gen && this.l2.includes(f) && slot(f, pane) === s;
+    const s = this.slotFor(f, pane), live = f.file.live;
+    // The slot is replaced when the pane leaves the layout or its volume the loop; a live build is stale once the
+    // volume completed.
+    const current = () => gen === this.gen && this.l2.includes(f) && slot(f, pane) === s && f.file.live === live;
     let key = '';
     try {
       const sweepIdx = composite ? -1 : this.sweepFor(meta, product, this.view(pane).tilt);
       const params = this.buildParams(f.t, pane);
       // Rolling: a live volume's product also reads the previous complete volume (its own identity, see l2Identity).
-      const prev = this.rolling(pane) && f.file.live ? this.l2.filter((x) => !x.file.live && x.t < f.t).pop() : undefined;
+      const prev = this.rolling(pane) && live ? this.l2.filter((x) => !x.file.live && x.t < f.t).pop() : undefined;
       const rolling = prev && { url: prev.file.url, chunks: prev.file.chunks };
-      key = `${id}|${sweepIdx}|${JSON.stringify(params)}|${meta.sweeps.length}|${meta.sweeps[meta.sweeps.length - 1]?.radials}|${rolling?.url ?? ''}`;
+      key = `${id}|${sweepIdx}|${JSON.stringify(params)}|${meta.sweeps.length}|${meta.sweeps[meta.sweeps.length - 1]?.radials}|${rolling?.url ?? ''}|${live ? 'live' : ''}`;
       if (s.key === key) { s.req = undefined; return; } // already built (or known unavailable); an older request in flight is superseded
       if (s.req === key) return;
       if (sweepIdx === null) { s.error = 'not available for this volume'; this.dropSweep(s); s.key = key; s.req = undefined; this.updateL2Status(); return; }

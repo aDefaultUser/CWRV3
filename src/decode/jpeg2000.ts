@@ -8,13 +8,10 @@ import bundledWasm from '@cornerstonejs/codec-openjpeg/decodewasm?url';
 let mod: Promise<{ J2KDecoder: new () => Decoder }> | null = null;
 // In browsers/workers the .wasm is served by the bundler; under Node the module reads it from its own directory.
 const inBrowser = typeof (globalThis as { WorkerGlobalScope?: unknown }).WorkerGlobalScope !== 'undefined' || typeof window !== 'undefined';
-let wasmUrl: string | null = inBrowser ? (bundledWasm as string) : null;
-
-/** Optional explicit location of openjpegwasm_decode.wasm (set by the browser worker from a bundler URL). */
-export function setJ2KWasmUrl(url: string) { wasmUrl = url; }
+const wasmUrl: string | null = inBrowser ? (bundledWasm as string) : null;
 
 function load() {
-  if (!mod) mod = (OpenJPEGWASM as (o: object) => Promise<{ J2KDecoder: new () => Decoder }>)(wasmUrl ? { locateFile: (p: string) => (p.endsWith('.wasm') ? wasmUrl! : p) } : {});
+  if (!mod) mod = (OpenJPEGWASM as (o: object) => Promise<{ J2KDecoder: new () => Decoder }>)(wasmUrl ? { locateFile: (p: string) => (p.endsWith('.wasm') ? wasmUrl : p) } : {});
   return mod;
 }
 

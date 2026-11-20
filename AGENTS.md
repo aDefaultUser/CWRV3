@@ -9,8 +9,9 @@ usage, data sources, persistence and licences.
 npm install
 npm run dev        # http://127.0.0.1:5173/ (loopback; includes the allowlisted proxy, server/proxy.mjs)
 npm run check      # tsc --noEmit + vitest run + vite build: run before handing work back
+npm run wasm       # build rust/archive2 for wasm32 (dev/build/test/check run it; skipped without Rust or the target)
 npm test           # unit tests only (tests/*.test.ts, Node; no browser)
-npm run loc        # functional line count; update the README table when it changes
+npm run loc        # functional line count; update the README "Code size" line when it changes
 npm run bench -- <label> <mode> --out <dir>   # isolated Chromium on DevTools port 9333 (refuses a busy port)
 ```
 
@@ -40,9 +41,15 @@ WebGPU needs a hardware adapter: on Linux `chromium --enable-unsafe-webgpu --ena
   panes 1–3, presets, saved layouts). The renderer draws the scene into each pane's viewport with the one camera
   sized to a pane: a layer is recorded once and replayed, unless it is `perPane` (NEXRAD), whose `draw` runs per pane
   with `ctx.pane`. `NexradLayer.view(pane)`: pane 0 is the radar settings; every per-pane method takes the pane.
+- World tab (`src/sections/world.ts`, form `ui-forms-world.ts`): `layers/world-radar.ts` (RainViewer mosaic, opt-in
+  behind its terms; tiles through `render/overlay-tiles.ts`, a lazily allocated atlas under a shared request budget)
+  and `layers/world-satellite.ts` (NOAA GMGSI, decoded by `decode/gmgsi.ts` in the worker, drawn on its Mercator grid).
 - `src/decode/`, `src/workers/` — decoders (Archive II, Level 3, GRIB2, NetCDF/HDF5 via h5wasm) run in the worker
   pool; callers name the owner: `pool.for(layerId).run(task, args)`. `l2-volumes.ts` holds the Level 2 volume cache
   (live chunk volumes update incrementally; `tests/helpers/archive2-writer.ts` writes synthetic volumes for tests).
+- Archive II decoding: `rust/archive2` (Rust → wasm32, one instance per decoder) through `decode/archive2-wasm.ts`;
+  `decode/archive2.ts` is the TypeScript reference and fallback, and the two must stay bit-identical
+  (`tests/archive2-wasm.test.ts`; `cargo test`, `cargo clippy` and `cargo fmt` in `rust/archive2`).
 - `src/perf/` — frame meter, benchmark, F8 performance panel.
 - `src/generated/` — hand-maintained catalogs (settings, forms, products); edit them directly.
 

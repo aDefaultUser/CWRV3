@@ -341,5 +341,3 @@ function parseTabular(r: Reader, off: number, prod: L3Product) {
     prod.pages.push(lines);
   }
 }
-
-export function l3Value(p: L3Product, code: number): number { return p.lut[code]; }

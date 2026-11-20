@@ -63,7 +63,7 @@ export const STYLE_DEFAULTS: Record<string, MapObjectStyle> = {
   Placefile: S('#FFFFFF40', '#FFFFFF', { width: 1.5 }), UserShape: S('#00000000', '#FFC040', { width: 1.5 }),
 };
 
-let user = loadPref<Record<string, Partial<MapObjectStyle>>>('mapObjectStyles', {}, isRecord);
+const user = loadPref<Record<string, Partial<MapObjectStyle>>>('mapObjectStyles', {}, isRecord);
 const listeners = new Set<(name: string) => void>();
 STYLE_DEFAULTS['WarnCustom:Tornado Emergency'] = S('#FF00FF30', '#FF00FF', { width: 3.5, border: [0, 0, 0, 220] });
 STYLE_DEFAULTS['WarnCustom:PDS'] = S('#FF000020', '#FF4040', { width: 3.2, border: [80, 0, 0, 220] });
@@ -77,15 +77,7 @@ export function mapObjectStyle(name: string): MapObjectStyle {
   const base = STYLE_DEFAULTS[name] ?? STYLE_DEFAULTS[name.replace(/\d+$/, '')] ?? S('#80808060', '#C0C0C0');
   return { ...base, ...(user[name] ?? {}) };
 }
-export function setMapObjectStyle(name: string, patch: Partial<MapObjectStyle> | null) {
-  if (patch === null) delete user[name]; else user[name] = { ...(user[name] ?? {}), ...patch };
-  const ok = savePref('mapObjectStyles', user, 'map object styles');
-  for (const f of listeners) f(name);
-  return ok;
-}
 export function onStyleChange(fn: (name: string) => void) { listeners.add(fn); return () => listeners.delete(fn); }
-export function exportStyles() { return structuredClone(user); }
-export function importStyles(v: Record<string, Partial<MapObjectStyle>>) { user = isRecord(v) ? v : {}; const ok = savePref('mapObjectStyles', user, 'map object styles'); for (const f of listeners) f('*'); return ok; }
 
 // ------------------------------------------------------------------------------------------- full style records
 // Record shapes follow (TVectorLineStyle: levels of zoom + six passes; TVectorPolygonStyle: levels
@@ -130,9 +122,8 @@ export function fromSeed(s: MapObjectStyle): ObjectStyle {
   return { line: { levels: [{ zoom: 0, passes }], hardTransitions: false, interpolateInvisible: true }, poly: { levels: [fill], hardTransitions: false }, minZoom: 0, maxZoom: 100000, mode: 0 };
 }
 
-let full = loadPref<Record<string, ObjectStyle>>('objectStyles', {}, isRecord);
+const full = loadPref<Record<string, ObjectStyle>>('objectStyles', {}, isRecord);
 export function objectStyle(name: string): ObjectStyle { return full[name] ? structuredClone(full[name]) : fromSeed(mapObjectStyle(name)); }
-export function hasCustomStyle(name: string) { return !!full[name]; }
 export function setObjectStyle(name: string, s: ObjectStyle | null) {
   if (s) full[name] = s; else delete full[name];
   const ok = savePref('objectStyles', full, 'object styles');
@@ -182,8 +173,6 @@ export function polyFill(name: string, z: number): FillStyle {
 }
 /** True when the style changes with zoom (layers then refresh their style buffers as the camera zooms). */
 export function zoomDependent(name: string) { const s = objectStyle(name); return s.line.levels.length > 1 || s.poly.levels.length > 1 || s.minZoom > 0 || s.maxZoom < 100000; }
-export function exportObjectStyles() { return structuredClone(full); }
-export function importObjectStyles(v: Record<string, ObjectStyle>) { full = isRecord(v) ? v : {}; const ok = savePref('objectStyles', full, 'object styles'); for (const f of listeners) f('*'); return ok; }
 
 // ------------------------------------------------------------------------------------------- text styles
 export interface TextStyleDef {

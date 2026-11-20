@@ -12,14 +12,7 @@ import type { JobClock } from './job-clock';
 
 const inflate = (b: Uint8Array) => inflateZlib(b);
 
-import { rne } from '../util/round';
-export { rne };
-
 export interface GeoInfo { nx: number; ny: number; proj: ProjParamsLike; bounds: [number, number, number, number]; grid: Grid }
-export function geoOf(f: GribField): GeoInfo {
-  const [nx, ny] = gridSize(f.grid);
-  return { nx, ny, proj: gridProj(f.grid), bounds: gridBounds(f.grid), grid: f.grid };
-}
 
 /**
  * Fetches GRIB2 messages: whole file (optionally gzip) or, with matches, the inventory-selected byte ranges.
@@ -53,19 +46,6 @@ export function encodeNormHalf(values: Float32Array, lo: number, hi: number, con
     f[i] = Math.min(1, Math.max(0, (v - lo) / span));
   }
   return toHalf(f);
-}
-
-/** 16-bit codes as exact float32 texel values (code / 65535); `missing` codes are written as −1. */
-export function codesToTexels(codes: Uint16Array, missing?: Uint8Array): Float32Array {
-  const out = new Float32Array(codes.length);
-  for (let i = 0; i < codes.length; i++) out[i] = missing && missing[i] ? -1 : codes[i] / 65535;
-  return out;
-}
-
-/** Quantisation: q = (v − lo) × 65535 / (hi − lo), clamped to 0..65534 (round half to even). */
-export function quantize16(v: number, lo: number, hi: number): number {
-  const q = rne(((v - lo) * 65535) / (hi - lo));
-  return q < 0 ? 0 : q > 65534 ? 65534 : q;
 }
 
 /** Max-downsampling by an integer factor (keeps peaks, e.g. reflectivity cores). NaN only when every input is NaN. */

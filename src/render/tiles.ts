@@ -3,7 +3,7 @@
 // shaded relief, ocean masking and lat/lon lines. Public substitutes for the vendor-hosted BMNG/NAIP/WELD/NED
 // buckets (60).
 import type { Renderer, DrawContext, Drawable } from './renderer';
-import { lonLatToXYZ } from './camera';
+import { lonLatToXYZ, type Camera } from './camera';
 import { bakeLut } from './palette';
 import { getPalette } from '../palettes/library';
 import { generateLayerMips, mipLevels } from './mips';
@@ -157,6 +157,99 @@ export function rescaleRange(cur: [number, number] | null, target: [number, numb
   return [cur[0] + (target[0] - cur[0]) * k, cur[1] + (target[1] - cur[1]) * k];
 }
 
+/** Degrees between two longitudes the shorter way round. */
+const lonGap = (a: number, b: number) => Math.abs(((((a - b + 180) % 360) + 360) % 360) - 180);
+
+/** Times a kept tile's quarters are tested again with their own, tighter caps (fewer hidden tiles kept). */
+const CULL_DEPTH = 3;
+
+/**
+ * Planes [nx, ny, nz, d] (unit normal, inside where n·p + d ≥ 0) that every visible point of the unit sphere lies
+ * inside: the side and near planes of the view frustum, and the horizon plane (front-facing: eye·p > 1).
+ */
+function visibilityPlanes(cam: Camera): number[][] {
+  const m = cam.viewProj, row = (i: number) => [m[i], m[4 + i], m[8 + i], m[12 + i]];
+  const [x, y, z, w] = [row(0), row(1), row(2), row(3)];
+  const unit = (p: number[]) => { const l = Math.hypot(p[0], p[1], p[2]); return p.map((v) => v / l); };
+  const e = cam.eye;
+  return [...[x, y].flatMap((a) => [w.map((v, i) => v + a[i]), w.map((v, i) => v - a[i])]), z, [e[0], e[1], e[2], -1]].map(unit);
+}
+
+/**
+ * Spherical cap around a tile's patch (lon lonA–lonB, lat latS–latN): centre and angular radius. The patch point
+ * farthest from the centre is a corner, as a tile of level ≥ 1 spans at most half the longitudes.
+ */
+function patchCap(lonA: number, lonB: number, latS: number, latN: number): [number[], number] {
+  const c = lonLatToXYZ((lonA + lonB) / 2, (latS + latN) / 2);
+  let cosR = 1;
+  for (const lon of [lonA, lonB]) for (const lat of [latS, latN]) {
+    const p = lonLatToXYZ(lon, lat);
+    cosR = Math.min(cosR, c[0] * p[0] + c[1] * p[1] + c[2] * p[2]);
+  }
+  return [c, Math.acos(Math.max(-1, cosR)) + 1e-9];
+}
+
+/**
+ * False only when no point of the patch (lon lonA–lonB, lat latS–latN) of the unit sphere can be visible: the cap
+ * around it lies wholly outside one of the visibility planes, or, `depth` times over, so does the cap around each
+ * quarter of it (tighter caps). Conservative: a patch near a corner of the frustum may be kept although none of it
+ * shows.
+ */
+function patchMayShow(lonA: number, lonB: number, latS: number, latN: number, planes: number[][], depth: number): boolean {
+  const [c, theta] = patchCap(lonA, lonB, latS, latN);
+  for (const [nx, ny, nz, d] of planes) {
+    const a = Math.acos(Math.max(-1, Math.min(1, nx * c[0] + ny * c[1] + nz * c[2])));
+    if (Math.cos(Math.max(0, a - theta)) + d < 0) return false; // the cap's greatest n·p is still outside
+  }
+  if (!depth) return true;
+  const lonM = (lonA + lonB) / 2, latM = (latS + latN) / 2;
+  return patchMayShow(lonA, lonM, latS, latM, planes, depth - 1) || patchMayShow(lonM, lonB, latS, latM, planes, depth - 1)
+    || patchMayShow(lonA, lonM, latM, latN, planes, depth - 1) || patchMayShow(lonM, lonB, latM, latN, planes, depth - 1);
+}
+
+/**
+ * Web Mercator tiles [z, x, y] in view: a quadtree split while a tile spans more than `splitPx` device pixels, from
+ * level `minZ` down to level `maxZ`, culled outside the viewport from level 2 on, and at most `maxTiles` tiles. The
+ * default cull projects a few points of each tile and can miss a tile whose visible part lies between them; with
+ * `complete`, a tile is culled only when no point of it can be visible (every visible point lies in a listed tile).
+ */
+export function selectTiles(cam: Camera, dpr: number, maxZ: number, splitPx: number, maxTiles: number, minZ = 2, complete = false): number[][] {
+  const out: number[][] = [];
+  const look = cam.cur;
+  const planes = complete ? visibilityPlanes(cam) : [];
+  const visit = (z: number, x: number, y: number) => {
+    if (out.length >= maxTiles) return;
+    const n = 2 ** z;
+    const lonA = (x / n) * 360 - 180, lonB = ((x + 1) / n) * 360 - 180;
+    const latA = (Math.atan(Math.sinh(Math.PI * (1 - (2 * y) / n))) * 180) / Math.PI;
+    const latB = (Math.atan(Math.sinh(Math.PI * (1 - (2 * (y + 1)) / n))) * 180) / Math.PI;
+    let anyFront = false, minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity, cnt = 0;
+    // A 3×3 grid misses large tiles whose visible part lies between samples (zoomed-in views), so the tile point
+    // nearest the look-at point is sampled too, and the tile holding the look-at point is never culled.
+    // (Across the antimeridian the nearest edge is the one the shorter way round.)
+    const nearLon = look.lon >= lonA && look.lon <= lonB ? look.lon : lonGap(look.lon, lonA) <= lonGap(look.lon, lonB) ? lonA : lonB;
+    const nearLat = Math.max(latB, Math.min(latA, look.lat));
+    const holdsLook = nearLon === look.lon && nearLat === look.lat;
+    for (let i = 0; i <= 9; i++) {
+      const lon = i < 9 ? lonA + ((lonB - lonA) * (i % 3)) / 2 : nearLon, lat = i < 9 ? latA + ((latB - latA) * Math.floor(i / 3)) / 2 : nearLat;
+      const [px, py, front] = cam.project(lonLatToXYZ(lon, lat));
+      if (!front) continue;
+      anyFront = true; cnt++;
+      minX = Math.min(minX, px); maxX = Math.max(maxX, px); minY = Math.min(minY, py); maxY = Math.max(maxY, py);
+    }
+    if (z >= 2 && !holdsLook && (complete ? !patchMayShow(lonA, lonB, latB, latA, planes, CULL_DEPTH)
+      : !anyFront || maxX < -50 || minX > cam.width + 50 || maxY < -50 || minY > cam.height + 50)) return;
+    const size = Math.max(maxX - minX, maxY - minY) * dpr;
+    if (z < minZ || (z < maxZ && ((cnt >= 1 && size > splitPx) || (holdsLook && cnt < 10)))) {
+      for (let k = 0; k < 4; k++) visit(z + 1, x * 2 + (k & 1), y * 2 + (k >> 1));
+      return;
+    }
+    out.push([z, x, y]);
+  };
+  visit(0, 0, 0);
+  return out;
+}
+
 export class TileLayer implements Drawable {
   readonly id = 'basemap';
   img: TileCache; ter: TileCache;
@@ -195,41 +288,11 @@ export class TileLayer implements Drawable {
 
   /** Selects visible tiles (quadtree with screen-space size threshold). */
   private select(): number[][] {
-    const cam = this.r.camera;
-    const out: number[][] = [];
     // Reduced density while the camera moves (motion reduce amount in %), full density once it settles.
     const c = this.r.camera.cur, key = `${c.lon},${c.lat},${c.z},${c.tilt},${c.swivel}`;
     const moving = key !== this.lastCam; this.lastCam = key;
     const thresh = this.s.density * 1.15 * (moving ? 1 + this.s.motionReduce / 100 : 1);
-    const look = cam.cur;
-    const visit = (z: number, x: number, y: number) => {
-      if (out.length >= MAX_TILES) return;
-      const n = 2 ** z;
-      const lonA = (x / n) * 360 - 180, lonB = ((x + 1) / n) * 360 - 180;
-      const latA = (Math.atan(Math.sinh(Math.PI * (1 - (2 * y) / n))) * 180) / Math.PI;
-      const latB = (Math.atan(Math.sinh(Math.PI * (1 - (2 * (y + 1)) / n))) * 180) / Math.PI;
-      let anyFront = false, minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity, cnt = 0;
-      // A 3×3 grid misses large tiles whose visible part lies between samples (zoomed-in views), so the tile point
-      // nearest the look-at point is sampled too, and the tile holding the look-at point is never culled.
-      const nearLon = Math.max(lonA, Math.min(lonB, look.lon)), nearLat = Math.max(latB, Math.min(latA, look.lat));
-      const holdsLook = nearLon === look.lon && nearLat === look.lat;
-      for (let i = 0; i <= 9; i++) {
-        const lon = i < 9 ? lonA + ((lonB - lonA) * (i % 3)) / 2 : nearLon, lat = i < 9 ? latA + ((latB - latA) * Math.floor(i / 3)) / 2 : nearLat;
-        const [px, py, front] = cam.project(lonLatToXYZ(lon, lat));
-        if (!front) continue;
-        anyFront = true; cnt++;
-        minX = Math.min(minX, px); maxX = Math.max(maxX, px); minY = Math.min(minY, py); maxY = Math.max(maxY, py);
-      }
-      if (z >= 2 && !holdsLook && (!anyFront || maxX < -50 || minX > cam.width + 50 || maxY < -50 || minY > cam.height + 50)) return;
-      const size = Math.max(maxX - minX, maxY - minY) * this.r.gpu.dpr;
-      if (z < 2 || (z < TER_MAX + 1 && ((cnt >= 1 && size > thresh * 2) || (holdsLook && cnt < 10)))) {
-        for (let k = 0; k < 4; k++) visit(z + 1, x * 2 + (k & 1), y * 2 + (k >> 1));
-        return;
-      }
-      out.push([z, x, y]);
-    };
-    visit(0, 0, 0);
-    return out;
+    return selectTiles(this.r.camera, this.r.gpu.dpr, TER_MAX + 1, thresh * 2, MAX_TILES);
   }
 
   /** Land elevation range over the drawn terrain tiles (null until any tile is measured). */

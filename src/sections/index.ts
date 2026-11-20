@@ -18,6 +18,7 @@ import { NdfdLayer, WinterLayer, NDFD, WINTER_LEVELS, winterEndHours } from './n
 import { TropicalLayer } from './tropical';
 import { ModelLayer, CUSTOM_CAPTION } from './model';
 import { prefObject } from '../app/persist';
+import { worldSection } from './world';
 
 export interface SectionCtx { r: Renderer; atlas: GlyphAtlas }
 export interface Section {
@@ -466,5 +467,5 @@ function modelSection(c: SectionCtx): Section {
 void CUSTOM_CAPTION;
 
 export function buildSections(c: SectionCtx): Section[] {
-  return [surfaceSection(c), mrmsSection(c), modelSection(c), mesoSection(c), forecastSection(c), ndfdSection(c), nwsSection(c), tropicalSection(c), winterSection(c), miscSection(c)];
+  return [worldSection(c), surfaceSection(c), mrmsSection(c), modelSection(c), mesoSection(c), forecastSection(c), ndfdSection(c), nwsSection(c), tropicalSection(c), winterSection(c), miscSection(c)];
 }

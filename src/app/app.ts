@@ -61,7 +61,11 @@ import { archiveBindings, archiveMenu, archiveMenuActions } from '../ui/archive-
 import { paneBindings, paneMenu, paneMenuActions } from '../ui/pane-forms';
 import { archiveBadge } from './archive';
 import { NOT_AVAILABLE } from '../layers/base';
+import type { Attribution } from '../layers/world-common';
 import { openSounding } from '../ui/sounding-panel';
+
+/** Height of the source credits box with its bottom margin (theme.css .hud-credits: 16 px line, 1 px padding, 4 px). */
+const CREDITS_H = 22;
 
 type Tool = null | 'line' | 'path' | 'radial' | 'motion' | 'manualTrack' | 'light' | 'telestrate' | 'annotate' | 'labelPlace' | 'vrShear' | 'sounding' | 'section';
 
@@ -127,7 +131,7 @@ export class App {
   private flashT = 0;
   /** Edits made through the open Settings dialog since it opened or since Apply (what Cancel reverts). */
   private settingsEdits: SettingEdits = new Map();
-  private hud!: { watchBox: HTMLElement; roadTip: HTMLElement; cityList: HTMLElement; cell: HTMLElement; brand: HTMLCanvasElement; maplabel: HTMLElement; time: HTMLElement; strikes: HTMLElement; info: HTMLElement; tip: HTMLElement; legend: HTMLCanvasElement; svg: SVGSVGElement; logo: HTMLElement; overlay: HTMLImageElement;
+  private hud!: { watchBox: HTMLElement; roadTip: HTMLElement; cityList: HTMLElement; cell: HTMLElement; brand: HTMLCanvasElement; maplabel: HTMLElement; time: HTMLElement; strikes: HTMLElement; info: HTMLElement; tip: HTMLElement; credits: HTMLElement; legend: HTMLCanvasElement; svg: SVGSVGElement; logo: HTMLElement; overlay: HTMLImageElement;
     /** Per pane: its legend strip (pane 0's is `legend`), linked crosshair, probe readout and caption; and the two pane dividers. */
     panes: { legend: HTMLCanvasElement; cross: HTMLElement; probe: HTMLElement; label: HTMLElement }[]; dividers: HTMLElement[] };
   private status: HTMLElement[] = [];
@@ -434,10 +438,10 @@ export class App {
       maplabel: this.el('div', 'hud-time hud-sub', ov),
       time: this.el('div', 'hud-time', ov), strikes: this.el('div', 'hud-box hud-strikes', ov),
       panes: paneLegends.map((cv) => ({ legend: cv, label: this.el('div', 'pane-label', ov), probe: this.el('div', 'probe', ov), cross: this.el('div', 'crosshair', ov) })), dividers,
-      info: this.el('div', 'hud-info', ov), tip: this.el('div', 'tooltip', ov), legend, svg, logo, overlay,
+      info: this.el('div', 'hud-info', ov), tip: this.el('div', 'tooltip', ov), credits: this.el('div', 'hud-credits', ov), legend, svg, logo, overlay,
     };
     for (const p of this.hud.panes) { p.probe.style.display = 'none'; p.cross.style.display = 'none'; p.label.style.display = 'none'; }
-    this.hud.info.style.display = 'none'; this.hud.tip.style.display = 'none'; this.hud.roadTip.style.display = 'none';
+    this.hud.info.style.display = 'none'; this.hud.tip.style.display = 'none'; this.hud.roadTip.style.display = 'none'; this.hud.credits.style.display = 'none';
     const lp = settings.arr<number>('config.guiLightningCountPosition');
     this.hud.strikes.style.left = `${lp[0]}px`; this.hud.strikes.style.top = `${lp[1]}px`;
     drag(this.hud.strikes, this.hud.strikes, (x, y) => settings.set('config.guiLightningCountPosition', [x, y]));
@@ -905,6 +909,15 @@ export class App {
     };
     text(h.time); text(h.maplabel); text(h.strikes); text(h.watchBox);
     for (const p of h.panes) text(p.label);
+    if (visible(h.credits)) {
+      // Source credits stay on captures (as text: links cannot be followed in an image).
+      const cs = getComputedStyle(h.credits), size = parseFloat(cs.fontSize) * k;
+      c.font = `${size}px ${cs.fontFamily}`; c.textBaseline = 'top';
+      const line = [...h.credits.children].map((a) => a.textContent).join('  ·  ');
+      const x = (h.credits.offsetLeft + h.credits.offsetWidth) * k - c.measureText(line).width - 6 * k, y = (h.credits.offsetTop + 2) * k;
+      c.lineWidth = Math.max(2, size * 0.22); c.strokeStyle = 'rgba(0,0,0,0.9)'; c.strokeText(line, x, y);
+      c.fillStyle = '#cfe0ff'; c.fillText(line, x, y);
+    }
     const img = (e: HTMLImageElement | null) => { if (e && e.complete && e.naturalWidth && visible(e)) c.drawImage(e, e.offsetLeft * k, e.offsetTop * k, e.offsetWidth * k, e.offsetHeight * k); };
     const li = h.logo.querySelector('img');
     if (li && li.complete && li.naturalWidth && visible(h.logo)) c.drawImage(li, h.logo.offsetLeft * k, h.logo.offsetTop * k, li.offsetWidth * k, li.offsetHeight * k);
@@ -1452,6 +1465,7 @@ export class App {
   /** Benchmark override of the FPS limit (0 = unlimited); null = settings. */
   fpsOverride: number | null = null;
   private watchText: string | null = null;
+  private creditKey = '';
 
   private applyTileSettings() {
     const z = this.renderer.camera.zoomScale;
@@ -1614,6 +1628,19 @@ export class App {
     const ml = [...this.layers.values()].filter((l) => (l as MapLayer).status?.state !== 'unavailable').map((l) => (l as { mapLabel?: () => string | null }).mapLabel?.() ?? null).filter((x): x is string => !!x).join('\n');
     if (ml !== this.mapLabelText) { this.mapLabelText = ml; h.maplabel.textContent = ml; h.maplabel.style.display = ml ? '' : 'none'; }
     if (ml) { h.maplabel.style.left = h.time.style.left; h.maplabel.style.top = `${(parseFloat(h.time.style.top) || 8) + 30}px`; }
+    // Source credits with links of the enabled layers that name one (worldwide radar and satellite).
+    const credits = [...this.layers.values()].filter((l): l is MapLayer & { attribution: () => Attribution[] } => 'attribution' in l && (l as MapLayer).enabled()).flatMap((l) => l.attribution());
+    const creditKey = credits.map((c) => c.href).join(' ');
+    if (creditKey !== this.creditKey) {
+      this.creditKey = creditKey;
+      h.credits.textContent = '';
+      for (const c of credits) {
+        const a = document.createElement('a');
+        a.href = c.href; a.textContent = c.text; a.title = c.title; a.target = '_blank'; a.rel = 'noopener noreferrer';
+        h.credits.appendChild(a);
+      }
+      h.credits.style.display = credits.length ? '' : 'none';
+    }
     // Severe watch text box at General/SevereWatchBoxPosition: watches in effect at map time.
     const wl = this.warnings.watchesAt(timeline.t);
     const wt = wl.length ? wl.slice(0, 6).map((a) => `${a.event}${a.etn ? ` #${Number(a.etn)}` : ''} until ${dateFormat([], { hour: 'numeric', minute: '2-digit' }).format(a.ends)}`).join('\n') + (wl.length > 6 ? `\n+${wl.length - 6} more` : '') : '';
@@ -1645,7 +1672,9 @@ export class App {
       if (hp.label.style.display === 'none') return;
       const text = this.nexrad.paneLabel(pane);
       if (hp.label.textContent !== text) hp.label.textContent = text;
-      hp.label.style.right = `${overlayW - (ox + paneW) + 6}px`; hp.label.style.top = `${oy + paneH - 26}px`;
+      // The caption of the bottom-right pane sits above the source credits in that corner.
+      const lift = h.credits.style.display !== 'none' && ox + paneW >= overlayW - 1 && oy + paneH >= overlayH - 1 ? CREDITS_H : 0;
+      hp.label.style.right = `${overlayW - (ox + paneW) + 6}px`; hp.label.style.top = `${oy + paneH - 26 - lift}px`;
     });
     // Lightning count box.
     const showStrikes = this.lightning.enabled() && settings.bool('settings.lightningRenderingFlashCountBox');

@@ -1,7 +1,7 @@
 // Level 2 volumes in the decode worker: the decoded-volume cache, incremental real-time chunk volumes and the tasks
 // built on them (metadata, products, live composite, volume packs).
-import { Archive2Decoder, type L2Volume } from '../decode/archive2';
-import { bunzip2 } from '../decode/bzip2';
+import type { L2Volume } from '../decode/archive2';
+import { archive2Backend, archive2Ready, createArchive2Decoder, type L2Decoder } from '../decode/archive2-wasm';
 import { gunzip } from '../decode/zip';
 import { fetchBytes } from '../data/net';
 import { recodeVolume, buildProduct, liveComposite, rollingTilts, SweepCache, type BuilderSweep, type L2BuildParams, type L2ProductSweep, type VolumeMoment } from '../radar/l2products';
@@ -16,9 +16,10 @@ export interface L2Meta { site: string; volumeTimeMs: number | null; lat: number
 interface Product { p: L2ProductSweep | null; of: BuilderSweep | null; index: number }
 /**
  * A decoded volume: the raw sweeps, their recoded form, the per-sweep derived arrays (`derived`) and up to 24 built
- * products. `bytes` counts all of them and drives eviction.
+ * products. `bytes` counts all of them and drives eviction. A chunk volume keeps the chunks it was decoded from;
+ * `growing` marks a whole file read while it was still being written (the live TGFTP volume).
  */
-interface VolEntry { meta: L2Meta; sweeps: BuilderSweep[]; volume: L2Volume; products: Map<string, Product>; derived: SweepCache; bytes: number }
+interface VolEntry { meta: L2Meta; sweeps: BuilderSweep[]; volume: L2Volume; products: Map<string, Product>; derived: SweepCache; bytes: number; chunks?: string[]; growing?: boolean }
 const volumes = new Map<string, VolEntry>();
 /**
  * Decoded-volume cache. The count follows settings.nexradLevel2VolumeCountMemory (sent by the main thread via
@@ -71,28 +72,64 @@ function describe(v: L2Volume, bytes: number): L2Meta {
   };
 }
 
-/** Real-time chunk volumes decoded incrementally: each call fetches only the chunks not fed yet. */
-const streams = new Map<string, { d: Archive2Decoder; fed: string[]; bytes: number }>();
+/**
+ * Real-time chunk volumes decoded incrementally. A live volume keeps its decoder (the three most recently fed) and
+ * each request feeds only the chunks not fed yet; a complete one (`live` false) frees its decoder after the last
+ * chunk. The cached volume answers any request for its chunks or the first of them. Chunks are downloaded before a
+ * decoder is created or fed, so pending and failed downloads hold no decoder.
+ */
+interface Stream { d: L2Decoder; fed: string[]; bytes: number }
+const streams = new Map<string, Stream>();
+function dropStream(url: string) {
+  streams.get(url)?.d.dispose();
+  streams.delete(url);
+}
+const startsWith = (list: string[], head: string[]) => head.length <= list.length && head.every((c, i) => list[i] === c);
 const streamLock = new Map<string, Promise<unknown>>();
 /** Serialises chunk feeding per volume (meta and product requests can overlap). */
-function loadChunks(url: string, chunks: string[], job: JobClock): Promise<VolEntry> {
-  const run = (streamLock.get(url) ?? Promise.resolve()).catch(() => undefined).then(() => feedChunks(url, chunks, job));
+function loadChunks(url: string, chunks: string[], live: boolean, job: JobClock): Promise<VolEntry> {
+  const run = (streamLock.get(url) ?? Promise.resolve()).catch(() => undefined).then(() => feedChunks(url, chunks, live, job));
   streamLock.set(url, run);
   void run.finally(() => { if (streamLock.get(url) === run) streamLock.delete(url); }).catch(() => undefined);
   return run;
 }
-async function feedChunks(url: string, chunks: string[], job: JobClock): Promise<VolEntry> {
-  let st = streams.get(url);
-  // A different chunk sequence (gap repaired, folder reused) restarts the decode.
-  if (!st || st.fed.some((c, i) => chunks[i] !== c)) { st = { d: new Archive2Decoder(), fed: [], bytes: 0 }; streams.set(url, st); }
-  const fresh = chunks.slice(st.fed.length);
-  const parts = await Promise.all(fresh.map((c) => fetchBytes(c, { cache: 'immutable' })));
-  const s = st;
-  job.time(() => { for (let i = 0; i < parts.length; i++) { s.d.feed(parts[i]); s.fed.push(fresh[i]); s.bytes += parts[i].length; } });
-  while (streams.size > 3) streams.delete(streams.keys().next().value!);
-  const hit = volumes.get(url);
-  if (hit && !fresh.length) return hit;
-  return job.time(() => cacheVolume(url, s.d.volume(), s.bytes));
+async function feedChunks(url: string, chunks: string[], live: boolean, job: JobClock): Promise<VolEntry> {
+  await archive2Ready();
+  for (;;) {
+    const hit = volumes.get(url);
+    // Decoded already (a late request of a live volume gets the volume as it has grown since).
+    if (hit?.chunks && startsWith(hit.chunks, chunks)) {
+      if (!live) dropStream(url);
+      volumes.delete(url); volumes.set(url, hit);
+      return hit;
+    }
+    // A stream fed with other chunks (gap repaired, folder reused, a late request) is decoded afresh.
+    const s = streams.get(url), resume = s && startsWith(chunks, s.fed) ? s : null;
+    const fresh = chunks.slice(resume?.fed.length ?? 0);
+    const parts = await Promise.all(fresh.map((c) => fetchBytes(c, { cache: 'immutable' })));
+    // Evicted while its chunks downloaded (and its decoder freed): decode afresh, the earlier chunks come from the cache.
+    if (resume && streams.get(url) !== resume) continue;
+    return job.time(() => {
+      if (!resume) dropStream(url);
+      const st = resume ?? { d: createArchive2Decoder(), fed: [], bytes: 0 };
+      try {
+        for (const p of parts) { st.d.feed(p); st.bytes += p.length; }
+        st.fed = chunks;
+        const entry = cacheVolume(url, st.d.volume(), st.bytes, chunks);
+        streams.delete(url);
+        if (live) {
+          streams.set(url, st);
+          while (streams.size > 3) dropStream(streams.keys().next().value!);
+        } else st.d.dispose();
+        return entry;
+      } catch (e) {
+        // A refused chunk leaves the decoder with part of it: the next request decodes the volume afresh.
+        if (resume) streams.delete(url);
+        st.d.dispose();
+        throw e;
+      }
+    });
+  }
 }
 
 /**
@@ -100,7 +137,7 @@ async function feedChunks(url: string, chunks: string[], job: JobClock): Promise
  * live volume that grew), the sweeps the decoder left unchanged keep their recoded sweep, their derived arrays and
  * their single-sweep products; only changed sweeps and whole-volume products are rebuilt.
  */
-function cacheVolume(url: string, volume: L2Volume, fileBytes: number): VolEntry {
+function cacheVolume(url: string, volume: L2Volume, fileBytes: number, chunks?: string[], growing = false): VolEntry {
   const prev = volumes.get(url);
   const sweeps = recodeVolume(volume, prev);
   const derived = prev?.derived ?? new SweepCache();
@@ -110,7 +147,7 @@ function cacheVolume(url: string, volume: L2Volume, fileBytes: number): VolEntry
   const seen = new Set<unknown>();
   let bytes = sizeOf(volume, seen) + sizeOf(sweeps, seen) + derived.bytes;
   for (const e of products.values()) bytes += sizeOf(e.p);
-  const entry: VolEntry = { meta: describe(volume, fileBytes), sweeps, volume, products, derived, bytes };
+  const entry: VolEntry = { meta: describe(volume, fileBytes), sweeps, volume, products, derived, bytes, chunks, growing };
   volumes.delete(url);
   volumes.set(url, entry);
   evict();
@@ -118,21 +155,26 @@ function cacheVolume(url: string, volume: L2Volume, fileBytes: number): VolEntry
 }
 
 async function loadVolume(url: string, live: boolean, job: JobClock, chunks?: string[]): Promise<VolEntry> {
-  if (chunks?.length) return loadChunks(url, chunks, job);
+  if (chunks?.length) return loadChunks(url, chunks, live, job);
   const hit = volumes.get(url);
-  if (hit && !live) { volumes.delete(url); volumes.set(url, hit); return hit; }
+  // A file read while it was still being written is read again once it is complete.
+  if (hit && !live && !hit.growing) { volumes.delete(url); volumes.set(url, hit); return hit; }
   const bytes = await fetchBytes(url, { cache: live ? 'none' : 'immutable' });
   // Archive volumes before mid-2016 are whole-file gzip (…_V06.gz, or without a version before 2008).
   const plain = bytes[0] === 0x1f && bytes[1] === 0x8b ? await gunzip(bytes) : bytes;
+  await archive2Ready();
   return job.time(() => {
-    let buf = plain;
-    // tgftp serves whole volumes compressed with bzip2 when the name ends in .bz2 but the content is still
-    // an AR2V file with bzip2 records; a fully compressed file starts with "BZh".
-    if (buf[0] === 0x42 && buf[1] === 0x5a && buf[2] === 0x68) buf = bunzip2(buf);
+    // A final read can finish while an earlier growing-file request is still in flight.
+    const completed = volumes.get(url);
+    if (live && completed && completed !== hit && !completed.growing) return completed;
     // ARCHIVE2 volumes (before about 2004) leave the header's site blank; the file name holds the requested radar.
-    const d = new Archive2Decoder(/\/([A-Z]{4})\d{8}_\d{6}[^/]*$/.exec(url)?.[1]);
-    d.feed(buf);
-    return cacheVolume(url, d.volume(), bytes.length);
+    const d = createArchive2Decoder(/\/([A-Z]{4})\d{8}_\d{6}[^/]*$/.exec(url)?.[1]);
+    try {
+      d.feed(plain);
+      return cacheVolume(url, d.volume(), bytes.length, undefined, live);
+    } finally {
+      d.dispose();
+    }
   });
 }
 
@@ -189,7 +231,7 @@ export function configureL2(a: { volumes?: number; byteBudget?: number }) {
   evict();
   let bytes = 0;
   for (const e of volumes.values()) bytes += e.bytes;
-  return { ...cacheCfg, cached: volumes.size, bytes };
+  return { ...cacheCfg, cached: volumes.size, bytes, decoder: archive2Backend() };
 }
 
 export const L2_HANDLERS: Record<string, JobHandler> = {

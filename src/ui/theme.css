@@ -161,6 +161,9 @@ button, select, input { font: inherit; color: inherit; }
 .stylegrid { display: grid; grid-template-columns: auto 180px; gap: 6px 10px; align-items: center; font-size: 11px; }
 .hud-sub { font-size: 15px !important; white-space: pre; }
 .hud-brand { position: absolute; pointer-events: none; z-index: 4; }
+.hud-credits { position: absolute; right: 6px; bottom: 4px; z-index: 5; display: flex; gap: 10px; padding: 1px 6px; border-radius: 3px; background: rgba(10, 12, 18, .7); font: 11px/16px var(--font); pointer-events: auto; }
+.hud-credits a { color: #cfe0ff; text-decoration: none; }
+.hud-credits a:hover { text-decoration: underline; }
 .credits { display: flex; gap: 10px; align-items: center; margin-top: 8px; padding: 8px 10px; border-top: 1px solid #4f4f52; font-size: 11px; color: #cfd8ee; }
 .credits b { font-size: 12px; color: #fff; }
 .credits label { display: block; margin-top: 3px; }

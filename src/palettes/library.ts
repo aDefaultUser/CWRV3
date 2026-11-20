@@ -795,7 +795,6 @@ for (const [name, text] of Object.entries(userPalettes)) {
 
 export function paletteNames(): string[] { return Object.keys(SRC); }
 export function hasPalette(name: string): boolean { return name in SRC; }
-export function paletteSource(name: string): string | undefined { return SRC[name]; }
 /** A known palette. Unknown names are an error: settings only accept known names (see SettingsStore). */
 export function getPalette(name: string): Palette {
   let p = CACHE.get(name);

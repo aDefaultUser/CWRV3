@@ -1,6 +1,6 @@
 // Network layer: byte-range validation and shared in-flight abort semantics (static review findings).
 import { describe, it, expect, afterEach, vi } from 'vitest';
-import { fetchBytes, parseContentRange } from '../src/data/net';
+import { fetchBytes, fetchText, parseContentRange, HttpError } from '../src/data/net';
 
 const body = (n: number) => Uint8Array.from({ length: n }, (_, i) => i & 255);
 function respond(status: number, data: Uint8Array, headers: Record<string, string> = {}) {
@@ -34,6 +34,23 @@ describe('fetchBytes ranges', () => {
 });
 
 describe('fetchBytes shared in-flight requests', () => {
+  it('reads an immutable file separately from the same URL still growing', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const fetch = vi.fn()
+      .mockImplementationOnce(async () => { await gate; return respond(200, body(20)); })
+      .mockImplementation(async () => respond(200, body(40)));
+    vi.stubGlobal('fetch', fetch);
+    const url = 'https://example.test/growing-volume';
+    const live = fetchBytes(url, { cache: 'none' });
+    const complete = fetchBytes(url, { cache: 'immutable' });
+    release();
+    const [partialBytes, completeBytes] = await Promise.all([live, complete]);
+    expect(partialBytes.length).toBe(20);
+    expect(completeBytes.length).toBe(40);
+    expect(fetch).toHaveBeenCalledTimes(2);
+  });
+
   it('one caller aborting does not abort the others', async () => {
     let signal: AbortSignal | undefined;
     let release!: () => void;
@@ -71,5 +88,16 @@ describe('fetchBytes 206 without an exposed Content-Range (S3 CORS)', () => {
   it('never keeps more than the requested length', async () => {
     vi.stubGlobal('fetch', async () => respond(206, body(50)));
     expect((await fetchBytes('https://example.test/h', { range: [0, 9] })).length).toBe(10);
+  });
+});
+
+describe('HTTP errors', () => {
+  it('carries the status and a Retry-After the response exposes (null when hidden cross-origin)', async () => {
+    vi.stubGlobal('fetch', async () => respond(429, body(0), { 'retry-after': '300' }));
+    const e = await fetchText('https://example.test/limited-a').catch((x) => x);
+    expect(e).toBeInstanceOf(HttpError);
+    expect([e.status, e.retryAfter, e.message]).toEqual([429, '300', 'HTTP 429 for https://example.test/limited-a']);
+    vi.stubGlobal('fetch', async () => respond(429, body(0)));
+    expect((await fetchText('https://example.test/limited-b').catch((x) => x)).retryAfter).toBeNull();
   });
 });

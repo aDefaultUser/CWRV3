@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 // Functional lines of code: handwritten runtime TypeScript/JavaScript (src/ minus src/generated, plus server/),
-// WGSL embedded in /* wgsl */ template literals (counted once, as WGSL, not as TS), and CSS separately. A line
+// WGSL embedded in /* wgsl */ template literals (counted once, as WGSL, not as TS), Rust (rust/*/src), and CSS
+// separately. A line
 // counts when it holds code after removing comments; blank and comment-only lines do not count. Excluded: tests,
 // fixtures, generated catalogs, vendored libraries/assets, build output, tools. Usage: node tools/loc.mjs [--json]
 import { readFileSync, readdirSync, statSync } from 'node:fs';
@@ -74,6 +75,24 @@ function skipRegex(text, i) {
   return text.length;
 }
 
+/** Code lines of Rust source: outside comments; a quote after `'` that is not a char literal starts a lifetime. */
+export function countRust(text) {
+  const lines = new Set();
+  let line = 0, depth = 0, str = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i], d = text[i + 1];
+    if (c === '\n') { line++; continue; }
+    if (depth) { if (c === '*' && d === '/') { depth--; i++; } else if (c === '/' && d === '*') { depth++; i++; } continue; }
+    if (str) { lines.add(line); if (c === '\\') i++; else if (c === '"') str = false; continue; }
+    if (c === '/' && d === '/') { while (i + 1 < text.length && text[i + 1] !== '\n') i++; continue; }
+    if (c === '/' && d === '*') { depth = 1; i++; continue; }
+    if (c === '"') str = true;
+    else if (c === "'" && (d === '\\' || text[i + 2] === "'")) i = Math.max(i, text.indexOf("'", i + (d === '\\' ? 3 : 2)));
+    if (!/\s/.test(c)) lines.add(line);
+  }
+  return lines.size;
+}
+
 export function countCss(text) {
   return text.replace(/\/\*[\s\S]*?\*\//g, (m) => m.replace(/[^\n]/g, '')).split('\n').filter((l) => l.trim()).length;
 }
@@ -82,15 +101,18 @@ if (process.argv[1] === new URL(import.meta.url).pathname) main();
 function main() {
 const runtime = [...walk('src').filter((f) => /\.(ts|js|mjs)$/.test(f) && !f.startsWith('src/generated/')), ...walk('server').filter((f) => /\.(mjs|js|ts)$/.test(f))];
 const css = walk('src').filter((f) => f.endsWith('.css'));
+const rust = readdirSync(join(root, 'rust')).flatMap((c) => walk(join('rust', c, 'src'))).filter((f) => f.endsWith('.rs'));
 const rows = runtime.map((f) => ({ file: relative(root, join(root, f)), ...countScript(readFileSync(join(root, f), 'utf8')) }));
 const total = rows.reduce((a, r) => ({ ts: a.ts + r.ts, wgsl: a.wgsl + r.wgsl }), { ts: 0, wgsl: 0 });
 const cssLines = css.reduce((s, f) => s + countCss(readFileSync(join(root, f), 'utf8')), 0);
 const byDir = {};
 for (const r of rows) { const k = r.file.split('/').slice(0, 2).join('/'); byDir[k] = (byDir[k] ?? 0) + r.ts + r.wgsl; }
-const result = { files: rows.length, typescriptJavascript: total.ts, wgsl: total.wgsl, functionalTotal: total.ts + total.wgsl, css: cssLines, byDirectory: byDir };
+for (const f of rust) { const k = f.split('/').slice(0, 2).join('/'); byDir[k] = (byDir[k] ?? 0) + countRust(readFileSync(join(root, f), 'utf8')); }
+const rustLines = rust.reduce((s, f) => s + countRust(readFileSync(join(root, f), 'utf8')), 0);
+const result = { files: rows.length + rust.length, typescriptJavascript: total.ts, wgsl: total.wgsl, rust: rustLines, functionalTotal: total.ts + total.wgsl + rustLines, css: cssLines, byDirectory: byDir };
 if (process.argv.includes('--json')) console.log(JSON.stringify(result, null, 1));
 else {
-  console.log(`runtime files ${result.files}: TS/JS ${total.ts} + WGSL ${total.wgsl} = ${result.functionalTotal} functional lines; CSS ${cssLines} (separate)`);
+  console.log(`runtime files ${result.files}: TS/JS ${total.ts} + WGSL ${total.wgsl} + Rust ${rustLines} = ${result.functionalTotal} functional lines; CSS ${cssLines} (separate)`);
   for (const [k, v] of Object.entries(byDir).sort((a, b) => b[1] - a[1])) console.log(`  ${k.padEnd(18)} ${v}`);
 }
 }

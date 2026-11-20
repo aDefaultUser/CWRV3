@@ -1,0 +1,31 @@
+[package]
+name = "cwrv3-archive2"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "NEXRAD Archive II (Level 2) decoder for the CWRV3 decode worker, compiled to wasm32"
+publish = false
+
+[lib]
+name = "cwrv3_archive2"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# Pure-Rust bzip2: the default backend of bzip2 0.6 is libbz2-rs-sys (no C toolchain).
+bzip2 = "=0.6.1"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+indexing_slicing = "deny"
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"

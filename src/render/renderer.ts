@@ -1,7 +1,7 @@
 // Frame orchestration: uniforms, pipelines, ordered layer drawing, probe read-back and GPU timing.
 import { Gpu } from './gpu';
 import { Camera, invert, mul } from './camera';
-import { SKY, TILES, RASTER, RADAR, LINES, POINTS, TEXT, SPRITES, POLYS } from './shaders';
+import { SKY, TILES, RASTER, RADAR, LINES, POINTS, TEXT, SPRITES, POLYS, OVERLAY_TILES } from './shaders';
 import { MAX_PANES, SINGLE_PANE, paneCount, paneOrigin, paneSize, type PaneGrid } from './panes';
 
 /**
@@ -108,6 +108,7 @@ export class Renderer {
     this.layouts = {
       sky: bgl(['u']),
       tiles: bgl(['u', 's', 'ta', 'ta', 'smp', 't', 'smp']),
+      overlayTiles: bgl(['u', 's', 'ta', 'smp']),
       raster: bgl(['u', 't', 't', 't', 't', 't', 't', 't', 't', 't', 't', 't', 'smp', 'smp']),
       radar: bgl(['u', 't', 't', 't', 'smp', 'smp', 't', 't', 't', 't']),
       lines: bgl(['s', 's']),
@@ -142,7 +143,10 @@ export class Renderer {
       mk('sky', SKY); mk('tiles', TILES); mk('raster', RASTER, { probe: true }); mk('radar', RADAR, { probe: true });
       mk('polys', POLYS); mk('lines', LINES); mk('points', POINTS); mk('text', TEXT); mk('sprites', SPRITES);
       mk('spritesAdd', SPRITES, { layout: 'sprites', fs: 'fsAdd' });
+      for (const name of Object.keys(this.lazyPipes)) delete this.pipes[name];
     };
+    // Pipelines of layers that are off by default are built when first drawn (not at start-up).
+    this.lazyPipes = { overlayTiles: () => mk('overlayTiles', OVERLAY_TILES) };
     this.buildPipelines();
     this.skyBuf = d.createBuffer({ size: 112, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.skyBG = d.createBindGroup({ layout: this.layouts.sky, entries: [{ binding: 0, resource: { buffer: this.skyBuf } }] });
@@ -157,6 +161,9 @@ export class Renderer {
   }
 
   buildPipelines: () => void = () => {};
+  private lazyPipes: Record<string, () => void> = {};
+  /** A pipeline by name, building a lazily created one on first use. */
+  pipe(name: string): GPURenderPipeline { if (!this.pipes[name]) this.lazyPipes[name]?.(); return this.pipes[name]; }
 
   /** Raster pipelines with a generated fragment entry (user RGB recipes), cached by key; errors go to `onError`. */
   private variants = new Map<string, GPURenderPipeline>();

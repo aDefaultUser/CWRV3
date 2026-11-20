@@ -34,9 +34,24 @@ export const scenePresets = {
   remove(i: number) { this.list.splice(i, 1); return save('scenePresets', this.list); },
 };
 
-export const DEFAULT_ORDER = ['basemap', 'customBackground', 'surfaceFill', 'satellite', 'satelliteExtended', 'satelliteL2', 'goesManual', 'modelFill', 'ndfd', 'winter', 'miscDiff', 'meso', 'mrms', 'nationalRadar', 'nexrad', 'customRadar', 'modelFill2', 'severeParam', 'drought', 'cpc', 'wpc', 'spcOutlook', 'fireOutlook', 'surface', 'modelContours', 'modelVectors', 'gis', 'userShapes', 'roads', 'advisories', 'warnings', 'probSevere', 'mesoDiscussions', 'tropical', 'rivers', 'fires', 'quakes', 'lsr', 'metar', 'marine', 'lightning', 'placefiles', 'radarSites', 'cities', 'annotations'];
+export const DEFAULT_ORDER = ['basemap', 'customBackground', 'worldSatellite', 'surfaceFill', 'satellite', 'satelliteExtended', 'satelliteL2', 'goesManual', 'modelFill', 'ndfd', 'winter', 'miscDiff', 'meso', 'worldRadar', 'mrms', 'nationalRadar', 'nexrad', 'customRadar', 'modelFill2', 'severeParam', 'drought', 'cpc', 'wpc', 'spcOutlook', 'fireOutlook', 'surface', 'modelContours', 'modelVectors', 'gis', 'userShapes', 'roads', 'advisories', 'warnings', 'probSevere', 'mesoDiscussions', 'tropical', 'rivers', 'fires', 'quakes', 'lsr', 'metar', 'marine', 'lightning', 'placefiles', 'radarSites', 'cities', 'annotations'];
+/**
+ * A saved layer order brought up to the current layer list: unknown IDs are dropped, the user's order of the others is
+ * kept, and each layer missing from it is inserted just above its nearest lower neighbour in the default order (the
+ * bottom when none is present), so a new layer lands where it belongs by default instead of on top of everything.
+ */
+export function mergeLayerOrder(saved: readonly string[], defaults: readonly string[] = DEFAULT_ORDER): string[] {
+  const out = saved.filter((x, i) => defaults.includes(x) && saved.indexOf(x) === i);
+  defaults.forEach((id, i) => {
+    if (out.includes(id)) return;
+    let at = 0;
+    for (let k = i - 1; k >= 0; k--) { const j = out.indexOf(defaults[k]); if (j >= 0) { at = j + 1; break; } }
+    out.splice(at, 0, id);
+  });
+  return out;
+}
 export const layerOrder = {
-  list: (() => { const l = load<string[]>('layerOrder', DEFAULT_ORDER); return [...l.filter((x) => DEFAULT_ORDER.includes(x)), ...DEFAULT_ORDER.filter((x) => !l.includes(x))]; })(),
+  list: mergeLayerOrder(load<string[]>('layerOrder', DEFAULT_ORDER)),
   set(l: string[]) { this.list = l; return save('layerOrder', l); },
 };
 
